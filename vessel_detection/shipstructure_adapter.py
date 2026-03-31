@@ -213,7 +213,11 @@ def try_predict_keypoints_chip(
         logger.warning("Keypoint ONNX not found: %s", path)
         return None, notes
 
-    sess = get_ort_session(path, providers=cfg.onnx_providers)
+    sess = get_ort_session(
+        path,
+        providers=cfg.onnx_providers,
+        quantize_dynamic=bool(cfg.quantize),
+    )
     if sess is None:
         notes.append("keypoints_onnx_session_failed")
         logger.warning(

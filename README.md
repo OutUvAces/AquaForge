@@ -71,12 +71,14 @@ Create `data/config/` and copy [`vessel_detection/config/detection.example.yaml`
 - `external_onnx_path` — path to ONNX exported from MMPose / ShipStructure (fixed square input).
 - `num_keypoints`, `onnx_input_size`, `output_layout` (`auto` | `nk2` | `nk3` | `flat_xyc`), `input_normalize` (`divide_255` | `none`).
 - `bow_index` / `stern_index` — **0-based** indices into the model’s joint order (verify after fine-tuning; SLAD uses ~**20** hull landmarks — order is defined in the ShipStructure dataset code, not hard-coded here).
+- `quantize` — if `true`, load a dynamically quantized (INT8-weight) ONNX copy for faster **CPU** inference (see README **Performance: ONNX Runtime**).
 
 ### `wake_fusion` (only fully used when `backend: ensemble`)
 
 - `enabled` — compute heuristic wake segment and/or ONNX wake direction and fuse with keypoint heading.
 - `use_auto_wake_segment` — `auto_wake`–style segment for heading.
 - `use_onnx_wake` / `onnx_wake_path` — optional ONNX wake model; if load/inference fails, warnings are recorded and fusion falls back to available cues.
+- `quantize` — optional INT8 dynamic quantization for wake ONNX on CPU (same mechanism as `keypoints.quantize`).
 
 ### Example: `legacy_hybrid` (minimal)
 
@@ -162,26 +164,28 @@ See the script docstring for ONNX I/O alignment with [`vessel_detection.shipstru
 
 ## Benchmarking (legacy vs SOTA)
 
-[`vessel_detection/evaluation.py`](vessel_detection/evaluation.py) compares **hybrid LR+chip P(vessel)** with the **rank score** from your YAML backend (`yolo_fusion`, `ensemble`, etc.) on all binary-labeled points, and runs **spot SOTA inference** on `vessel_size_feedback` rows to score heading vs `heading_deg_from_north` and mask L×W vs labeled dimensions.
+[`vessel_detection/evaluation.py`](vessel_detection/evaluation.py) builds **comparison tables** for three ranking backends — **`legacy_hybrid`**, **`yolo_fusion`**, **`ensemble`** — (Pearson **r** vs the human binary label on all training-filtered point rows).
 
-**Metrics (summary):**
+**Geometry ground truth** (from `vessel_size_feedback`):
 
-- Pearson **r** between hybrid proba / SOTA rank score and the human binary label.
-- Mean absolute **heading error** (keypoint, fused, and undirected **wake line** = min error vs two opposite directions).
-- **%** of cases where keypoint heading beats the wake line alone by more than 5° (among rows with GT heading + both predictions).
-- Mean **relative** error on length/width vs YOLO mask metrics (where GT exists).
+- **Heading:** `heading_deg_from_north` when present; otherwise a geodesic **bow→stern** heading from `dimension_markers` (same chip origin as `yolo.chip_half`).
+- **Length / width:** human, graphic, or estimated fields vs YOLO mask-derived meters (ensemble pass).
+- **Hull overlap:** mean **IoU** between the labeled hull **quad** from `dimension_markers` (full-raster) and the marine YOLO polygon (`yolo_polygon_fullres` in diagnostics), when both exist.
+
+**Heading metrics (circular):** errors are the shortest arc on the circle, expressed in **[0°, 180°]** (wake axis uses the better of two opposite directions). Reports include **MAE** and keypoint **median** error. **Ambiguity:** `%` where keypoint heading beats undirected wake by **>5°**, and `%` where **fused** heading beats undirected wake by **>5°**.
 
 **CLI** (from repo root; install `requirements-ml.txt` for YOLO-backed modes):
 
 ```bash
 py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl -o eval_report.txt
+py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl --output-json eval_report.json
 py -3 scripts/run_detection_eval.py --backend ensemble --max-spots 50
 py -3 scripts/run_detection_eval.py --labels-dir data/labels
 ```
 
 Or: `py -3 -m vessel_detection.evaluation --help`.
 
-Use `--detection-config path/to/detection.yaml` or set `VD_DETECTION_CONFIG`. The **legacy** arm always uses `legacy_hybrid` scoring; the **SOTA** arm uses the loaded YAML (optionally overridden with `--backend yolo_fusion` or `ensemble`).
+Use `--detection-config path/to/detection.yaml` or set `VD_DETECTION_CONFIG`. The evaluation run always computes all three ranking columns; `settings_backend` in JSON records your YAML reference backend.
 
 ---
 
@@ -196,7 +200,7 @@ Use `--detection-config path/to/detection.yaml` or set `VD_DETECTION_CONFIG`. Th
 
 **JSONL / export extras** (see [`vessel_detection/review_schema.py`](vessel_detection/review_schema.py)): predicted headings (`pred_heading_keypoint_deg`, `pred_heading_wake_deg`, `pred_heading_fused_deg`, heuristic vs ONNX wake variants), fusion source strings, keypoint bow/stern confidences, heading trust, and `sota_backend_snapshot`.
 
-The **SOTA overlays & heading hints** expander also shows a short **Legacy vs SOTA** caption when models are loaded: hybrid fused P(vessel), the rank score used for queue ordering, and marine YOLO confidence.
+The **SOTA overlays & heading hints** expander also shows a short **Legacy vs SOTA** caption when models are loaded, and a **Benchmark insight** line when a nearby `vessel_size_feedback` row supplies heading ground truth (circular error vs fused / keypoint predictions).
 
 ---
 
@@ -232,6 +236,19 @@ Default command runs [`scripts/train_all_models.py`](scripts/train_all_models.py
 
 - **`chip_per_candidate`** — Scales with the number of heuristic candidates; keeps UI responsive.
 - **`sliding_window_merge`** — Extra full-scene YOLO work; use when you need more recall from dense traffic or missed centers, at the cost of latency and CPU/GPU time. Tune `sliding_window_stride`, `sliding_window_max_windows`, and `sliding_window_min_conf` to balance quality and runtime.
+
+### ONNX Runtime (CPU dynamic quantization)
+
+For **keypoint** and **wake** ONNX models on CPU, set in `data/config/detection.yaml`:
+
+```yaml
+keypoints:
+  quantize: true   # INT8 dynamic weight quantization, cached under system temp
+wake_fusion:
+  quantize: true   # same for optional wake ONNX
+```
+
+Default is `false` (full-precision weights). On typical pose MLP-heavy graphs, **1.2×–2.2×** faster single-inference on CPU is common, but depends on model opset and ORT version; accuracy can shift slightly—validate with `scripts/export_shipstructure_to_onnx.py validate-chip` and your eval JSON. The **first** quantized load pays a one-time compile/write to the temp cache; subsequent Streamlit reruns reuse the session cache.
 
 ---
 

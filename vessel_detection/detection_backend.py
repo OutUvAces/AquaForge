@@ -178,6 +178,7 @@ def run_sota_spot_inference(
         "heading_wake_combined_confidence": None,
         "keypoints_xy_conf_crop": None,
         "sota_warnings": [],
+        "yolo_polygon_fullres": None,
     }
 
     if not sota_inference_requested(settings):
@@ -228,6 +229,9 @@ def run_sota_spot_inference(
         if poly_crop:
             out["yolo_polygon_crop"] = [[float(x), float(y)] for x, y in poly_crop]
         if yr.polygon_fullres:
+            out["yolo_polygon_fullres"] = [
+                [float(x), float(y)] for x, y in yr.polygon_fullres
+            ]
             dims = mask_oriented_dimensions_m(yr.polygon_fullres, tci_path)
             if dims is not None:
                 lm, wm, ar = dims
@@ -358,6 +362,7 @@ def run_sota_spot_inference(
                 confidence_prior=float(
                     settings.wake_fusion.onnx_wake_confidence_prior
                 ),
+                quantize_dynamic=bool(settings.wake_fusion.quantize),
             )
             out["wake_segment_meta_onnx"] = meta_onnx
             if h_onnx is not None:

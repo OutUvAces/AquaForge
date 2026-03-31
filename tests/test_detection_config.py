@@ -59,6 +59,21 @@ class TestDetectionConfig(unittest.TestCase):
         )
         self.assertTrue(sota_inference_requested(s))
 
+    def test_keypoints_wake_quantize_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "backend: ensemble\n"
+                "keypoints:\n  enabled: true\n  quantize: true\n"
+                "wake_fusion:\n  enabled: true\n  quantize: true\n",
+                encoding="utf-8",
+            )
+            s = load_detection_settings(root)
+            self.assertTrue(s.keypoints.quantize)
+            self.assertTrue(s.wake_fusion.quantize)
+
     def test_yolo_sliding_window_keys(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

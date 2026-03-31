@@ -1,18 +1,25 @@
 """
-Offline benchmarking: compare **legacy_hybrid** scores vs a configured SOTA backend on labeled JSONL.
+Offline benchmarking: compare **legacy_hybrid**, **yolo_fusion**, and **ensemble** on labeled JSONL.
 
-Loads point labels from ``ship_reviews.jsonl`` (and geometry ground truth from
-``vessel_size_feedback`` rows). Runs the same spot inference geometry as the review UI
-(:func:`read_locator_and_spot_rgb_matching_stretch` + :func:`run_sota_spot_inference`).
+Ground truth:
+  * Binary vessel labels on point rows (same filter as ranking training).
+  * ``vessel_size_feedback``: ``heading_deg_from_north``, human/graphic/estimated L×W,
+    ``dimension_markers`` (bow/stern-derived heading when stored heading missing, hull quad vs YOLO mask).
 
-Does **not** change runtime defaults; ``legacy_hybrid`` remains the shipped default in YAML.
+Heading errors use **circular** metrics on [0°, 360°): the smallest arc length to ground truth,
+reported in [0°, 180°] (same as :func:`angular_error_deg`). Wake axis uses the better of two
+opposite directions (:func:`best_wake_line_error_deg`).
+
+JSON export: :func:`eval_result_to_jsonable`.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import os
-from dataclasses import dataclass, replace
+import statistics
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -27,6 +34,7 @@ from vessel_detection.detection_config import (
 )
 from vessel_detection.labels import (
     iter_vessel_size_feedback,
+    paths_same_underlying_file,
     resolve_stored_asset_path,
 )
 from vessel_detection.ranking_label_agreement import collect_ranking_labeled_rows
@@ -35,14 +43,14 @@ from vessel_detection.ship_chip_mlp import load_chip_mlp_bundle
 from vessel_detection.ship_model import load_ship_classifier
 
 
-# Match review UI spot/locator ground coverage (meters).
 _EVAL_CHIP_TARGET_SIDE_M = 1000.0
 _EVAL_LOCATOR_TARGET_SIDE_M = 10000.0
 
 
 def angular_error_deg(a: float | None, b: float | None) -> float | None:
     """
-    Smallest absolute difference between two compass headings in [0, 360), in [0, 180].
+    Smallest absolute difference between two compass headings in [0, 360), in [0, 180]
+    (circular / undirected error magnitude).
     """
     if a is None or b is None:
         return None
@@ -50,6 +58,17 @@ def angular_error_deg(a: float | None, b: float | None) -> float | None:
     if x > 180.0:
         x = 360.0 - x
     return float(x)
+
+
+def circular_mae_deg(errors: list[float]) -> float | None:
+    """Mean of circular absolute errors (each already in [0, 180])."""
+    return float(sum(errors) / len(errors)) if errors else None
+
+
+def circular_median_abs_error_deg(errors: list[float]) -> float | None:
+    if not errors:
+        return None
+    return float(statistics.median(errors))
 
 
 def best_wake_line_error_deg(wake_heading: float | None, gt: float | None) -> float | None:
@@ -64,6 +83,32 @@ def best_wake_line_error_deg(wake_heading: float | None, gt: float | None) -> fl
     if e0 is None or e1 is None:
         return None
     return float(min(e0, e1))
+
+
+def mask_polygon_iou(
+    poly_a: Sequence[tuple[float, float]],
+    poly_b: Sequence[tuple[float, float]],
+) -> float | None:
+    """
+    Intersection-over-union for two simple polygons (full-raster pixels). Returns None if invalid.
+    """
+    if len(poly_a) < 3 or len(poly_b) < 3:
+        return None
+    try:
+        from shapely.geometry import Polygon
+
+        pa = Polygon([(float(x), float(y)) for x, y in poly_a])
+        pb = Polygon([(float(x), float(y)) for x, y in poly_b])
+        if not pa.is_valid:
+            pa = pa.buffer(0)
+        if not pb.is_valid:
+            pb = pb.buffer(0)
+        u = pa.union(pb).area
+        if u < 1e-12:
+            return None
+        return float(pa.intersection(pb).area / u)
+    except Exception:
+        return None
 
 
 def _corrcoef_safe(x: Sequence[float], y: Sequence[float]) -> float | None:
@@ -89,26 +134,103 @@ def _rel_dim_error(pred: float | None, gt: float | None) -> float | None:
     return abs(float(pred) - g) / g
 
 
+def _chip_origin(cx: float, cy: float, chip_half: int) -> tuple[int, int]:
+    c0 = int(round(float(cx) - float(chip_half)))
+    r0 = int(round(float(cy) - float(chip_half)))
+    return c0, r0
+
+
+def _heading_from_bow_stern_markers(
+    dimension_markers: list[dict[str, Any]],
+    tci_path: Path,
+    cx: float,
+    cy: float,
+    chip_half: int,
+) -> float | None:
+    from vessel_detection.shipstructure_adapter import heading_deg_bow_to_stern
+    from vessel_detection.vessel_markers import markers_by_role, markers_for_hull
+
+    sub = markers_for_hull(dimension_markers, 1)
+    br = markers_by_role(sub, hull_index=1)
+    bow = br.get("bow")
+    stern = br.get("stern")
+    if not bow or not stern:
+        return None
+    c0, r0 = _chip_origin(cx, cy, chip_half)
+    try:
+        bx = float(bow["x"]) + c0
+        by = float(bow["y"]) + r0
+        sx = float(stern["x"]) + c0
+        sy = float(stern["y"]) + r0
+        return float(heading_deg_bow_to_stern((bx, by), (sx, sy), tci_path))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def gt_quad_fullres_from_markers(
+    dimension_markers: list[dict[str, Any]] | None,
+    cx: float,
+    cy: float,
+    chip_half: int,
+) -> list[tuple[float, float]] | None:
+    """Hull quad from JSONL markers -> full-raster vertices (for IoU vs YOLO polygon)."""
+    if not dimension_markers:
+        return None
+    from vessel_detection.vessel_markers import quad_crop_from_dimension_markers
+
+    q = quad_crop_from_dimension_markers(dimension_markers, hull_index=1)
+    if not q or len(q) < 3:
+        return None
+    c0, r0 = _chip_origin(cx, cy, chip_half)
+    return [(float(x) + c0, float(y) + r0) for x, y in q]
+
+
+def resolve_heading_gt_from_feedback_row(
+    rec: dict[str, Any],
+    tci_path: Path,
+    cx: float,
+    cy: float,
+    chip_half: int,
+) -> tuple[float | None, str]:
+    """
+    Ground-truth heading: ``heading_deg_from_north`` if set, else geodesic bow→stern from markers.
+    """
+    h = rec.get("heading_deg_from_north")
+    if h is not None:
+        try:
+            return float(h), "heading_deg_from_north"
+        except (TypeError, ValueError):
+            pass
+    dm = rec.get("dimension_markers")
+    if isinstance(dm, list) and dm:
+        hd = _heading_from_bow_stern_markers(dm, tci_path, cx, cy, chip_half)
+        if hd is not None:
+            return hd, "bow_stern_markers"
+    return None, "none"
+
+
 @dataclass
 class VesselGeometryGroundTruth:
-    """Per-spot measurements from ``vessel_size_feedback`` (matched to a label by pixel proximity)."""
+    """Geometry supervision from one ``vessel_size_feedback`` row."""
 
     tci_path: Path
     cx: float
     cy: float
     heading_deg: float | None
+    heading_provenance: str
     length_m: float | None
     width_m: float | None
-    length_source: str  # "human" | "estimated" | "graphic"
+    length_source: str
+    dimension_markers: list[dict[str, Any]] | None = None
 
 
 def collect_vessel_geometry_ground_truth(
     jsonl_path: Path,
     project_root: Path,
+    *,
+    chip_half: int = 320,
 ) -> list[VesselGeometryGroundTruth]:
-    """
-    Build one record per ``vessel_size_feedback`` row with resolvable TCI and optional heading/dims.
-    """
+    """Parse ``vessel_size_feedback`` rows with resolvable TCI, heading, dims, and optional markers."""
     out: list[VesselGeometryGroundTruth] = []
     for rec in iter_vessel_size_feedback(jsonl_path):
         raw_tp = rec.get("tci_path")
@@ -122,8 +244,11 @@ def collect_vessel_geometry_ground_truth(
             cy = float(rec["cy_full"])
         except (KeyError, TypeError, ValueError):
             continue
-        h = rec.get("heading_deg_from_north")
-        heading = float(h) if h is not None else None
+        dm = rec.get("dimension_markers")
+        dm_list: list[dict[str, Any]] | None = dm if isinstance(dm, list) else None
+        heading, prov = resolve_heading_gt_from_feedback_row(
+            rec, path, cx, cy, chip_half
+        )
         len_m: float | None = None
         wid_m: float | None = None
         src = "estimated"
@@ -147,9 +272,11 @@ def collect_vessel_geometry_ground_truth(
                 cx=cx,
                 cy=cy,
                 heading_deg=heading,
+                heading_provenance=prov,
                 length_m=len_m,
                 width_m=wid_m,
                 length_source=src,
+                dimension_markers=dm_list,
             )
         )
     return out
@@ -160,10 +287,7 @@ def spot_window_for_eval(
     cx: float,
     cy: float,
 ) -> tuple[int, int, Path | None]:
-    """
-    Return ``(spot_col_off, spot_row_off, tci_path)`` for :func:`run_sota_spot_inference`,
-    matching review UI crop metrics.
-    """
+    """Spot (col0, row0) for :func:`run_sota_spot_inference`, matching review UI crops."""
     from vessel_detection.raster_gsd import chip_pixels_for_ground_side_meters
 
     spot_px, _, _, _ = chip_pixels_for_ground_side_meters(
@@ -190,9 +314,9 @@ def rank_score_at_point(
     settings: DetectionSettings,
 ) -> dict[str, Any]:
     """
-    Single-candidate ranking-style scores under ``settings.backend`` (legacy vs YOLO modes).
+    Single-candidate ranking-style scores under ``settings.backend``.
 
-    Returns keys: ``hybrid_proba``, ``yolo_confidence``, ``rank_score`` (value used for ordering).
+    Returns keys: ``hybrid_proba``, ``yolo_confidence``, ``rank_score``.
     """
     ph = hybrid_vessel_proba_at(tci_path, cx, cy, clf, chip_bundle)
     out: dict[str, Any] = {
@@ -229,24 +353,112 @@ def rank_score_at_point(
 
 
 @dataclass
+class HeadingErrorBucket:
+    """Circular absolute errors (degrees) accumulated for one backend."""
+
+    wake_line: list[float] = field(default_factory=list)
+    keypoint: list[float] = field(default_factory=list)
+    fused: list[float] = field(default_factory=list)
+
+
+@dataclass
 class EvalRunResult:
-    """Aggregates printed / serialized by :func:`format_eval_report`."""
+    """Benchmark aggregates; use :func:`eval_result_to_jsonable` for machine output."""
 
     n_labeled_points: int
     n_geometry_spots: int
-    n_heading_eval: int
-    n_heading_wake_eval: int
-    n_dim_eval: int
-    mean_abs_heading_error_hybrid_wake: float | None
-    mean_abs_heading_error_keypoint: float | None
-    mean_abs_heading_error_fused: float | None
-    mean_rel_length_error: float | None
-    mean_rel_width_error: float | None
+    n_heading_gt: int
+    pearson_r_by_backend: dict[str, float | None]
+    n_ranking_scored: int
+    heading_buckets: dict[str, HeadingErrorBucket]
+    rel_length_errors: list[float]
+    rel_width_errors: list[float]
+    mask_ious: list[float]
     pct_keypoint_better_than_wake_line: float | None
     n_kp_vs_wake_pairs: int
-    corr_hybrid_vs_label: float | None
-    corr_rank_sota_vs_label: float | None
+    pct_fusion_better_than_wake_ambiguity: float | None
+    n_fusion_vs_wake_pairs: int
     notes: list[str]
+
+    # Backward-compatible flat names (ensemble / primary SOTA run when applicable)
+    mean_abs_heading_error_hybrid_wake: float | None = None
+    mean_abs_heading_error_keypoint: float | None = None
+    mean_abs_heading_error_fused: float | None = None
+    median_abs_heading_error_keypoint: float | None = None
+    mean_rel_length_error: float | None = None
+    mean_rel_width_error: float | None = None
+    mean_mask_iou: float | None = None
+    n_mask_iou: int = 0
+    corr_hybrid_vs_label: float | None = None
+    corr_rank_sota_vs_label: float | None = None
+    n_heading_eval: int = 0
+    n_heading_wake_eval: int = 0
+    n_dim_eval: int = 0
+
+
+def eval_result_to_jsonable(res: EvalRunResult) -> dict[str, Any]:
+    """JSON-serializable dict (for ``--output-json``); omits long per-error lists."""
+    hb = {
+        k: {
+            "wake_line_mae_deg": circular_mae_deg(v.wake_line),
+            "wake_line_n": len(v.wake_line),
+            "keypoint_mae_deg": circular_mae_deg(v.keypoint),
+            "keypoint_median_deg": circular_median_abs_error_deg(v.keypoint),
+            "keypoint_n": len(v.keypoint),
+            "fused_mae_deg": circular_mae_deg(v.fused),
+            "fused_n": len(v.fused),
+        }
+        for k, v in res.heading_buckets.items()
+    }
+    return {
+        "n_labeled_points": res.n_labeled_points,
+        "n_geometry_spots": res.n_geometry_spots,
+        "n_heading_gt": res.n_heading_gt,
+        "pearson_r_by_backend": dict(res.pearson_r_by_backend),
+        "n_ranking_scored": res.n_ranking_scored,
+        "heading_bucket_summary": hb,
+        "mean_rel_length_error": res.mean_rel_length_error,
+        "mean_rel_width_error": res.mean_rel_width_error,
+        "rel_length_n": len(res.rel_length_errors),
+        "mean_mask_iou": res.mean_mask_iou,
+        "n_mask_iou": res.n_mask_iou,
+        "pct_keypoint_better_than_wake_line": res.pct_keypoint_better_than_wake_line,
+        "n_kp_vs_wake_pairs": res.n_kp_vs_wake_pairs,
+        "pct_fusion_better_than_wake_ambiguity": res.pct_fusion_better_than_wake_ambiguity,
+        "n_fusion_vs_wake_pairs": res.n_fusion_vs_wake_pairs,
+        "notes": list(res.notes),
+        "legacy_compat": {
+            "corr_hybrid_vs_label": res.corr_hybrid_vs_label,
+            "corr_rank_sota_vs_label": res.corr_rank_sota_vs_label,
+            "mean_abs_heading_error_keypoint": res.mean_abs_heading_error_keypoint,
+            "mean_abs_heading_error_fused": res.mean_abs_heading_error_fused,
+        },
+    }
+
+
+def _append_heading_errors(
+    bucket: HeadingErrorBucket,
+    sota: dict[str, Any],
+    gt: float,
+) -> None:
+    h_wake_combined = sota.get("heading_wake_deg")
+    h_heur = sota.get("heading_wake_heuristic_deg")
+    h_wake_for_line = (
+        float(h_wake_combined)
+        if h_wake_combined is not None
+        else (float(h_heur) if h_heur is not None else None)
+    )
+    h_kp = sota.get("heading_keypoint_deg")
+    h_f = sota.get("heading_fused_deg")
+    bw = best_wake_line_error_deg(h_wake_for_line, gt)
+    if bw is not None:
+        bucket.wake_line.append(bw)
+    ek = angular_error_deg(float(h_kp) if h_kp is not None else None, gt)
+    if ek is not None:
+        bucket.keypoint.append(ek)
+    ef = angular_error_deg(float(h_f) if h_f is not None else None, gt)
+    if ef is not None:
+        bucket.fused.append(ef)
 
 
 def run_detection_evaluation(
@@ -257,14 +469,16 @@ def run_detection_evaluation(
     max_spots: int | None = None,
 ) -> EvalRunResult:
     """
-    Run legacy hybrid vs ``settings_sota`` ranking scores on all binary-labeled points, and
-    SOTA spot inference (YOLO / keypoints / wake per YAML) on ``vessel_size_feedback`` geometry rows.
-
-    ``settings_sota.backend`` should be ``yolo_fusion`` or ``ensemble`` for meaningful SOTA
-    comparison; keypoints/wake require the corresponding YAML sections.
+    Compare ranking scores under **legacy_hybrid**, **yolo_fusion**, and **ensemble**, and
+    run spot inference for geometry metrics under **yolo_fusion** vs **ensemble** (same YAML
+    sub-sections; only ``backend`` differs).
     """
     notes: list[str] = []
-    settings_legacy = replace(settings_sota, backend="legacy_hybrid")
+    chip_half = int(settings_sota.yolo.chip_half)
+
+    s_legacy = replace(settings_sota, backend="legacy_hybrid")
+    s_yf = replace(settings_sota, backend="yolo_fusion")
+    s_ens = replace(settings_sota, backend="ensemble")
 
     mp = project_root / "data" / "models" / "ship_baseline.joblib"
     clf = load_ship_classifier(mp) if mp.is_file() else None
@@ -284,52 +498,52 @@ def run_detection_evaluation(
     if n_skip:
         notes.append(f"ranking_rows_skipped:{n_skip}")
 
-    xs_h: list[float] = []
-    ys_h: list[float] = []
-    xs_r: list[float] = []
-    ys_r: list[float] = []
+    pearson_by: dict[str, list[float]] = {"legacy_hybrid": [], "yolo_fusion": [], "ensemble": []}
+    pearson_y: dict[str, list[float]] = {"legacy_hybrid": [], "yolo_fusion": [], "ensemble": []}
     for row in rows:
-        sl = rank_score_at_point(
-            project_root,
-            row.tci_path,
-            row.cx,
-            row.cy,
-            clf,
-            chip_bundle,
-            settings_legacy,
-        )
-        ss = rank_score_at_point(
-            project_root,
-            row.tci_path,
-            row.cx,
-            row.cy,
-            clf,
-            chip_bundle,
-            settings_sota,
-        )
-        h = sl.get("hybrid_proba")
-        r = ss.get("rank_score")
-        if h is not None:
-            xs_h.append(float(h))
-            ys_h.append(float(row.y))
-        if r is not None:
-            xs_r.append(float(r))
-            ys_r.append(float(row.y))
+        for key, sett in (
+            ("legacy_hybrid", s_legacy),
+            ("yolo_fusion", s_yf),
+            ("ensemble", s_ens),
+        ):
+            ss = rank_score_at_point(
+                project_root,
+                row.tci_path,
+                row.cx,
+                row.cy,
+                clf,
+                chip_bundle,
+                sett,
+            )
+            rs = ss.get("rank_score")
+            if rs is not None:
+                pearson_by[key].append(float(rs))
+                pearson_y[key].append(float(row.y))
 
-    corr_h = _corrcoef_safe(xs_h, ys_h)
-    corr_r = _corrcoef_safe(xs_r, ys_r)
+    pearson_r: dict[str, float | None] = {}
+    n_rank = 0
+    for key in ("legacy_hybrid", "yolo_fusion", "ensemble"):
+        pearson_r[key] = _corrcoef_safe(pearson_by[key], pearson_y[key])
+        n_rank = max(n_rank, len(pearson_by[key]))
 
-    geo = collect_vessel_geometry_ground_truth(jsonl_path, project_root)
+    geo = collect_vessel_geometry_ground_truth(
+        jsonl_path, project_root, chip_half=chip_half
+    )
     if max_spots is not None:
         geo = geo[: max(0, int(max_spots))]
 
-    heading_h_wake: list[float] = []
-    heading_kp: list[float] = []
-    heading_fused: list[float] = []
+    buckets = {
+        "yolo_fusion": HeadingErrorBucket(),
+        "ensemble": HeadingErrorBucket(),
+    }
     rel_len: list[float] = []
     rel_wid: list[float] = []
+    ious: list[float] = []
     kp_better = 0
     kp_pairs = 0
+    fusion_better = 0
+    fusion_pairs = 0
+    n_heading_gt = sum(1 for g in geo if g.heading_deg is not None)
 
     for g in geo:
         try:
@@ -338,122 +552,174 @@ def run_detection_evaluation(
             notes.append(f"spot_window:{type(e).__name__}")
             continue
         scl_path: Path | None = None
-        sota = run_sota_spot_inference(
-            project_root,
-            g.tci_path,
-            g.cx,
-            g.cy,
-            settings_sota,
-            spot_col_off=int(sc0),
-            spot_row_off=int(sr0),
-            scl_path=scl_path,
+        gt_h = g.heading_deg
+        gt_quad = gt_quad_fullres_from_markers(
+            g.dimension_markers, g.cx, g.cy, chip_half
         )
-        gt = g.heading_deg
-        h_wake_combined = sota.get("heading_wake_deg")
-        h_heur = sota.get("heading_wake_heuristic_deg")
-        h_wake_for_line = (
-            float(h_wake_combined)
-            if h_wake_combined is not None
-            else (float(h_heur) if h_heur is not None else None)
-        )
-        h_kp = sota.get("heading_keypoint_deg")
-        h_f = sota.get("heading_fused_deg")
 
-        if gt is not None:
-            bw = best_wake_line_error_deg(h_wake_for_line, gt)
-            if bw is not None:
-                heading_h_wake.append(bw)
-            ek = angular_error_deg(
-                float(h_kp) if h_kp is not None else None, gt
+        for bname, sett in (("yolo_fusion", s_yf), ("ensemble", s_ens)):
+            sota = run_sota_spot_inference(
+                project_root,
+                g.tci_path,
+                g.cx,
+                g.cy,
+                sett,
+                spot_col_off=int(sc0),
+                spot_row_off=int(sr0),
+                scl_path=scl_path,
             )
-            if ek is not None:
-                heading_kp.append(ek)
-            ef = angular_error_deg(
-                float(h_f) if h_f is not None else None, gt
-            )
-            if ef is not None:
-                heading_fused.append(ef)
+            if gt_h is not None:
+                _append_heading_errors(buckets[bname], sota, float(gt_h))
 
-            if h_kp is not None and h_wake_for_line is not None:
-                e_wake_best = best_wake_line_error_deg(h_wake_for_line, gt)
-                e_kp = angular_error_deg(float(h_kp), gt)
-                if e_wake_best is not None and e_kp is not None:
-                    kp_pairs += 1
-                    if e_kp + 5.0 < e_wake_best:
-                        kp_better += 1
+            # Measurements + IoU: use either backend's YOLO polygon (same if YOLO on)
+            if bname == "ensemble":
+                gl, gw = g.length_m, g.width_m
+                if gl is not None:
+                    e = _rel_dim_error(sota.get("yolo_length_m"), gl)
+                    if e is not None:
+                        rel_len.append(e)
+                if gw is not None:
+                    e = _rel_dim_error(sota.get("yolo_width_m"), gw)
+                    if e is not None:
+                        rel_wid.append(e)
+                yolo_full = sota.get("yolo_polygon_fullres")
+                if (
+                    isinstance(yolo_full, list)
+                    and len(yolo_full) >= 3
+                    and gt_quad
+                    and len(gt_quad) >= 3
+                ):
+                    poly_y = [(float(p[0]), float(p[1])) for p in yolo_full]
+                    iou = mask_polygon_iou(gt_quad, poly_y)
+                    if iou is not None:
+                        ious.append(iou)
 
-        gl, gw = g.length_m, g.width_m
-        if gl is not None:
-            e = _rel_dim_error(sota.get("yolo_length_m"), gl)
-            if e is not None:
-                rel_len.append(e)
-        if gw is not None:
-            e = _rel_dim_error(sota.get("yolo_width_m"), gw)
-            if e is not None:
-                rel_wid.append(e)
+            if bname == "ensemble" and gt_h is not None:
+                h_kp = sota.get("heading_keypoint_deg")
+                h_wake_combined = sota.get("heading_wake_deg")
+                h_heur = sota.get("heading_wake_heuristic_deg")
+                h_wake_for_line = (
+                    float(h_wake_combined)
+                    if h_wake_combined is not None
+                    else (float(h_heur) if h_heur is not None else None)
+                )
+                h_f = sota.get("heading_fused_deg")
+                if h_kp is not None and h_wake_for_line is not None:
+                    e_wake_best = best_wake_line_error_deg(h_wake_for_line, float(gt_h))
+                    e_kp = angular_error_deg(float(h_kp), float(gt_h))
+                    if e_wake_best is not None and e_kp is not None:
+                        kp_pairs += 1
+                        if e_kp + 5.0 < e_wake_best:
+                            kp_better += 1
+                if h_f is not None and h_wake_for_line is not None:
+                    e_wake_best = best_wake_line_error_deg(h_wake_for_line, float(gt_h))
+                    e_f = angular_error_deg(float(h_f), float(gt_h))
+                    if e_wake_best is not None and e_f is not None:
+                        fusion_pairs += 1
+                        if e_f + 5.0 < e_wake_best:
+                            fusion_better += 1
 
-    def _mean(vals: list[float]) -> float | None:
-        return float(sum(vals) / len(vals)) if vals else None
-
+    ens = buckets["ensemble"]
     pct_kp = (
         (100.0 * float(kp_better) / float(kp_pairs)) if kp_pairs else None
     )
+    pct_fusion = (
+        (100.0 * float(fusion_better) / float(fusion_pairs)) if fusion_pairs else None
+    )
 
-    return EvalRunResult(
+    res = EvalRunResult(
         n_labeled_points=len(rows),
         n_geometry_spots=len(geo),
-        n_heading_eval=len(heading_kp),
-        n_heading_wake_eval=len(heading_h_wake),
-        n_dim_eval=len(rel_len),
-        mean_abs_heading_error_hybrid_wake=_mean(heading_h_wake),
-        mean_abs_heading_error_keypoint=_mean(heading_kp),
-        mean_abs_heading_error_fused=_mean(heading_fused),
-        mean_rel_length_error=_mean(rel_len),
-        mean_rel_width_error=_mean(rel_wid),
+        n_heading_gt=n_heading_gt,
+        pearson_r_by_backend=pearson_r,
+        n_ranking_scored=n_rank,
+        heading_buckets=buckets,
+        rel_length_errors=rel_len,
+        rel_width_errors=rel_wid,
+        mask_ious=ious,
         pct_keypoint_better_than_wake_line=pct_kp,
         n_kp_vs_wake_pairs=kp_pairs,
-        corr_hybrid_vs_label=corr_h,
-        corr_rank_sota_vs_label=corr_r,
+        pct_fusion_better_than_wake_ambiguity=pct_fusion,
+        n_fusion_vs_wake_pairs=fusion_pairs,
         notes=notes,
+        mean_abs_heading_error_hybrid_wake=circular_mae_deg(ens.wake_line),
+        mean_abs_heading_error_keypoint=circular_mae_deg(ens.keypoint),
+        mean_abs_heading_error_fused=circular_mae_deg(ens.fused),
+        median_abs_heading_error_keypoint=circular_median_abs_error_deg(ens.keypoint),
+        mean_rel_length_error=(
+            float(sum(rel_len) / len(rel_len)) if rel_len else None
+        ),
+        mean_rel_width_error=(
+            float(sum(rel_wid) / len(rel_wid)) if rel_wid else None
+        ),
+        mean_mask_iou=float(sum(ious) / len(ious)) if ious else None,
+        n_mask_iou=len(ious),
+        corr_hybrid_vs_label=pearson_r.get("legacy_hybrid"),
+        corr_rank_sota_vs_label=pearson_r.get(settings_sota.backend),
+        n_heading_eval=len(ens.keypoint),
+        n_heading_wake_eval=len(ens.wake_line),
+        n_dim_eval=len(rel_len),
     )
+    return res
 
 
 def format_eval_report(res: EvalRunResult, *, settings_sota: DetectionSettings) -> str:
-    lines = [
+    lines: list[str] = [
         "=== Vessel-Detector detection / SOTA evaluation ===",
-        f"SOTA backend (from config): {settings_sota.backend}",
+        f"YAML backend (reference): {settings_sota.backend}",
         "",
         f"Labeled points (binary): {res.n_labeled_points}",
-        f"Vessel geometry rows evaluated: {res.n_geometry_spots}",
+        f"Vessel geometry rows: {res.n_geometry_spots}",
+        f"Rows with heading GT (stored or bow/stern markers): {res.n_heading_gt}",
         "",
-        "## Ranking / confidence vs human binary label",
-        f"Pearson r (hybrid P(vessel) vs label): {res.corr_hybrid_vs_label}",
-        f"Pearson r (SOTA rank_score vs label): {res.corr_rank_sota_vs_label}",
+        "### Ranking quality (Pearson r vs human binary label)",
         "",
-        "## Heading vs ground truth (vessel_size_feedback.heading_deg_from_north)",
-        f"N with wake-line error (min of two directions, deg): {res.n_heading_wake_eval}",
-        f"N with keypoint heading error: {res.n_heading_eval}",
-        f"Mean |error| wake line (min dir, deg): {res.mean_abs_heading_error_hybrid_wake}",
-        f"Mean |error| keypoint heading (deg): {res.mean_abs_heading_error_keypoint}",
-        f"Mean |error| fused heading (deg): {res.mean_abs_heading_error_fused}",
-        "",
-        "## Keypoint vs undirected wake (strict improvement: kp error + 5 deg < best wake error)",
-        f"Pairs (kp + wake + GT): {res.n_kp_vs_wake_pairs}",
-        f"% kp better than wake line alone: {res.pct_keypoint_better_than_wake_line}",
-        "",
-        "## YOLO mask L/W vs labeled length (relative abs error)",
-        f"N length: {res.n_dim_eval}",
-        f"Mean rel. length error: {res.mean_rel_length_error}",
-        f"Mean rel. width error: {res.mean_rel_width_error}",
-        "",
-        "## Notes",
+        "| Backend        | Pearson r |",
+        "|----------------|-----------|",
     ]
+    for k in ("legacy_hybrid", "yolo_fusion", "ensemble"):
+        lines.append(f"| {k:14} | {res.pearson_r_by_backend.get(k)} |")
+    lines.extend(
+        [
+            "",
+            "### Heading accuracy (circular MAE deg, [0..180])",
+            "",
+            "| Source / backend   | Wake line | Keypoint MAE | KP median | Fused MAE |",
+            "|--------------------|-----------|--------------|-----------|-----------|",
+        ]
+    )
+    for bkey, label in (("yolo_fusion", "yolo_fusion"), ("ensemble", "ensemble")):
+        b = res.heading_buckets.get(bkey) or HeadingErrorBucket()
+        lines.append(
+            f"| {label:18} | {circular_mae_deg(b.wake_line)} | "
+            f"{circular_mae_deg(b.keypoint)} | "
+            f"{circular_median_abs_error_deg(b.keypoint)} | "
+            f"{circular_mae_deg(b.fused)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "### Ambiguity resolution (strict +5 deg margin vs undirected wake)",
+            f"% keypoint beats wake line alone: {res.pct_keypoint_better_than_wake_line} "
+            f"(n={res.n_kp_vs_wake_pairs})",
+            f"% fused beats wake line alone: {res.pct_fusion_better_than_wake_ambiguity} "
+            f"(n={res.n_fusion_vs_wake_pairs})",
+            "",
+            "### Measurement accuracy (ensemble YOLO mask vs labeled L/W, mean rel. abs error)",
+            f"N length: {res.n_dim_eval}  mean rel. length err: {res.mean_rel_length_error}",
+            f"Mean rel. width err: {res.mean_rel_width_error}",
+            "",
+            "### Hull overlap (mean IoU, labeled quad vs YOLO polygon full-res)",
+            f"N: {res.n_mask_iou}  mean IoU: {res.mean_mask_iou}",
+            "",
+            "### Notes",
+        ]
+    )
     lines.extend(f"- {n}" for n in res.notes) if res.notes else lines.append("- (none)")
     return "\n".join(lines) + "\n"
 
 
 def iter_jsonl_files_in_dir(folder: Path) -> Iterator[Path]:
-    """Yield ``*.jsonl`` files directly under ``folder`` (non-recursive)."""
     if not folder.is_dir():
         return
     for p in sorted(folder.glob("*.jsonl")):
@@ -461,56 +727,86 @@ def iter_jsonl_files_in_dir(folder: Path) -> Iterator[Path]:
             yield p
 
 
+def spot_geometry_gt_from_labels(
+    labels_path: Path,
+    project_root: Path,
+    tci_path_str: str,
+    cx: float,
+    cy: float,
+    *,
+    chip_half: int = 320,
+    match_tol_px: float = 4.0,
+) -> dict[str, Any] | None:
+    """
+    Match a ``vessel_size_feedback`` row near (cx, cy) on the same TCI; return heading GT if any.
+
+    Used by the review UI for optional benchmark hints.
+    """
+    tci = Path(tci_path_str)
+    try:
+        tci_res = tci.resolve()
+    except OSError:
+        tci_res = tci
+    tol2 = float(match_tol_px) ** 2
+    best: dict[str, Any] | None = None
+    best_d = float("inf")
+    for rec in iter_vessel_size_feedback(labels_path):
+        raw = rec.get("tci_path")
+        if not raw:
+            continue
+        p = resolve_stored_asset_path(str(raw), project_root)
+        if p is None or not paths_same_underlying_file(str(p), tci_res, project_root):
+            continue
+        try:
+            rx = float(rec["cx_full"])
+            ry = float(rec["cy_full"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        d2 = (rx - cx) ** 2 + (ry - cy) ** 2
+        if d2 <= tol2 and d2 < best_d:
+            best_d = d2
+            best = rec
+    if best is None:
+        return None
+    path = resolve_stored_asset_path(str(best["tci_path"]), project_root)
+    if path is None:
+        return None
+    h, prov = resolve_heading_gt_from_feedback_row(
+        best, path, float(best["cx_full"]), float(best["cy_full"]), chip_half
+    )
+    if h is None:
+        return None
+    return {"heading_deg": float(h), "provenance": prov}
+
+
 def main_cli(argv: list[str] | None = None) -> int:
-    """CLI entry: ``python -m vessel_detection.evaluation``."""
     import argparse
 
     ap = argparse.ArgumentParser(
         description="Benchmark legacy hybrid vs SOTA backend on labeled JSONL."
     )
-    ap.add_argument(
-        "--project-root",
-        type=Path,
-        default=Path.cwd(),
-        help="Repo root (default: cwd)",
-    )
+    ap.add_argument("--project-root", type=Path, default=Path.cwd())
     ap.add_argument(
         "--jsonl",
         type=Path,
         default=None,
-        help="Path to ship_reviews.jsonl (default: <root>/data/labels/ship_reviews.jsonl)",
+        help="ship_reviews.jsonl (default: <root>/data/labels/ship_reviews.jsonl)",
     )
-    ap.add_argument(
-        "--labels-dir",
-        type=Path,
-        default=None,
-        help="If set, run once per *.jsonl in this directory (non-recursive).",
-    )
-    ap.add_argument(
-        "--detection-config",
-        type=Path,
-        default=None,
-        help="Override detection YAML (else VD_DETECTION_CONFIG or data/config/detection.yaml)",
-    )
+    ap.add_argument("--labels-dir", type=Path, default=None)
+    ap.add_argument("--detection-config", type=Path, default=None)
     ap.add_argument(
         "--backend",
         type=str,
         default=None,
         choices=("yolo_fusion", "ensemble"),
-        help="Override backend for SOTA arm only (legacy arm stays legacy_hybrid)",
     )
+    ap.add_argument("--max-spots", type=int, default=None)
+    ap.add_argument("-o", "--output", type=Path, default=None)
     ap.add_argument(
-        "--max-spots",
-        type=int,
-        default=None,
-        help="Cap geometry rows for faster smoke tests",
-    )
-    ap.add_argument(
-        "-o",
-        "--output",
+        "--output-json",
         type=Path,
         default=None,
-        help="Write report to this file (UTF-8)",
+        help="Write structured results as JSON (UTF-8)",
     )
     args = ap.parse_args(argv)
 
@@ -527,7 +823,7 @@ def main_cli(argv: list[str] | None = None) -> int:
     if settings_sota.backend not in {"yolo_fusion", "ensemble", "yolo_only"}:
         print(
             "Warning: detection.yaml backend is not yolo_fusion/ensemble; "
-            "SOTA arm may match legacy. Use --backend yolo_fusion or ensemble.",
+            "reference column may match legacy. Use --backend if needed.",
             flush=True,
         )
 
@@ -541,7 +837,8 @@ def main_cli(argv: list[str] | None = None) -> int:
         jp = args.jsonl or (root / "data" / "labels" / "ship_reviews.jsonl")
         jsonl_paths = [Path(jp).resolve()]
 
-    reports: list[str] = []
+    text_reports: list[str] = []
+    json_payload: list[dict[str, Any]] = []
     for jp in jsonl_paths:
         if not jp.is_file():
             print(f"Skip missing: {jp}", flush=True)
@@ -553,13 +850,23 @@ def main_cli(argv: list[str] | None = None) -> int:
             settings_sota=settings_sota,
             max_spots=args.max_spots,
         )
-        reports.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
+        text_reports.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
+        jd = eval_result_to_jsonable(res)
+        jd["jsonl"] = str(jp)
+        jd["settings_backend"] = settings_sota.backend
+        json_payload.append(jd)
 
-    full = "\n".join(reports)
+    full = "\n".join(text_reports)
     print(full, flush=True)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(full, encoding="utf-8")
+    if args.output_json:
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        args.output_json.write_text(
+            json.dumps(json_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     return 0
 
 

@@ -69,6 +69,7 @@ from vessel_detection.detection_config import (
     sota_inference_requested,
     yolo_requested,
 )
+from vessel_detection.evaluation import angular_error_deg, spot_geometry_gt_from_labels
 from vessel_detection.review_overlay import (
     annotate_locator_spot_outline,
     annotate_spot_detection_center,
@@ -1579,6 +1580,32 @@ def _render_review_deck(
                     "With `legacy_hybrid`, queue order matches hybrid only; with "
                     "`yolo_fusion` / `ensemble`, rank score blends or replaces hybrid per YAML."
                 )
+            _gt_hint = spot_geometry_gt_from_labels(
+                labels_path,
+                ROOT,
+                tci_loaded,
+                float(cx),
+                float(cy),
+                chip_half=int(det_settings.yolo.chip_half),
+            )
+            if _gt_hint and isinstance(sota, dict):
+                gth = float(_gt_hint["heading_deg"])
+                prov = str(_gt_hint.get("provenance", ""))
+                _ins_parts: list[str] = []
+                if sota.get("heading_fused_deg") is not None:
+                    ef = angular_error_deg(float(sota["heading_fused_deg"]), gth)
+                    if ef is not None:
+                        _ins_parts.append(f"fused vs GT **{ef:.1f}°**")
+                if sota.get("heading_keypoint_deg") is not None:
+                    ek = angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
+                    if ek is not None:
+                        _ins_parts.append(f"keypoint vs GT **{ek:.1f}°**")
+                if _ins_parts:
+                    st.caption(
+                        "**Benchmark insight** (nearby `vessel_size_feedback` heading, "
+                        f"source `{prov}`): "
+                        + "; ".join(_ins_parts)
+                    )
             if sota.get("yolo_confidence") is not None:
                 st.metric("Marine YOLO confidence", f"{float(sota['yolo_confidence']):.3f}")
             if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:

@@ -58,6 +58,8 @@ class KeypointsSection:
     min_bow_stern_confidence: float = 0.25
     # Optional ORT providers list; null → CPU only.
     onnx_providers: list[str] | None = None
+    # If true, load a dynamically quantized (INT8 weights) copy for faster CPU inference.
+    quantize: bool = False
 
 
 @dataclass
@@ -80,6 +82,8 @@ class WakeFusionSection:
     # Tilt blend toward the source with higher self-reported quality (kp vs wake).
     adaptive_fusion: bool = True
     adaptive_fusion_min_quality: float = 0.15
+    # Dynamic INT8 weight quantization for wake ONNX on CPU (see onnx_session_cache).
+    quantize: bool = False
 
 
 @dataclass
@@ -156,6 +160,7 @@ def _parse_keypoints(d: dict[str, Any] | None) -> KeypointsSection:
             d.get("min_bow_stern_confidence", KeypointsSection.min_bow_stern_confidence)
         ),
         onnx_providers=onnx_providers_list,
+        quantize=bool(d.get("quantize", False)),
     )
 
 
@@ -196,6 +201,7 @@ def _parse_wake(d: dict[str, Any] | None) -> WakeFusionSection:
                 WakeFusionSection.adaptive_fusion_min_quality,
             )
         ),
+        quantize=bool(d.get("quantize", False)),
     )
 
 

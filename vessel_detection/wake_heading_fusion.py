@@ -270,6 +270,7 @@ def heading_from_wake_onnx_chip(
     input_size: int,
     layout: str,
     confidence_prior: float = 0.72,
+    quantize_dynamic: bool = False,
 ) -> tuple[float | None, dict[str, Any]]:
     """
     Run an ONNX wake-direction model on the same chip geometry as YOLO/keypoints.
@@ -293,7 +294,7 @@ def heading_from_wake_onnx_chip(
         logger.warning("Wake ONNX file missing: %s", path)
         return None, meta
 
-    sess = get_ort_session(path)
+    sess = get_ort_session(path, quantize_dynamic=bool(quantize_dynamic))
     if sess is None:
         meta["error"] = "ort_session_failed"
         logger.warning("Wake ONNX session failed (onnxruntime?): %s", path)

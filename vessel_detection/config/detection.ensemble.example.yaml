@@ -47,6 +47,7 @@ keypoints:
   min_point_confidence: 0.12
   min_bow_stern_confidence: 0.25
   # onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+  # quantize: true   # optional faster CPU inference (see README Performance)
 
 wake_fusion:
   enabled: true
@@ -66,3 +67,4 @@ wake_fusion:
   # Tilt blend toward the stronger of keypoint vs wake quality signals.
   adaptive_fusion: true
   adaptive_fusion_min_quality: 0.15
+  # quantize: true   # optional for wake ONNX on CPU

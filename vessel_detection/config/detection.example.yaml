@@ -46,6 +46,8 @@ keypoints:
   min_point_confidence: 0.12
   min_bow_stern_confidence: 0.25
   # onnx_providers: ["CPUExecutionProvider"]
+  # Dynamic INT8 weight quantization for faster CPU inference (cached under system temp).
+  quantize: false
 
 wake_fusion:
   enabled: false
@@ -62,3 +64,4 @@ wake_fusion:
   onnx_wake_confidence_prior: 0.72
   adaptive_fusion: true
   adaptive_fusion_min_quality: 0.15
+  quantize: false
