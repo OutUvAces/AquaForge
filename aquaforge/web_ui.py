@@ -846,6 +846,42 @@ def _session_init() -> None:
         st.session_state.vd_advanced_spot_hints = False
 
 
+def _streamlit_torch_installed() -> bool:
+    """True if the Streamlit process can ``import torch`` (must match training subprocess interpreter)."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _count_aquaforge_training_rows(labels_path: Path, project_root: Path) -> int:
+    """Rows :func:`iter_aquaforge_samples` would use (vessel + markers / vessel_size_feedback)."""
+    if not labels_path.is_file():
+        return 0
+    from aquaforge.unified.dataset import iter_aquaforge_samples
+
+    return sum(1 for _ in iter_aquaforge_samples(labels_path, project_root))
+
+
+def _explain_aquaforge_train_failure(code: int, stderr_txt: str, stdout_txt: str) -> str | None:
+    """Map ``train_aquaforge.py`` exit codes / markers to human text (see script ``AQUAFORGE_EXIT:*``)."""
+    blob = f"{stderr_txt or ''}\n{stdout_txt or ''}"
+    if code == 11 or "AQUAFORGE_EXIT:missing_torch" in blob:
+        return (
+            "**PyTorch is not installed** for the Python that runs training.\n\n"
+            f"This Streamlit server uses:\n`{sys.executable}`\n\n"
+            "Install into the **same** environment, then restart the app:\n\n"
+            f"`{sys.executable} -m pip install -r requirements-ml.txt`"
+        )
+    if code == 12 or "AQUAFORGE_EXIT:insufficient_rows" in blob:
+        return (
+            "**Not enough training rows.** Save at least **two** **Ship** reviews with hull/dimension markers, "
+            "or add **vessel_size_feedback** rows with a valid scene path — see the trainer message below for counts."
+        )
+    return None
+
+
 def _subprocess_train_aquaforge(
     project_root: Path,
     labels_path: Path,
@@ -896,12 +932,24 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
     except ValueError:
         rel_lbl = str(labels_path)
     st.caption(f"Labels: `{rel_lbl}`")
+    _torch_ok = _streamlit_torch_installed()
+    _n_af = _count_aquaforge_training_rows(labels_path, project_root)
+    if not _torch_ok:
+        st.warning(
+            f"**PyTorch missing** in this app (`{sys.executable}`). Install: "
+            f"`{sys.executable} -m pip install -r requirements-ml.txt` then restart Streamlit."
+        )
+    elif labels_path.is_file() and _n_af < 2:
+        st.warning(
+            f"**Training rows:** {_n_af} usable chip(s) in labels — need **≥2** vessel rows with markers or size feedback."
+        )
     if st.button(
         "Retrain AquaForge",
         type="primary",
         use_container_width=True,
         key="vd_retrain_aquaforge_btn",
         help="Runs train_aquaforge.py with defaults on the current JSONL (can take a long time).",
+        disabled=(not _torch_ok) or (_n_af < 2) or (not labels_path.is_file()),
     ):
         if not labels_path.is_file():
             st.warning("No labels file yet — save a few reviews first.")
@@ -924,7 +972,8 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
                 st.rerun()
             else:
                 status.update(label="Training failed", state="error")
-                st.error(f"Exit code {code}")
+                _hint = _explain_aquaforge_train_failure(code, err, out)
+                st.error(_hint or f"Exit code {code}")
                 if err.strip():
                     st.code(err, language="text")
                 elif out.strip():
@@ -946,21 +995,36 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
     except ValueError:
         rel_exp = expected_aquaforge_checkpoint_path(project_root)
     st.caption(
-        f"No weights found yet. A short run creates **`{rel_exp}`** (and ONNX for optional CPU ORT). "
-        "You need **at least two** saved vessel reviews with markers or size feedback."
+        f"No weights found yet. A short run creates **`{rel_exp}`** (and ONNX for optional CPU ORT)."
     )
     train_py = project_root / "scripts" / "train_aquaforge.py"
     if not train_py.is_file():
         return
+    _torch_ok = _streamlit_torch_installed()
+    _n_af = _count_aquaforge_training_rows(labels_path, project_root)
+    if not _torch_ok:
+        st.warning(
+            f"**Install PyTorch first** — this app runs as:\n`{sys.executable}`\n\n"
+            f"Run in a terminal:\n`{sys.executable} -m pip install -r requirements-ml.txt`\n\n"
+            "Then **restart Streamlit** so training uses the same interpreter."
+        )
+    elif not labels_path.is_file():
+        st.info("No labels file yet — save reviews to create it.")
+    elif _n_af < 2:
+        st.warning(
+            f"**{_n_af}** AquaForge training row(s) in your labels file — need **≥2**. "
+            "Use **Ship** and place hull markers, or ensure **vessel_size_feedback** rows reference an existing scene."
+        )
     if st.button(
         "Run quick first training (≈4 epochs)",
         type="secondary",
         use_container_width=True,
         key="vd_train_first_aquaforge_btn",
-        help="Faster than full retrain; still requires pip install -r requirements-ml.txt",
+        help="Requires PyTorch (requirements-ml.txt) and ≥2 training rows.",
+        disabled=(not _torch_ok) or (not labels_path.is_file()) or (_n_af < 2),
     ):
         if not labels_path.is_file():
-            st.warning("Save at least two vessel labels first (same JSONL the app uses).")
+            st.warning("No labels file yet.")
             return
         with st.status("First AquaForge training…", expanded=True) as status:
             try:
@@ -985,7 +1049,8 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
                 st.rerun()
             else:
                 status.update(label="Training failed", state="error")
-                st.error(f"Exit code {code} — need ≥2 training rows and ML dependencies.")
+                _hint = _explain_aquaforge_train_failure(code, err, out)
+                st.error(_hint or f"Exit code {code}")
                 if err.strip():
                     st.code(err, language="text")
                 elif out.strip():

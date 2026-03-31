@@ -151,8 +151,16 @@ def main() -> None:
         import torch
         from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
     except ImportError as e:
-        print("Install requirements-ml.txt (torch).", file=sys.stderr)
-        raise SystemExit(1) from e
+        # Exit 11: UI maps to "install torch for this interpreter" (same Python as Streamlit).
+        print("AQUAFORGE_EXIT:missing_torch", file=sys.stderr)
+        print(
+            "PyTorch is not installed for this Python executable.\n"
+            f"  Interpreter: {sys.executable}\n"
+            "  Fix: run (same command you use to start Streamlit):\n"
+            f"    \"{sys.executable}\" -m pip install -r requirements-ml.txt\n",
+            file=sys.stderr,
+        )
+        raise SystemExit(11) from e
 
     from aquaforge.unified.constants import AQUAFORGE_FORMAT_VERSION, NUM_LANDMARKS
     from aquaforge.unified.dataset import (
@@ -190,11 +198,16 @@ def main() -> None:
         else []
     )
     if len(rows) < 2:
+        # Exit 12: UI maps to "save more vessel labels".
+        print("AQUAFORGE_EXIT:insufficient_rows", file=sys.stderr)
         print(
-            f"Need at least 2 labeled vessel rows in {jp} (vessel + markers / vessel_size_feedback).",
+            f"Need at least 2 AquaForge training rows in:\n  {jp}\n"
+            f"Found: {len(rows)}.\n"
+            "Each row must be review_category=vessel with dimension markers, or a "
+            "vessel_size_feedback entry with a readable TCI path.\n",
             file=sys.stderr,
         )
-        raise SystemExit(1)
+        raise SystemExit(12)
 
     print(
         "\n=== AquaForge training ===\n"
