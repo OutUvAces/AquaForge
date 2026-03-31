@@ -147,6 +147,15 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    _py = Path(sys.executable).resolve()
+    vi = sys.version_info
+    print(
+        "=== AquaForge trainer ===\n"
+        f"  Python executable: {_py}\n"
+        f"  Version: {vi.major}.{vi.minor}.{vi.micro}  platform={sys.platform}\n",
+        flush=True,
+    )
+
     try:
         import torch
         from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
@@ -155,9 +164,9 @@ def main() -> None:
         print("AQUAFORGE_EXIT:missing_torch", file=sys.stderr)
         print(
             "PyTorch is not installed for this Python executable.\n"
-            f"  Interpreter: {sys.executable}\n"
-            f"  Python: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
-            "  Fix: pip install -r requirements-ml.txt (same Python as Streamlit).\n"
+            f"  Interpreter: {_py}\n"
+            "  Run exactly (from project root):\n"
+            f'  "{_py}" -m pip install -r requirements-ml.txt\n'
             "  If pip finds no torch wheel: use Python 3.12 (64-bit) in a venv — see requirements-ml.txt header.\n",
             file=sys.stderr,
         )
@@ -448,9 +457,10 @@ def main() -> None:
         exp_script = project_root / "scripts" / "export_aquaforge_onnx.py"
         if exp_script.is_file() and out.is_file():
             print("Exporting ONNX (CPU, optional for ORT inference) …", flush=True)
+            _exe = str(Path(sys.executable).resolve())
             er = subprocess.run(
-                [sys.executable, str(exp_script), "--checkpoint", str(out)],
-                cwd=str(project_root),
+                [_exe, str(exp_script.resolve()), "--checkpoint", str(out)],
+                cwd=str(project_root.resolve()),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

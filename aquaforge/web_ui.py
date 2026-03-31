@@ -846,6 +846,16 @@ def _session_init() -> None:
         st.session_state.vd_advanced_spot_hints = False
 
 
+def _streamlit_python_exe() -> str:
+    """
+    Absolute path to the interpreter running **this** Streamlit process.
+
+    Training and pip installs must use this exact executable so there is no ``py -3`` vs ``python``
+    mismatch on Windows.
+    """
+    return str(Path(sys.executable).resolve())
+
+
 def _streamlit_torch_installed() -> bool:
     """True if the Streamlit process can ``import torch`` (must match training subprocess interpreter)."""
     try:
@@ -860,11 +870,14 @@ def _torch_install_help_markdown() -> str:
     Shown when PyTorch is missing. Warns on very new CPython: wheels often lag (e.g. 3.14).
     """
     v = sys.version_info
+    py = _streamlit_python_exe()
     lines = [
-        f"**Install** (project folder in terminal):",
-        f"`{sys.executable} -m pip install -r requirements-ml.txt`",
+        "**Same Python everywhere:** training runs as the executable below (not a different ``py`` launcher).",
         "",
-        "Then **restart Streamlit** with the same Python.",
+        f"**Manual install** (project folder in a terminal):",
+        f"`{py} -m pip install -r requirements-ml.txt`",
+        "",
+        "Or use **Install ML dependencies** — the app will refresh when pip finishes (no separate Python needed).",
     ]
     if v.major == 3 and v.minor >= 14:
         lines.extend(
@@ -918,27 +931,48 @@ def _explain_aquaforge_train_failure(code: int, stderr_txt: str, stdout_txt: str
     return None
 
 
+def _subprocess_pip_install_ml(project_root: Path) -> tuple[int, str, str]:
+    """``pip install -r requirements-ml.txt`` using :func:`_streamlit_python_exe` only."""
+    req = (project_root / "requirements-ml.txt").resolve()
+    py = _streamlit_python_exe()
+    if not req.is_file():
+        return -1, "", f"Missing {req}"
+    cmd = [py, "-m", "pip", "install", "-r", str(req)]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(project_root.resolve()),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    tail_o = (proc.stdout or "")[-16000:]
+    tail_e = (proc.stderr or "")[-16000:]
+    return int(proc.returncode), tail_o, tail_e
+
+
 def _subprocess_train_aquaforge(
     project_root: Path,
     labels_path: Path,
     extra_args: list[str],
 ) -> tuple[int, str, str]:
-    """Run ``scripts/train_aquaforge.py``; returns (exit_code, stdout_tail, stderr_tail)."""
+    """Run ``scripts/train_aquaforge.py`` with :func:`_streamlit_python_exe` (same as Streamlit)."""
     script = project_root / "scripts" / "train_aquaforge.py"
     if not script.is_file():
         return -1, "", f"Missing {script}"
+    py = _streamlit_python_exe()
     cmd = [
-        sys.executable,
-        str(script),
+        py,
+        str(script.resolve()),
         "--project-root",
-        str(project_root),
+        str(project_root.resolve()),
         "--jsonl",
-        str(labels_path),
+        str(labels_path.resolve()),
         *extra_args,
     ]
     proc = subprocess.run(
         cmd,
-        cwd=str(project_root),
+        cwd=str(project_root.resolve()),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -947,6 +981,51 @@ def _subprocess_train_aquaforge(
     tail_o = (proc.stdout or "")[-12000:]
     tail_e = (proc.stderr or "")[-12000:]
     return int(proc.returncode), tail_o, tail_e
+
+
+def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None:
+    """Shown when ``torch`` is missing: copy-paste command + one-click pip using Streamlit's Python."""
+    py = _streamlit_python_exe()
+    req = project_root / "requirements-ml.txt"
+    st.caption("**Copy/paste** (run from the project folder):")
+    st.code(f'"{py}" -m pip install -r requirements-ml.txt', language="text")
+    if not req.is_file():
+        st.error(f"Missing `{req}` — add requirements-ml.txt to the project.")
+        return
+    if st.button(
+        "Install ML dependencies",
+        type="primary",
+        use_container_width=True,
+        key=f"vd_pip_ml_install_{key_suffix}",
+        help="Uses the same Python as this Streamlit app. Can take several minutes.",
+    ):
+        with st.status("Installing ML stack (pip)…", expanded=True) as pip_status:
+            pip_status.write(f"Interpreter: `{py}`")
+            pip_status.write(f"Requirements: `{req.name}`")
+            try:
+                code, out, err = _subprocess_pip_install_ml(project_root)
+            except OSError as e:
+                pip_status.update(label="Install failed to start", state="error")
+                st.error(str(e))
+                return
+            if code == 0:
+                pip_status.update(label="Install finished", state="complete")
+                if out.strip():
+                    st.code(out[-8000:], language="text")
+                st.session_state["_vd_af_train_flash"] = (
+                    "ML dependencies installed with this app's Python — you can run training below."
+                )
+                st.rerun()
+            else:
+                pip_status.update(label="pip install failed", state="error")
+                st.error(
+                    f"pip exited with **{code}**. On Python 3.14+ you may need **Python 3.12** "
+                    "(see requirements-ml.txt). Details:"
+                )
+                if err.strip():
+                    st.code(err, language="text")
+                elif out.strip():
+                    st.code(out, language="text")
 
 
 def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> None:
@@ -971,10 +1050,13 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
     _torch_ok = _streamlit_torch_installed()
     _n_af = _count_aquaforge_training_rows(labels_path, project_root)
     if not _torch_ok:
-        st.warning(
-            f"**PyTorch missing** — Streamlit is using:\n`{sys.executable}`\n\n"
-            + _torch_install_help_markdown()
+        st.info(
+            "**PyTorch is not installed** in the Python process running this page. "
+            "Training uses the **same** interpreter — no separate `python` / `py` mismatch.\n\n"
+            f"`{_streamlit_python_exe()}`"
         )
+        st.markdown(_torch_install_help_markdown())
+        _render_ml_pip_install_block(project_root, key_suffix="retrain")
     elif labels_path.is_file() and _n_af < 2:
         st.warning(
             f"**Training rows:** {_n_af} usable chip(s) in labels — need **≥2** vessel rows with markers or size feedback."
@@ -991,6 +1073,7 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
             st.warning("No labels file yet — save a few reviews first.")
             return
         with st.status("Training AquaForge…", expanded=True) as status:
+            status.write(f"Python: `{_streamlit_python_exe()}`")
             try:
                 code, out, err = _subprocess_train_aquaforge(project_root, labels_path, [])
             except OSError as e:
@@ -1039,11 +1122,12 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
     _torch_ok = _streamlit_torch_installed()
     _n_af = _count_aquaforge_training_rows(labels_path, project_root)
     if not _torch_ok:
-        st.warning(
-            "**Install PyTorch first** — this app runs as:\n"
-            f"`{sys.executable}`\n\n"
-            + _torch_install_help_markdown()
+        st.info(
+            "**Install PyTorch** so quick training can run. The subprocess uses this **exact** interpreter:\n\n"
+            f"`{_streamlit_python_exe()}`"
         )
+        st.markdown(_torch_install_help_markdown())
+        _render_ml_pip_install_block(project_root, key_suffix="first")
     elif not labels_path.is_file():
         st.info("No labels file yet — save reviews to create it.")
     elif _n_af < 2:
@@ -1063,6 +1147,7 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
             st.warning("No labels file yet.")
             return
         with st.status("First AquaForge training…", expanded=True) as status:
+            status.write(f"Python: `{_streamlit_python_exe()}`")
             try:
                 code, out, err = _subprocess_train_aquaforge(
                     project_root,
