@@ -195,7 +195,18 @@ def main() -> None:
 
     use_sampler = not bool(args.no_priority_sampling)
     if use_sampler:
-        wts = torch.tensor([max(float(s.al_priority), 0.25) for s in rows], dtype=torch.double)
+        wts = torch.tensor(
+            [
+                max(float(s.al_priority), 0.25)
+                * (
+                    1.0
+                    + 0.11
+                    * min(1.0, float(getattr(s, "review_uncertainty", 0.0)))
+                )
+                for s in rows
+            ],
+            dtype=torch.double,
+        )
         sampler = WeightedRandomSampler(wts, num_samples=len(rows), replacement=True)
         dl = DataLoader(
             _DS(rows),

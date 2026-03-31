@@ -235,6 +235,15 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.res_fine_scale = nn.Parameter(torch.tensor(0.28))
         self.res_mid_scale = nn.Parameter(torch.tensor(0.2))
         self.fuse = _HarmonizerFuseDS(self.hidden * 2, self.hidden)
+        # Channel recalibration on the fused map (S2-specific: emphasize hull-relevant channels).
+        se_c = max(8, self.hidden // 8)
+        self.fuse_se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(self.hidden, se_c, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(se_c, self.hidden, 1, bias=True),
+            nn.Sigmoid(),
+        )
         self.seg_head = nn.Conv2d(self.hidden, 1, 1, bias=False)
         self.kp_hm_head = nn.Conv2d(self.hidden, n_landmarks, 1, bias=False)
         self.pool = nn.AdaptiveAvgPool2d(1)
@@ -249,22 +258,23 @@ class AquaForgeUnifiedYOLO(nn.Module):
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
         up5 = F.interpolate(p5, size=target_hw, mode="nearest")
-        g = torch.sigmoid(self.scale_gate_logits).view(3, 1, 1, 1)
-        context = g[0] * p3 + g[1] * up4 + g[2] * up5
+        gw = torch.sigmoid(self.scale_gate_logits).view(3, 1, 1, 1)
+        context = gw[0] * p3 + gw[1] * up4 + gw[2] * up5
         base = self.fuse(torch.cat([context, p3], dim=1))
         fused = (
             base
             + torch.tanh(self.res_fine_scale) * p3
             + torch.tanh(self.res_mid_scale) * up4
         )
+        fused = fused * self.fuse_se(fused)
         seg_lr = self.seg_head(fused)
         seg = F.interpolate(seg_lr, size=(self.imgsz, self.imgsz), mode="bilinear", align_corners=False)
         kp_hm = self.kp_hm_head(fused)
-        g = self.pool(fused).flatten(1)
-        cls_logit = self.cls_head(g)
-        kp = self.kp_head(g).view(-1, self.n_landmarks, 3)
-        hdg = self.hdg_head(g)
-        wake = self.wake_head(g)
+        pooled = self.pool(fused).flatten(1)
+        cls_logit = self.cls_head(pooled)
+        kp = self.kp_head(pooled).view(-1, self.n_landmarks, 3)
+        hdg = self.hdg_head(pooled)
+        wake = self.wake_head(pooled)
         return cls_logit, seg, kp, hdg, wake, kp_hm
 
 

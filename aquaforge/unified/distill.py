@@ -166,8 +166,12 @@ def review_ui_active_learning_priority(
 
     ln = ex.get("pred_yolo_length_m")
     try:
-        if ln is not None and float(ln) < 70.0:
-            p += 0.85
+        if ln is not None:
+            lnv = float(ln)
+            if lnv < 70.0:
+                p += 0.85
+            if lnv < 45.0:
+                p += 0.45
     except (TypeError, ValueError):
         pass
 
@@ -194,7 +198,7 @@ def review_ui_active_learning_priority(
 
     # Human chose “Unsure” in the review UI — prioritize if this row is ever used for mining / aux.
     if review_category == "ambiguous":
-        p += 1.12
+        p += 1.25
 
     if heading_labeled:
         p += 0.15

@@ -1,8 +1,8 @@
 """
 Spot-review visuals: contrast-stretched crops with optional detection overlays (PIL).
 
-The web UI turns layers on/off via ``draw_*`` flags on :func:`overlay_sota_on_spot_rgb` so the default
-view can stay minimal (e.g. outline + direction only).
+The web UI turns layers on/off via ``draw_*`` flags on :func:`overlay_sota_on_spot_rgb`; the daily layout
+defaults to **outline + direction** with keypoints and wake off until the user enables them under **On image**.
 """
 
 from __future__ import annotations

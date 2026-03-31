@@ -1,12 +1,12 @@
 """
-Streamlit UI: pick a scene, refresh the queue, label each candidate.
+Streamlit UI: pick a scene, refresh, review spots.
 
-**Left panel (starts closed):** scene, refresh, finding spots, downloads, re-sort training, exports,
-duplicates, whole-scene map.
+**Left panel (starts closed):** **Scene** + **Refresh spot list** only at top; everything else under
+**Advanced** (finding spots, download, re-sort, exports, duplicates, label fixer, whole-scene map, optional
+outline-hint consent).
 
-**Main:** one large close-up, optional drawings in a small **Drawings** expander (default: outline +
-direction), then a bottom row (**Back / Next / Ship / Not a ship / Unsure**). Advanced labels and
-outline tools live in collapsed expanders below.
+**Main:** large close-up, subtle **On image** toggles (default outline + direction), optional readouts
+after the image, then **Back / Next** and **Ship / Not a ship / Unsure**.
 """
 
 from __future__ import annotations
@@ -227,8 +227,17 @@ def _ui_styles() -> None:
     st.markdown(
         """
 <style>
-  /* Wide calm main column; sidebar stays narrow when opened */
-  div.block-container { padding-top: 0.35rem; max-width: min(1180px, 96vw); }
+  /* Wide calm main column; extra bottom space so the sticky action row is not clipped */
+  div.block-container {
+    padding-top: 0.35rem;
+    padding-bottom: 5.5rem !important;
+    max-width: min(1180px, 96vw);
+  }
+  /* Subtle top-right “On image” expander */
+  .vd-overlay-exp summary, .vd-overlay-exp span[data-testid="stMarkdownContainer"] p {
+    font-size: 0.78rem !important;
+    color: #64748b !important;
+  }
   /* Optional outline tools: compact secondary buttons */
   button[kind="secondary"] {
     font-size: 0.68rem !important;
@@ -824,6 +833,8 @@ def _session_init() -> None:
         st.session_state.last_scene_key = ""
     if "catalog_items" not in st.session_state:
         st.session_state.catalog_items = []
+    if "vd_advanced_spot_hints" not in st.session_state:
+        st.session_state.vd_advanced_spot_hints = False
 
 
 def _sidebar_spot_finding_settings() -> None:
@@ -911,12 +922,11 @@ def main() -> None:
     choice: Path | None = None
     refresh = False
 
+    # Sidebar: only scene + refresh on first glance; everything else under **Advanced**.
+    tci_loaded_sidebar = str(st.session_state.get("tci_loaded") or "").strip()
     with st.sidebar:
-        st.caption("Open this panel for the scene, refresh, downloads, and other tools.")
         if not tci_list:
-            st.info(
-                "No images yet. Use **Download satellite image** below, or add a `*TCI_10m*.jp2` under **data/**."
-            )
+            st.caption("Add an image to start.")
         else:
             st.markdown("##### Scene")
             file_help = "Which satellite scene you are working on."
@@ -944,24 +954,46 @@ def main() -> None:
                 use_container_width=True,
                 key="workbench_refresh",
             )
-        _sidebar_spot_finding_settings()
-        with st.expander("Download satellite image", expanded=False):
-            _render_catalog_panel()
-        _ranking_models_expander(labels_path)
-        _exports_and_analytics_expander(labels_path)
-        render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
-        if st.button(
-            "Fix saved labels",
-            key="vd_nav_training_review",
-            help="Open the label editor.",
-        ):
-            st.session_state["vd_ui_mode"] = "training_review"
-            st.rerun()
+        with st.expander("Advanced", expanded=False):
+            if not tci_list:
+                st.info(
+                    "Add a `*TCI_10m*.jp2` under **data/** or download one below."
+                )
+            _det_adv = load_detection_settings(ROOT)
+            if sota_inference_requested(_det_adv) and getattr(
+                _det_adv, "ui_require_checkbox_for_sota", False
+            ):
+                st.checkbox(
+                    "Allow outline hints on spots (uses more CPU/GPU)",
+                    key="vd_advanced_spot_hints",
+                    help="When off, the app skips heavy models until you enable this.",
+                )
+            _sidebar_spot_finding_settings()
+            with st.expander("Download satellite image", expanded=False):
+                _render_catalog_panel()
+            _ranking_models_expander(labels_path)
+            _exports_and_analytics_expander(labels_path)
+            render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
+            if st.button(
+                "Fix saved labels",
+                key="vd_nav_training_review",
+                help="Open the label editor.",
+            ):
+                st.session_state["vd_ui_mode"] = "training_review"
+                st.rerun()
+            if tci_loaded_sidebar:
+                with st.expander("Whole-scene map", expanded=False):
+                    _render_hundred_cell_overview(
+                        tci_loaded=tci_loaded_sidebar,
+                        labels_path=labels_path,
+                        meta=st.session_state.meta
+                        if isinstance(st.session_state.meta, dict)
+                        else {},
+                        wrap_expander=False,
+                    )
 
     if not tci_list:
-        st.info(
-            "Add a satellite image (**← panel → Download**), then come back here to review."
-        )
+        st.info("Add a satellite image: open **← Advanced → Download**, or drop a file under **data/**.")
         st.caption(f"Labels: `{labels_path}`")
         return
 
@@ -1103,20 +1135,10 @@ def main() -> None:
     meta = st.session_state.meta
     tci_loaded = st.session_state.tci_loaded
 
-    if tci_loaded:
-        with st.sidebar:
-            with st.expander("Whole-scene map", expanded=False):
-                _render_hundred_cell_overview(
-                    tci_loaded=tci_loaded,
-                    labels_path=labels_path,
-                    meta=meta if isinstance(meta, dict) else {},
-                    wrap_expander=False,
-                )
-
     if not candidates_ready(cands, tci_loaded):
         if tci_loaded:
             st.info(
-                "Nothing to review — press **Refresh spot list** in the left panel, or use **Whole-scene map** there to add a spot."
+                "Nothing to review — **Refresh spot list** in the left panel, or **Advanced → Whole-scene map** to add a spot."
             )
         else:
             st.info("Choose a scene in the left panel, then press **Refresh spot list**.")
@@ -1426,6 +1448,145 @@ def _render_hundred_cell_overview(
                     st.rerun()
 
 
+def _render_spot_measurements_expander(
+    *,
+    sota: dict,
+    det_settings: Any,
+    clf_disp: Any,
+    bundle_disp: Any,
+    p_comb: float | None,
+    labels_path: Path,
+    tci_p: Path,
+    tci_loaded: str,
+    cx: float,
+    cy: float,
+) -> None:
+    """Helper readouts from SOTA stack — kept out of the main focus; shown after the close-up image."""
+    if not sota:
+        return
+    with st.expander("Lengths, angles, helper readouts", expanded=False):
+        if clf_disp is not None or bundle_disp is not None:
+            _rs = rank_score_at_point(
+                ROOT,
+                tci_p,
+                cx,
+                cy,
+                clf_disp,
+                bundle_disp,
+                det_settings,
+            )
+            _leg = p_comb if p_comb is not None else _rs.get("hybrid_proba")
+            _yo = _rs.get("yolo_confidence")
+            _rk = _rs.get("rank_score")
+            _leg_s = f"{float(_leg):.3f}" if _leg is not None else "n/a"
+            _rk_s = f"{float(_rk):.3f}" if _rk is not None else "n/a"
+            _yo_s = f"{float(_yo):.3f}" if _yo is not None else "n/a"
+            st.caption(
+                f"This spot — blend **{_leg_s}**, sort **{_rk_s}**, mask **{_yo_s}**."
+            )
+        _gt_hint = spot_geometry_gt_from_labels(
+            labels_path,
+            ROOT,
+            tci_loaded,
+            float(cx),
+            float(cy),
+            chip_half=int(det_settings.yolo.chip_half),
+        )
+        if isinstance(sota, dict) and isinstance(_gt_hint, dict):
+            prov = str(_gt_hint.get("provenance", "") or "")
+            _raw_h = _gt_hint.get("heading_deg")
+            gth: float | None = None
+            if _raw_h is not None:
+                try:
+                    gth = float(_raw_h)
+                except (TypeError, ValueError):
+                    gth = None
+            if gth is not None and not math.isfinite(gth):
+                gth = None
+
+            if gth is None:
+                st.caption(
+                    "Saved size/heading row found, but no numeric heading to compare here."
+                )
+            else:
+                ef = (
+                    angular_error_deg(float(sota["heading_fused_deg"]), gth)
+                    if sota.get("heading_fused_deg") is not None
+                    else None
+                )
+                ek = (
+                    angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
+                    if sota.get("heading_keypoint_deg") is not None
+                    else None
+                )
+                delta_improve = (ek - ef) if (ek is not None and ef is not None) else None
+                fused_meaningful = (
+                    ef is not None and ek is not None and ef < ek - 1.0
+                )
+                _ins_parts: list[str] = []
+                if ek is not None:
+                    _ins_parts.append(
+                        f"- Keypoint vs your heading: **{ek:.1f}°** off"
+                    )
+                if ef is not None:
+                    if fused_meaningful and delta_improve is not None:
+                        _ins_parts.append(
+                            f"- Blended overlay: **{ef:.1f}°** off (~**{delta_improve:.1f}°** closer than keypoint alone)"
+                        )
+                    else:
+                        _ins_parts.append(
+                            f"- Blended overlay vs your heading: **{ef:.1f}°** off"
+                        )
+                if _ins_parts:
+                    with st.expander("Compare to a saved heading", expanded=False):
+                        st.caption(f"From your labels (`{prov}`).")
+                        st.markdown("\n".join(_ins_parts))
+                else:
+                    st.caption(
+                        "You have a saved heading here, but no overlay heading to compare."
+                    )
+        if sota.get("yolo_confidence") is not None:
+            st.metric("Mask confidence", f"{float(sota['yolo_confidence']):.3f}")
+        if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:
+            st.caption(
+                f"Mask size (length × width): **{sota['yolo_length_m']:.0f}** × "
+                f"**{sota['yolo_width_m']:.0f}** m"
+            )
+        if sota.get("heading_keypoint_deg") is not None:
+            st.caption(
+                f"Keypoint bow→stern: **{float(sota['heading_keypoint_deg']):.1f}°**"
+            )
+        if sota.get("keypoint_bow_confidence") is not None:
+            st.caption(
+                f"Keypoint trust (bow / stern): **{float(sota['keypoint_bow_confidence']):.2f}** / "
+                f"**{float(sota.get('keypoint_stern_confidence') or 0):.2f}**"
+            )
+        if sota.get("heading_wake_heuristic_deg") is not None:
+            st.caption(
+                f"Wake line (simple): **{float(sota['heading_wake_heuristic_deg']):.1f}°**"
+            )
+        if sota.get("heading_wake_onnx_deg") is not None:
+            st.caption(
+                f"Wake model: **{float(sota['heading_wake_onnx_deg']):.1f}°**"
+            )
+        if sota.get("heading_wake_deg") is not None:
+            st.caption(
+                f"Wake blend: **{float(sota['heading_wake_deg']):.1f}°** "
+                f"({sota.get('heading_wake_combine_source', '')})"
+            )
+        if sota.get("heading_fused_deg") is not None:
+            st.caption(
+                f"Blended direction: **{float(sota['heading_fused_deg']):.1f}°** "
+                f"({sota.get('heading_fusion_source', '')})"
+            )
+        sw = sota.get("sota_warnings") or []
+        if isinstance(sw, list) and sw:
+            st.warning(
+                "Overlay notes: " + "; ".join(str(x) for x in sw if x)
+                + " — optional keypoint/wake models may be off; simple wake line can still show."
+            )
+
+
 def _render_review_deck(
     *,
     cands: list[tuple[float, float, float]],
@@ -1496,15 +1657,14 @@ def _render_review_deck(
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
     det_settings = load_detection_settings(ROOT)
 
-    # Calm header: tiny progress text + optional overlay switches (top-right expander).
+    # Minimal header + subtle top-right overlay toggles (default: outline + direction only).
     _sc_prev_hdr = cands[idx][2]
-    _hint_hdr = " · from map" if _sc_prev_hdr == LOCATOR_MANUAL_SCORE else ""
-    _hl, _hr = st.columns([3.4, 1.2])
+    _hint_hdr = " · map" if _sc_prev_hdr == LOCATOR_MANUAL_SCORE else ""
+    _hl, _hr = st.columns([3.5, 1.05])
     with _hl:
-        st.caption(f"Spot **{idx + 1}** of **{n}**{_hint_hdr}")
+        st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
     with _hr:
         if sota_inference_requested(det_settings):
-            # Default: outline + direction only (less clutter). Keys are global across spots.
             for _xk, _dv in (
                 ("vd_ov_hull", True),
                 ("vd_ov_mark", False),
@@ -1513,20 +1673,18 @@ def _render_review_deck(
             ):
                 if _xk not in st.session_state:
                     st.session_state[_xk] = _dv
-            with st.expander("Drawings", expanded=False):
-                st.caption("Optional overlays on the close-up.")
-                st.toggle("Ship outline", key="vd_ov_hull")
-                st.toggle("Direction arrow", key="vd_ov_dir")
-                st.toggle("Point markers", key="vd_ov_mark")
-                st.toggle("Wake line", key="vd_ov_wake")
+            st.markdown('<div class="vd-overlay-exp">', unsafe_allow_html=True)
+            with st.expander("On image", expanded=False):
+                st.toggle("Outline", key="vd_ov_hull")
+                st.toggle("Direction", key="vd_ov_dir")
+                st.toggle("Keypoints", key="vd_ov_mark")
+                st.toggle("Wake", key="vd_ov_wake")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    # Performance: optional consent before expensive SOTA; default off in YAML keeps prior behavior.
+    # Optional consent: global toggle lives under sidebar **Advanced** when YAML requires it.
     _sota_allow = True
     if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
-        _sota_allow = st.checkbox(
-            "Run extra outline hints for this spot (uses more CPU/GPU)",
-            key=f"{spot_k}_sota_neural_allow",
-        )
+        _sota_allow = bool(st.session_state.get("vd_advanced_spot_hints", False))
 
     # Performance: background warm — YOLO/ORT load off the main thread when models may run soon.
     _need_warm = yolo_requested(det_settings) or (
@@ -1590,136 +1748,6 @@ def _render_review_deck(
             )
             st.session_state[sota_k + "_sig"] = sota_sig
         sota = st.session_state.get(sota_k, {}) or {}
-    if sota_inference_requested(det_settings) and sota:
-        with st.expander("Sizes and directions (optional)", expanded=False):
-            if clf_disp is not None or bundle_disp is not None:
-                _rs = rank_score_at_point(
-                    ROOT,
-                    tci_p,
-                    cx,
-                    cy,
-                    clf_disp,
-                    bundle_disp,
-                    det_settings,
-                )
-                _leg = (
-                    p_comb
-                    if p_comb is not None
-                    else _rs.get("hybrid_proba")
-                )
-                _yo = _rs.get("yolo_confidence")
-                _rk = _rs.get("rank_score")
-                _leg_s = f"{float(_leg):.3f}" if _leg is not None else "n/a"
-                _rk_s = f"{float(_rk):.3f}" if _rk is not None else "n/a"
-                _yo_s = f"{float(_yo):.3f}" if _yo is not None else "n/a"
-                st.caption(
-                    f"This spot — blend **{_leg_s}**, sort **{_rk_s}**, mask **{_yo_s}**."
-                )
-            _gt_hint = spot_geometry_gt_from_labels(
-                labels_path,
-                ROOT,
-                tci_loaded,
-                float(cx),
-                float(cy),
-                chip_half=int(det_settings.yolo.chip_half),
-            )
-            if isinstance(sota, dict) and isinstance(_gt_hint, dict):
-                prov = str(_gt_hint.get("provenance", "") or "")
-                _raw_h = _gt_hint.get("heading_deg")
-                gth: float | None = None
-                if _raw_h is not None:
-                    try:
-                        gth = float(_raw_h)
-                    except (TypeError, ValueError):
-                        gth = None
-                if gth is not None and not math.isfinite(gth):
-                    gth = None
-
-                if gth is None:
-                    st.caption(
-                        "Saved size/heading row found, but no numeric heading to compare here."
-                    )
-                else:
-                    ef = (
-                        angular_error_deg(float(sota["heading_fused_deg"]), gth)
-                        if sota.get("heading_fused_deg") is not None
-                        else None
-                    )
-                    ek = (
-                        angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
-                        if sota.get("heading_keypoint_deg") is not None
-                        else None
-                    )
-                    delta_improve = (
-                        (ek - ef) if (ek is not None and ef is not None) else None
-                    )
-                    fused_meaningful = (
-                        ef is not None
-                        and ek is not None
-                        and ef < ek - 1.0
-                    )
-                    _ins_parts: list[str] = []
-                    if ek is not None:
-                        _ins_parts.append(
-                            f"- Keypoint vs your heading: **{ek:.1f}°** off"
-                        )
-                    if ef is not None:
-                        if fused_meaningful and delta_improve is not None:
-                            _ins_parts.append(
-                                f"- Blended overlay: **{ef:.1f}°** off (~**{delta_improve:.1f}°** closer than keypoint alone)"
-                            )
-                        else:
-                            _ins_parts.append(
-                                f"- Blended overlay vs your heading: **{ef:.1f}°** off"
-                            )
-                    if _ins_parts:
-                        with st.expander("Compare to a saved heading (optional)", expanded=False):
-                            st.caption(f"From your labels (`{prov}`).")
-                            st.markdown("\n".join(_ins_parts))
-                    else:
-                        st.caption(
-                            "You have a saved heading here, but no overlay heading to compare."
-                        )
-            if sota.get("yolo_confidence") is not None:
-                st.metric("Mask confidence", f"{float(sota['yolo_confidence']):.3f}")
-            if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:
-                st.caption(
-                    f"Mask size (length × width): **{sota['yolo_length_m']:.0f}** × "
-                    f"**{sota['yolo_width_m']:.0f}** m"
-                )
-            if sota.get("heading_keypoint_deg") is not None:
-                st.caption(
-                    f"Keypoint bow→stern: **{float(sota['heading_keypoint_deg']):.1f}°**"
-                )
-            if sota.get("keypoint_bow_confidence") is not None:
-                st.caption(
-                    f"Keypoint trust (bow / stern): **{float(sota['keypoint_bow_confidence']):.2f}** / "
-                    f"**{float(sota.get('keypoint_stern_confidence') or 0):.2f}**"
-                )
-            if sota.get("heading_wake_heuristic_deg") is not None:
-                st.caption(
-                    f"Wake line (simple): **{float(sota['heading_wake_heuristic_deg']):.1f}°**"
-                )
-            if sota.get("heading_wake_onnx_deg") is not None:
-                st.caption(
-                    f"Wake model: **{float(sota['heading_wake_onnx_deg']):.1f}°**"
-                )
-            if sota.get("heading_wake_deg") is not None:
-                st.caption(
-                    f"Wake blend: **{float(sota['heading_wake_deg']):.1f}°** "
-                    f"({sota.get('heading_wake_combine_source', '')})"
-                )
-            if sota.get("heading_fused_deg") is not None:
-                st.caption(
-                    f"Blended direction: **{float(sota['heading_fused_deg']):.1f}°** "
-                    f"({sota.get('heading_fusion_source', '')})"
-                )
-            sw = sota.get("sota_warnings") or []
-            if isinstance(sw, list) and sw:
-                st.warning(
-                    "Overlay notes: " + "; ".join(str(x) for x in sw if x)
-                    + " — optional keypoint/wake models may be off; simple wake line can still show."
-                )
 
     pool = st.session_state.get("detector_ranked_unlabeled_pool") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
@@ -1967,6 +1995,20 @@ def _render_review_deck(
             height=side_px,
             use_container_width=False,
             cursor="crosshair",
+        )
+
+    if sota_inference_requested(det_settings) and sota:
+        _render_spot_measurements_expander(
+            sota=dict(sota) if isinstance(sota, dict) else {},
+            det_settings=det_settings,
+            clf_disp=clf_disp,
+            bundle_disp=bundle_disp,
+            p_comb=p_comb,
+            labels_path=labels_path,
+            tci_p=tci_p,
+            tci_loaded=tci_loaded,
+            cx=cx,
+            cy=cy,
         )
 
     wake_vis_k = f"wake_vis_{spot_k}"
@@ -2410,8 +2452,8 @@ def _render_review_deck(
                 fp=fp,
             )
 
-    with st.expander("More choices and how sure you feel", expanded=False):
-        st.caption("Use **Unsure** above if that is enough. Cloud / land / skip are here if you need them.")
+    with st.expander("Advanced (this spot)", expanded=False):
+        st.caption("Cloud, land, skip, confidence — if the main three buttons are not enough.")
         mx1, mx2, mx3 = st.columns(3)
         with mx1:
             if st.button(
@@ -2496,7 +2538,8 @@ def _render_review_deck(
                 st.session_state[conf_k] = "low"
                 st.rerun()
 
-    with st.expander("Sort-model scores (optional)", expanded=False):
+        st.divider()
+        st.markdown("**Sort helpers**")
         if p_comb is not None:
             cols_p = st.columns(
                 min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0))
@@ -2510,13 +2553,14 @@ def _render_review_deck(
                 i_col += 1
             if p_lr is not None and p_mlp is not None and i_col < len(cols_p):
                 cols_p[i_col].metric("Mixed", f"{p_comb:.2f}")
-            st.caption("Higher = closer to your past **Ship** saves (after you retrain sort models).")
+            st.caption("Higher ≈ more like past **Ship** saves (after retraining sort models).")
         elif clf_disp is not None or bundle_disp is not None:
-            st.caption("No score on this spot — try **Refresh spot list**.")
+            st.caption("No score here — try **Refresh spot list**.")
 
-    if mt_pred:
-        with st.expander("Guesses from past labels (optional)", expanded=False):
-            st.caption("Rough hints when you have enough saved examples.")
+        if mt_pred:
+            st.divider()
+            st.markdown("**Guesses from past labels**")
+            st.caption("Rough hints when you have enough examples.")
             items = sorted(mt_pred.items(), key=lambda t: t[0])
             for k, v in items:
                 if isinstance(v, float):
