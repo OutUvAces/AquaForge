@@ -6,6 +6,9 @@ Avoids reloading ``*.onnx`` on every Streamlit rerun when the path + mtime are u
 Optional **dynamic quantization** (INT8 weights, CPU): set ``keypoints.quantize`` or
 ``wake_fusion.quantize`` in ``detection.yaml``. The first load builds a cached quantized
 copy under the system temp directory; falls back to the float model if quantization fails.
+
+Quantized ONNX cache directory (same on all platforms): ``<temp>/vessel_detector_ort_quant/``
+where ``<temp>`` is :func:`tempfile.gettempdir` (e.g. ``%TEMP%`` on Windows, ``/tmp`` on Linux).
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ def _quantized_model_path(src: Path) -> Path | None:
         return None
     payload = f"{src.resolve()}:{mtime_ns}:quantize_dynamic_v1".encode("utf-8")
     h = hashlib.sha256(payload).hexdigest()[:40]
+    # Persisted quant models: <gettempdir()>/vessel_detector_ort_quant/<hash>.onnx
     dest_dir = Path(tempfile.gettempdir()) / "vessel_detector_ort_quant"
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)

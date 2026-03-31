@@ -184,7 +184,18 @@ py -3 scripts/run_detection_eval.py --backend ensemble --max-spots 50
 py -3 scripts/run_detection_eval.py --labels-dir data/labels
 ```
 
-Use **`--summary-markdown`** for a GitHub-flavored report (no `### path` preamble; multiple JSONL files separated by `---`). Missing partial ground truth shows as **`N/A`** in tables.
+Use **`--summary-markdown`** for a GitHub-flavored report: **Key Takeaways**, a short **Summary** table, then full metrics with **GFM column alignment** and the **best value per row** in bold. Multiple JSONL files are separated by `---`. Missing partial ground truth shows as **`N/A`**.
+
+### Quick benchmark demo
+
+Fast sanity check on a **small** geometry subset (default **8** spots; override with **`--max-spots`**). Prints a **plain-text** summary to the console (no markdown tables). Still writes **`--output`** / **`--output-json`** when passed.
+
+```bash
+py -3 scripts/run_detection_eval.py --demo
+py -3 scripts/run_detection_eval.py --demo --max-spots 10 --jsonl data/labels/ship_reviews.jsonl
+```
+
+If the JSONL is empty or labels are missing, the demo still runs and reports zeros / `N/A` where applicable.
 
 Or: `py -3 -m vessel_detection.evaluation --help`.
 
@@ -260,13 +271,21 @@ Default is `false` (full-precision weights). On typical pose MLP-heavy graphs, *
 
 **Validate before/after**
 
+Point at a real JP2/GeoTIFF and chip center (full-raster `cx`/`cy`). Increase **`--repeat`** for stabler timing (default is modest).
+
 ```bash
-py -3 scripts/validate_quantization.py --onnx data/models/ship_pose_384.onnx --tci path/to/TCI.jp2 --cx 5000 --cy 3200 --repeat 15
+py -3 scripts/validate_quantization.py ^
+  --onnx data/models/ship_pose_384.onnx ^
+  --tci path/to/your_scene.jp2 ^
+  --cx 5000 --cy 3200 ^
+  --repeat 15
 ```
 
-Reports mean inference time (float vs quant) and circular heading difference when bow/stern indices produce a geodesic heading. Full IoU / dataset metrics: use `run_detection_eval.py` with labeled JSONL.
+(On bash, use line continuations `\` instead of `^`.)
 
-The **first** quantized load pays a one-time compile/write to the temp cache; subsequent Streamlit reruns reuse the in-process session cache.
+The script reports **mean inference time** (float32 vs dynamically quantized INT8) and **circular heading delta** when bow/stern keypoints yield a geodesic heading. It does **not** replace full labeled eval: for IoU and dataset-level heading MAE, use `run_detection_eval.py` (or **`--demo`** for a quick slice).
+
+Quantized ONNX files are written under **`<system temp>/vessel_detector_ort_quant/`** (see `tempfile.gettempdir()`). The **first** quantized load pays a one-time compile/write; subsequent Streamlit reruns reuse the in-process session cache.
 
 ---
 

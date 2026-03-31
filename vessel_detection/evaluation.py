@@ -104,6 +104,54 @@ def fmt_eval_pct(x: float | None, *, ndigits: int = 1) -> str:
     return f"{v:.{ndigits}f}%"
 
 
+def _parse_cell_float(cell: str) -> float | None:
+    """Parse a markdown table cell for best-of-row comparison (strips ``**``)."""
+    t = cell.replace("**", "").strip()
+    if t == _NA:
+        return None
+    if t.endswith("%"):
+        try:
+            v = float(t[:-1].strip())
+        except (TypeError, ValueError):
+            return None
+        return v if math.isfinite(v) else None
+    try:
+        v = float(t)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _bold_best_three(
+    leg: str,
+    yf: str,
+    ens: str,
+    *,
+    bold_best: bool,
+    higher_better: bool | None,
+) -> tuple[str, str, str]:
+    """
+    Bold the best among Legacy / YOLO-fusion / Ensemble when at least two numeric cells.
+    ``higher_better`` None skips bolding (e.g. count rows).
+    """
+    if not bold_best or higher_better is None:
+        return (leg, yf, ens)
+    cells = [leg, yf, ens]
+    vals = [_parse_cell_float(c) for c in cells]
+    valid_ix = [i for i, v in enumerate(vals) if v is not None]
+    if len(valid_ix) < 2:
+        return (leg, yf, ens)
+    picked = [float(vals[i]) for i in valid_ix]
+    best = max(picked) if higher_better else min(picked)
+    out = list(cells)
+    for i in valid_ix:
+        v = vals[i]
+        assert v is not None
+        if abs(float(v) - best) <= 1e-9:
+            out[i] = f"**{cells[i]}**"
+    return (out[0], out[1], out[2])
+
+
 def _mean_list(vals: list[float]) -> float | None:
     return float(sum(vals) / len(vals)) if vals else None
 
@@ -717,10 +765,89 @@ def _heading_cell_median_kp(bucket: HeadingErrorBucket) -> str:
     return fmt_eval_num(circular_median_abs_error_deg(bucket.keypoint), ndigits=2)
 
 
-def format_eval_report(res: EvalRunResult, *, settings_sota: DetectionSettings) -> str:
-    """Verbose plain-text + markdown-style tables (uses N/A for missing partial GT)."""
+def format_eval_report(
+    res: EvalRunResult,
+    *,
+    settings_sota: DetectionSettings,
+    bold_best: bool = False,
+) -> str:
+    """
+    Markdown tables with GFM-friendly alignment (text left, numbers right).
+
+    When ``bold_best`` is true, the best value per comparable row among Legacy / YOLO-fusion /
+    Ensemble is wrapped in ``**`` (for summary / GitHub views). Count-only rows are not bolded.
+    """
     yf = res.heading_buckets.get("yolo_fusion") or HeadingErrorBucket()
     ens = res.heading_buckets.get("ensemble") or HeadingErrorBucket()
+    hdr4 = "| Metric | Legacy | YOLO-fusion | Ensemble |"
+    sep4 = "| :--- | ---: | ---: | ---: |"
+
+    r_leg = fmt_eval_num(res.pearson_r_by_backend.get("legacy_hybrid"), ndigits=4)
+    r_yf = fmt_eval_num(res.pearson_r_by_backend.get("yolo_fusion"), ndigits=4)
+    r_ens = fmt_eval_num(res.pearson_r_by_backend.get("ensemble"), ndigits=4)
+    r_leg, r_yf, r_ens = _bold_best_three(
+        r_leg, r_yf, r_ens, bold_best=bold_best, higher_better=True
+    )
+
+    w_leg, w_yf, w_ens = _bold_best_three(
+        _NA,
+        _heading_cell_mae(yf, "wake_line"),
+        _heading_cell_mae(ens, "wake_line"),
+        bold_best=bold_best,
+        higher_better=False,
+    )
+    kp_leg, kp_yf, kp_ens = _bold_best_three(
+        _NA,
+        _heading_cell_mae(yf, "keypoint"),
+        _heading_cell_mae(ens, "keypoint"),
+        bold_best=bold_best,
+        higher_better=False,
+    )
+    md_leg, md_yf, md_ens = _bold_best_three(
+        _NA,
+        _heading_cell_median_kp(yf),
+        _heading_cell_median_kp(ens),
+        bold_best=bold_best,
+        higher_better=False,
+    )
+    fu_leg, fu_yf, fu_ens = _bold_best_three(
+        _NA,
+        _heading_cell_mae(yf, "fused"),
+        _heading_cell_mae(ens, "fused"),
+        bold_best=bold_best,
+        higher_better=False,
+    )
+
+    len_yf = fmt_eval_num(
+        _mean_list(res.rel_length_by_backend.get("yolo_fusion", [])), ndigits=4
+    )
+    len_ens = fmt_eval_num(
+        _mean_list(res.rel_length_by_backend.get("ensemble", [])), ndigits=4
+    )
+    len_leg, len_yf, len_ens = _bold_best_three(
+        _NA, len_yf, len_ens, bold_best=bold_best, higher_better=False
+    )
+
+    wid_yf = fmt_eval_num(
+        _mean_list(res.rel_width_by_backend.get("yolo_fusion", [])), ndigits=4
+    )
+    wid_ens = fmt_eval_num(
+        _mean_list(res.rel_width_by_backend.get("ensemble", [])), ndigits=4
+    )
+    wid_leg, wid_yf, wid_ens = _bold_best_three(
+        _NA, wid_yf, wid_ens, bold_best=bold_best, higher_better=False
+    )
+
+    iou_yf = fmt_eval_num(
+        _mean_list(res.mask_iou_by_backend.get("yolo_fusion", [])), ndigits=4
+    )
+    iou_ens = fmt_eval_num(
+        _mean_list(res.mask_iou_by_backend.get("ensemble", [])), ndigits=4
+    )
+    iou_leg, iou_yf, iou_ens = _bold_best_three(
+        _NA, iou_yf, iou_ens, bold_best=bold_best, higher_better=True
+    )
+
     lines: list[str] = [
         "## Vessel Detector - detection / SOTA evaluation",
         f"**YAML backend (reference):** `{settings_sota.backend}`",
@@ -731,12 +858,9 @@ def format_eval_report(res: EvalRunResult, *, settings_sota: DetectionSettings) 
         "",
         "### Ranking (Pearson r vs binary label)",
         "",
-        "| | Legacy | YOLO-fusion | Ensemble |",
-        "|:--|:--|:--|:--|",
-        "| Pearson r | "
-        f"{fmt_eval_num(res.pearson_r_by_backend.get('legacy_hybrid'), ndigits=4)} | "
-        f"{fmt_eval_num(res.pearson_r_by_backend.get('yolo_fusion'), ndigits=4)} | "
-        f"{fmt_eval_num(res.pearson_r_by_backend.get('ensemble'), ndigits=4)} |",
+        hdr4,
+        sep4,
+        f"| Pearson r | {r_leg} | {r_yf} | {r_ens} |",
         "| N scored | "
         f"{res.n_scored_by_backend.get('legacy_hybrid', 0)} | "
         f"{res.n_scored_by_backend.get('yolo_fusion', 0)} | "
@@ -745,21 +869,17 @@ def format_eval_report(res: EvalRunResult, *, settings_sota: DetectionSettings) 
         "### Heading - circular MAE (deg, shortest arc; wake uses min of two directions)",
         "_Legacy has no heading model - N/A._",
         "",
-        "| Metric | Legacy | YOLO-fusion | Ensemble |",
-        "|:--|:--|:--|:--|",
-        "| Wake line MAE | "
-        f"{_NA} | {_heading_cell_mae(yf, 'wake_line')} | {_heading_cell_mae(ens, 'wake_line')} |",
-        "| Keypoint MAE | "
-        f"{_NA} | {_heading_cell_mae(yf, 'keypoint')} | {_heading_cell_mae(ens, 'keypoint')} |",
-        "| Keypoint median | "
-        f"{_NA} | {_heading_cell_median_kp(yf)} | {_heading_cell_median_kp(ens)} |",
-        "| Fused MAE | "
-        f"{_NA} | {_heading_cell_mae(yf, 'fused')} | {_heading_cell_mae(ens, 'fused')} |",
+        hdr4,
+        sep4,
+        f"| Wake line MAE | {w_leg} | {w_yf} | {w_ens} |",
+        f"| Keypoint MAE | {kp_leg} | {kp_yf} | {kp_ens} |",
+        f"| Keypoint median | {md_leg} | {md_yf} | {md_ens} |",
+        f"| Fused MAE | {fu_leg} | {fu_yf} | {fu_ens} |",
         "",
         "### Fusion benefit (ensemble, vs undirected wake; +5 deg margin)",
         "",
         "| Metric | Value |",
-        "|:--|:--|",
+        "| :--- | :--- |",
         f"| % keypoint beats wake alone | {fmt_eval_pct(res.pct_keypoint_better_than_wake_line)} "
         f"(n={res.n_kp_vs_wake_pairs if res.n_kp_vs_wake_pairs else _NA}) |",
         f"| % fused beats wake alone | {fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)} "
@@ -767,28 +887,19 @@ def format_eval_report(res: EvalRunResult, *, settings_sota: DetectionSettings) 
         "",
         "### Measurements - mean relative abs error vs labeled L/W",
         "",
-        "| | Legacy | YOLO-fusion | Ensemble |",
-        "|:--|:--|:--|:--|",
-        "| Mean rel. length err | "
-        f"{_NA} | "
-        f"{fmt_eval_num(_mean_list(res.rel_length_by_backend.get('yolo_fusion', [])), ndigits=4)} | "
-        f"{fmt_eval_num(_mean_list(res.rel_length_by_backend.get('ensemble', [])), ndigits=4)} |",
-        "| Mean rel. width err | "
-        f"{_NA} | "
-        f"{fmt_eval_num(_mean_list(res.rel_width_by_backend.get('yolo_fusion', [])), ndigits=4)} | "
-        f"{fmt_eval_num(_mean_list(res.rel_width_by_backend.get('ensemble', [])), ndigits=4)} |",
+        hdr4,
+        sep4,
+        f"| Mean rel. length err | {len_leg} | {len_yf} | {len_ens} |",
+        f"| Mean rel. width err | {wid_leg} | {wid_yf} | {wid_ens} |",
         "| N (length) | "
         f"{_NA} | {len(res.rel_length_by_backend.get('yolo_fusion', []))} | "
         f"{len(res.rel_length_by_backend.get('ensemble', []))} |",
         "",
         "### Hull overlap - mean IoU (labeled quad vs YOLO polygon)",
         "",
-        "| | Legacy | YOLO-fusion | Ensemble |",
-        "|:--|:--|:--|:--|",
-        "| Mean IoU | "
-        f"{_NA} | "
-        f"{fmt_eval_num(_mean_list(res.mask_iou_by_backend.get('yolo_fusion', [])), ndigits=4)} | "
-        f"{fmt_eval_num(_mean_list(res.mask_iou_by_backend.get('ensemble', [])), ndigits=4)} |",
+        hdr4,
+        sep4,
+        f"| Mean IoU | {iou_leg} | {iou_yf} | {iou_ens} |",
         "| N | "
         f"{_NA} | {len(res.mask_iou_by_backend.get('yolo_fusion', []))} | "
         f"{len(res.mask_iou_by_backend.get('ensemble', []))} |",
@@ -799,6 +910,91 @@ def format_eval_report(res: EvalRunResult, *, settings_sota: DetectionSettings) 
     return "\n".join(lines) + "\n"
 
 
+def _ranking_backends_with_scores(res: EvalRunResult) -> list[str]:
+    order = ("legacy_hybrid", "yolo_fusion", "ensemble")
+    pretty = {
+        "legacy_hybrid": "Legacy",
+        "yolo_fusion": "YOLO-fusion",
+        "ensemble": "Ensemble",
+    }
+    return [pretty[k] for k in order if res.n_scored_by_backend.get(k, 0) > 0]
+
+
+def _key_takeaways_and_summary_lines(
+    res: EvalRunResult,
+    *,
+    settings_sota: DetectionSettings,
+    jsonl_path: str | None,
+) -> tuple[str, str]:
+    """
+    Return (key_takeaways_block, at_a_glance_table) markdown fragments without trailing double newline.
+    """
+    scored = _ranking_backends_with_scores(res)
+    n_scored = len(scored)
+    scored_txt = ", ".join(scored) if scored else "(none)"
+
+    takeaway_lines = [
+        "### Key Takeaways",
+        "",
+        f"- **Dataset:** {res.n_geometry_spots} geometry spot(s) evaluated, "
+        f"{res.n_labeled_points} binary-labeled point row(s), "
+        f"{res.n_heading_gt} row(s) with heading ground truth.",
+        f"- **Ranking:** {n_scored} backend(s) with Pearson scores: {scored_txt}.",
+    ]
+    if res.n_fusion_vs_wake_pairs > 0 and res.pct_fusion_better_than_wake_ambiguity is not None:
+        takeaway_lines.append(
+            f"- **Fusion benefit (ensemble):** fused heading beats ambiguous wake (by >5°) on "
+            f"**{fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)}** of spots "
+            f"(n={res.n_fusion_vs_wake_pairs})."
+        )
+    else:
+        takeaway_lines.append(
+            "- **Fusion benefit:** insufficient fused-vs-wake pairs for a reliable `%` "
+            "(needs ensemble headings, wake line, and heading GT on the same spots)."
+        )
+
+    best_r = None
+    best_name = None
+    for key, label in (
+        ("legacy_hybrid", "Legacy"),
+        ("yolo_fusion", "YOLO-fusion"),
+        ("ensemble", "Ensemble"),
+    ):
+        v = res.pearson_r_by_backend.get(key)
+        if v is None or not math.isfinite(float(v)):
+            continue
+        if best_r is None or float(v) > float(best_r):
+            best_r = float(v)
+            best_name = label
+    if best_name is not None and best_r is not None:
+        takeaway_lines.append(
+            f"- **Best ranking correlation:** {best_name} (Pearson r **{best_r:.4f}**)."
+        )
+
+    jl = jsonl_path or "(default labels path)"
+    fusion_cell = (
+        f"{fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)} "
+        f"(n={res.n_fusion_vs_wake_pairs})"
+        if res.n_fusion_vs_wake_pairs and res.pct_fusion_better_than_wake_ambiguity is not None
+        else _NA
+    )
+    glance = [
+        "### Summary",
+        "",
+        "| Field | Value |",
+        "| :--- | :--- |",
+        f"| JSONL | `{jl}` |",
+        f"| Reference backend | `{settings_sota.backend}` |",
+        f"| Geometry spots | {res.n_geometry_spots} |",
+        f"| Binary labeled points | {res.n_labeled_points} |",
+        f"| Heading GT rows | {res.n_heading_gt} |",
+        f"| Backends with ranking scores | {n_scored} ({scored_txt}) |",
+        f"| % fused beats wake (ensemble) | {fusion_cell} |",
+        "",
+    ]
+    return "\n".join(takeaway_lines), "\n".join(glance)
+
+
 def format_eval_summary_markdown(
     res: EvalRunResult,
     *,
@@ -806,16 +1002,48 @@ def format_eval_summary_markdown(
     jsonl_path: str | None = None,
 ) -> str:
     """
-    GitHub-flavored markdown (CI / PR bodies). Same tables as :func:`format_eval_report` with a
-    top-level heading and dataset line; uses N/A for missing partial GT.
+    GitHub-flavored markdown: Key Takeaways, Summary table, then full report tables with
+    best-per-row bolding and numeric column alignment.
     """
-    sub = (
-        f"_Reference backend: `{settings_sota.backend}`_\n\n"
-        if not jsonl_path
-        else f"_JSONL: `{jsonl_path}` - reference backend: `{settings_sota.backend}`_\n\n"
+    takeaways, glance = _key_takeaways_and_summary_lines(
+        res, settings_sota=settings_sota, jsonl_path=jsonl_path
     )
-    body = format_eval_report(res, settings_sota=settings_sota)
-    return sub + body
+    body = format_eval_report(res, settings_sota=settings_sota, bold_best=True)
+    return takeaways + "\n\n" + glance + "\n---\n\n" + body
+
+
+def format_demo_console_summary(
+    res: EvalRunResult,
+    *,
+    settings_sota: DetectionSettings,
+    jsonl_path: str,
+    max_spots: int,
+) -> str:
+    """Short plain-text lines for ``--demo`` (no markdown tables)."""
+    lines = [
+        "=== Vessel Detector quick eval demo ===",
+        f"JSONL: {jsonl_path}",
+        f"Reference backend: {settings_sota.backend}",
+        f"Cap: {max_spots} geometry spot(s)",
+        f"Geometry spots evaluated: {res.n_geometry_spots}",
+        f"Binary labeled points: {res.n_labeled_points} | Heading GT rows: {res.n_heading_gt}",
+        "Pearson r (legacy / YOLO-fusion / ensemble): "
+        f"{fmt_eval_num(res.pearson_r_by_backend.get('legacy_hybrid'), ndigits=4)} / "
+        f"{fmt_eval_num(res.pearson_r_by_backend.get('yolo_fusion'), ndigits=4)} / "
+        f"{fmt_eval_num(res.pearson_r_by_backend.get('ensemble'), ndigits=4)}",
+        "Ensemble heading MAE (deg): wake / keypoint / fused: "
+        f"{fmt_eval_num(circular_mae_deg((res.heading_buckets.get('ensemble') or HeadingErrorBucket()).wake_line), ndigits=2)} / "
+        f"{fmt_eval_num(circular_mae_deg((res.heading_buckets.get('ensemble') or HeadingErrorBucket()).keypoint), ndigits=2)} / "
+        f"{fmt_eval_num(circular_mae_deg((res.heading_buckets.get('ensemble') or HeadingErrorBucket()).fused), ndigits=2)}",
+        f"% fused beats wake (ensemble, >5°): {fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)} "
+        f"(n={res.n_fusion_vs_wake_pairs if res.n_fusion_vs_wake_pairs else _NA})",
+        f"Mean mask IoU (ensemble): {fmt_eval_num(res.mean_mask_iou, ndigits=4)} (n={res.n_mask_iou})",
+    ]
+    if res.notes:
+        lines.append("Notes: " + "; ".join(res.notes[:5]))
+        if len(res.notes) > 5:
+            lines.append(f"  ... and {len(res.notes) - 5} more")
+    return "\n".join(lines) + "\n"
 
 
 def iter_jsonl_files_in_dir(folder: Path) -> Iterator[Path]:
@@ -900,6 +1128,11 @@ def main_cli(argv: list[str] | None = None) -> int:
         choices=("yolo_fusion", "ensemble"),
     )
     ap.add_argument("--max-spots", type=int, default=None)
+    ap.add_argument(
+        "--demo",
+        action="store_true",
+        help="Cap geometry spots at 8 (override with --max-spots) and print a short console summary",
+    )
     ap.add_argument("-o", "--output", type=Path, default=None)
     ap.add_argument(
         "--output-json",
@@ -910,7 +1143,7 @@ def main_cli(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--summary-markdown",
         action="store_true",
-        help="GitHub-ready markdown only (no ### file preamble); good for PR comments / GFM",
+        help="GitHub-ready markdown (Key Takeaways + Summary + tables; best values bolded)",
     )
     args = ap.parse_args(argv)
 
@@ -941,6 +1174,12 @@ def main_cli(argv: list[str] | None = None) -> int:
         jp = args.jsonl or (root / "data" / "labels" / "ship_reviews.jsonl")
         jsonl_paths = [Path(jp).resolve()]
 
+    spot_cap: int | None
+    if args.demo:
+        spot_cap = args.max_spots if args.max_spots is not None else 8
+    else:
+        spot_cap = args.max_spots
+
     text_reports: list[str] = []
     json_payload: list[dict[str, Any]] = []
     for jp in jsonl_paths:
@@ -952,9 +1191,18 @@ def main_cli(argv: list[str] | None = None) -> int:
             root,
             jp,
             settings_sota=settings_sota,
-            max_spots=args.max_spots,
+            max_spots=spot_cap,
         )
-        if args.summary_markdown:
+        if args.demo:
+            text_reports.append(
+                format_demo_console_summary(
+                    res,
+                    settings_sota=settings_sota,
+                    jsonl_path=str(jp),
+                    max_spots=int(spot_cap),
+                )
+            )
+        elif args.summary_markdown:
             text_reports.append(
                 format_eval_summary_markdown(
                     res,
@@ -970,6 +1218,8 @@ def main_cli(argv: list[str] | None = None) -> int:
         json_payload.append(jd)
 
     sep = "\n\n---\n\n" if args.summary_markdown else "\n"
+    if args.demo:
+        sep = "\n"
     full = sep.join(text_reports)
     print(full, flush=True)
     if args.output:

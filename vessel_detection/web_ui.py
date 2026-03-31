@@ -1603,26 +1603,29 @@ def _render_review_deck(
                     if sota.get("heading_keypoint_deg") is not None
                     else None
                 )
-                fused_closer = (
+                delta_improve = (
+                    (ek - ef) if (ek is not None and ef is not None) else None
+                )
+                fused_meaningful = (
                     ef is not None
                     and ek is not None
-                    and ef < ek - 0.05
+                    and ef < ek - 1.0
                 )
                 _ins_parts: list[str] = []
                 if ek is not None:
-                    _ins_parts.append(f"Keypoint vs labeled heading: **{ek:.1f}°** error")
+                    _ins_parts.append(f"- Keypoint circular error vs labeled heading: **{ek:.1f}°**")
                 if ef is not None:
-                    if fused_closer:
+                    if fused_meaningful and delta_improve is not None:
                         _ins_parts.append(
-                            f"**Fused vs labeled: {ef:.1f}° error — closer to GT than keypoint alone**"
+                            f"- **Fused error: {ef:.1f}°** (~**{delta_improve:.1f}°** tighter than keypoint vs same GT)"
                         )
                     else:
-                        _ins_parts.append(f"Fused vs labeled heading: **{ef:.1f}°** error")
+                        _ins_parts.append(f"- Fused circular error vs labeled heading: **{ef:.1f}°**")
                 if _ins_parts:
                     st.markdown(
                         "**Benchmark insight** (matched `vessel_size_feedback`, "
-                        f"source `{prov}`)  \n"
-                        + "  \n".join(_ins_parts)
+                        f"source `{prov}`)\n\n"
+                        + "\n".join(_ins_parts)
                     )
             if sota.get("yolo_confidence") is not None:
                 st.metric("Marine YOLO confidence", f"{float(sota['yolo_confidence']):.3f}")
