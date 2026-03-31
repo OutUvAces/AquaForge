@@ -1,5 +1,11 @@
 # Copy to data/config/detection.yaml (create folder if needed) to enable SOTA backends.
 # data/ is gitignored — keep this example under version control and copy locally.
+#
+# Full ensemble (YOLO + keypoints + heuristic / ONNX wake): see detection.ensemble.example.yaml
+#
+# Performance (YOLO): ``yolo.inference_mode: chip_per_candidate`` runs one marine YOLO pass per
+# candidate chip (good for interactive review). ``sliding_window_merge`` scans the full TCI in a
+# coarse grid and merges extra high-confidence boxes — higher recall, more compute.
 
 # Backend: legacy_hybrid | yolo_only | yolo_fusion | ensemble
 # - legacy_hybrid: LR + chip MLP only (default, no extra deps).

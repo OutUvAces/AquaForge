@@ -7,8 +7,11 @@ optional YOLO marine scores are fused or substituted per ``detection.yaml``.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from vessel_detection.detection_config import (
     DetectionSettings,
@@ -158,17 +161,21 @@ def run_sota_spot_inference(
         "bow_stern_segment_crop": None,
         "wake_segment_crop": None,
         "heading_wake_combined_confidence": None,
+        "keypoints_xy_conf_crop": None,
+        "sota_warnings": [],
     }
 
     if not sota_inference_requested(settings):
         return out
+
+    warnings: list[str] = []
 
     from vessel_detection.mask_measurements import mask_oriented_dimensions_m
     from vessel_detection.shipstructure_adapter import (
         KeypointResult,
         heading_deg_bow_to_stern,
         keypoints_to_jsonable,
-        predict_keypoints_chip,
+        try_predict_keypoints_chip,
     )
     from vessel_detection.wake_heading_fusion import (
         combine_two_wake_headings,
@@ -215,15 +222,27 @@ def run_sota_spot_inference(
 
     kp: KeypointResult | None = None
     if settings.keypoints.enabled:
-        kp = predict_keypoints_chip(
-            tci_path,
-            cx,
-            cy,
-            chip_half=int(settings.yolo.chip_half),
-            keypoints_cfg=settings.keypoints,
-        )
+        if not settings.keypoints.external_onnx_path:
+            warnings.append("keypoints_enabled_but_no_onnx_path")
+        else:
+            kp, kp_notes = try_predict_keypoints_chip(
+                tci_path,
+                cx,
+                cy,
+                chip_half=int(settings.yolo.chip_half),
+                keypoints_cfg=settings.keypoints,
+            )
+            warnings.extend(kp_notes)
         out["keypoints_json"] = keypoints_to_jsonable(kp)
         if kp is not None and kp.xy_fullres:
+            out["keypoints_xy_conf_crop"] = [
+                [
+                    float(x) - float(spot_col_off),
+                    float(y) - float(spot_row_off),
+                    float(kp.conf[i]) if i < len(kp.conf) else 1.0,
+                ]
+                for i, (x, y) in enumerate(kp.xy_fullres)
+            ]
             mpc = float(settings.keypoints.min_point_confidence)
             kpc_list: list[list[float]] = []
             for i, (x, y) in enumerate(kp.xy_fullres):
@@ -268,8 +287,10 @@ def run_sota_spot_inference(
             try:
                 h_kp = heading_deg_bow_to_stern(bow, stern, tci_path)
                 out["heading_keypoint_deg"] = float(h_kp)
-            except Exception:
+            except Exception as e:
                 h_kp = None
+                warnings.append(f"keypoints_heading_geodesy:{type(e).__name__}")
+                logger.warning("Keypoint bow-stern heading geodesy failed: %s", e)
             kp_trust = float(max(0.0, min(1.0, min(bow_c, stern_c))))
             out["keypoint_heading_trust"] = kp_trust
             out["bow_stern_segment_crop"] = [
@@ -326,6 +347,9 @@ def run_sota_spot_inference(
             out["wake_segment_meta_onnx"] = meta_onnx
             if h_onnx is not None:
                 out["heading_wake_onnx_deg"] = float(h_onnx)
+            elif not meta_onnx.get("ok"):
+                err = str(meta_onnx.get("error", "onnx_wake_failed"))
+                warnings.append(f"wake_onnx:{err}")
 
         conf_heur = heuristic_wake_confidence(meta_heur)
         conf_onnx = float(meta_onnx.get("confidence", 0.0)) if meta_onnx.get("ok") else 0.0
@@ -365,5 +389,6 @@ def run_sota_spot_inference(
         out["heading_fused_deg"] = hf
         out["heading_fusion_source"] = src
 
+    out["sota_warnings"] = warnings
     return out
 

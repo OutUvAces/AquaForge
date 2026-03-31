@@ -1,0 +1,52 @@
+# Full SOTA ensemble example — copy sections into ``data/config/detection.yaml`` or merge with
+# ``detection.example.yaml``. Default production default remains ``legacy_hybrid`` (no extra deps).
+
+# --- Backend: use ``ensemble`` when you want wake + optional keypoint fusion on each spot ---
+backend: ensemble
+
+yolo:
+  hf_repo: mayrajeo/marine-vessel-yolo
+  weights_file: yolo11s_tci.pt
+  weights_path: null
+  imgsz: 640
+  chip_half: 320
+  conf_threshold: 0.15
+  # Ranking: blend hybrid (LR + chip MLP) with marine YOLO confidence.
+  weight_vs_hybrid: 0.55
+  # chip_per_candidate: one YOLO forward per bright-spot chip (fast, default for Streamlit).
+  # sliding_window_merge: extra coarse grid over full scene to merge high-conf centers (slower).
+  inference_mode: chip_per_candidate
+  sliding_window_stride: 512
+  sliding_window_max_windows: 120
+  sliding_window_dedupe_px: 24
+  sliding_window_min_conf: 0.35
+
+keypoints:
+  enabled: true
+  # After SLAD / ShipStructure fine-tune, verify joint order in the ONNX output (see
+  # ``scripts/export_shipstructure_to_onnx.py validate-chip``).
+  bow_index: 0
+  stern_index: 1
+  num_keypoints: 20
+  external_onnx_path: data/models/ship_pose_384.onnx
+  onnx_input_size: 384
+  output_layout: auto
+  input_normalize: divide_255
+  min_point_confidence: 0.12
+  min_bow_stern_confidence: 0.25
+  # onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+wake_fusion:
+  enabled: true
+  # Prefer keypoint heading when bow/stern are confident; else lean on wake.
+  weight_keypoint_vs_wake: 0.65
+  use_auto_wake_segment: true
+  # Optional second wake cue from ONNX (disable if no model — heuristic wake still runs).
+  use_onnx_wake: false
+  onnx_wake_path: null
+  onnx_wake_input_size: 256
+  wake_onnx_layout: dxy
+  combine_wake_mode: best_confidence
+  onnx_wake_confidence_prior: 0.72
+  adaptive_fusion: true
+  adaptive_fusion_min_quality: 0.15

@@ -755,21 +755,38 @@ def annotate_locator_spot_outline(
     return np.asarray(im)
 
 
+def _blend_conf_rgb(
+    base: tuple[int, int, int], confidence: float, *, dim_low: float = 0.35
+) -> tuple[int, int, int]:
+    """Scale RGB toward black as ``confidence`` drops (0–1)."""
+    t = float(np.clip(confidence, 0.0, 1.0))
+    f = dim_low + (1.0 - dim_low) * t
+    return (
+        int(np.clip(base[0] * f, 0, 255)),
+        int(np.clip(base[1] * f, 0, 255)),
+        int(np.clip(base[2] * f, 0, 255)),
+    )
+
+
 def overlay_sota_on_spot_rgb(
     rgb: np.ndarray,
     *,
     yolo_polygon_crop: list[tuple[float, float]] | None = None,
     keypoints_crop: list[tuple[float, float]] | None = None,
+    keypoints_xy_conf: list[tuple[float, float, float]] | None = None,
     bow_stern_segment_crop: tuple[tuple[float, float], tuple[float, float]]
     | None = None,
+    bow_stern_min_confidence: float | None = None,
     wake_segment_crop: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> np.ndarray:
     """
     Draw optional SOTA overlays on the spot chip (crop pixel coordinates):
 
     - YOLO segmentation hull (cyan outline)
-    - Keypoints / superstructure landmarks (magenta dots; low-confidence may be omitted upstream)
-    - Bow→stern segment from keypoints (green)
+    - Keypoints: use ``keypoints_xy_conf`` as ``(x, y, conf)`` for confidence-scaled
+      color and dot radius; else fall back to uniform ``keypoints_crop``.
+    - Bow→stern segment (green): line width scales with ``bow_stern_min_confidence``
+      when provided (min of bow/stern confidences).
     - Heuristic wake axis segment (amber)
     """
     from PIL import Image, ImageDraw
@@ -778,6 +795,8 @@ def overlay_sota_on_spot_rgb(
     draw = ImageDraw.Draw(im)
     h, w = rgb.shape[0], rgb.shape[1]
     lw = max(2, min(h, w) // 80)
+    kp_base = (255, 0, 200)
+    bow_stern_base = (120, 255, 80)
 
     if yolo_polygon_crop and len(yolo_polygon_crop) >= 3:
         poly = [
@@ -786,20 +805,49 @@ def overlay_sota_on_spot_rgb(
         ]
         draw.polygon(poly, outline=(0, 255, 220), width=lw)
 
-    if keypoints_crop:
+    if keypoints_xy_conf:
+        # Semi-transparent disks: low-confidence joints fade (alpha + smaller radius).
+        base_r = max(2, lw)
+        im_rgba = im.convert("RGBA")
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        od = ImageDraw.Draw(overlay)
+        for x, y, conf in keypoints_xy_conf:
+            xi = int(np.clip(round(float(x)), 0, w - 1))
+            yi = int(np.clip(round(float(y)), 0, h - 1))
+            c = float(np.clip(conf, 0.0, 1.0))
+            r = max(1, int(round(base_r * (0.55 + 0.45 * c))))
+            col = _blend_conf_rgb(kp_base, c)
+            a_fill = int(25 + 175 * c)
+            a_line = int(70 + 185 * c)
+            od.ellipse(
+                [xi - r, yi - r, xi + r, yi + r],
+                fill=(col[0], col[1], col[2], a_fill),
+                outline=(col[0], col[1], col[2], a_line),
+                width=max(1, int(1 + 2 * c)),
+            )
+        im = Image.alpha_composite(im_rgba, overlay).convert("RGB")
+        draw = ImageDraw.Draw(im)
+    elif keypoints_crop:
         r = max(2, lw)
         for x, y in keypoints_crop:
             xi = int(np.clip(round(float(x)), 0, w - 1))
             yi = int(np.clip(round(float(y)), 0, h - 1))
             draw.ellipse(
-                [xi - r, yi - r, xi + r, yi + r], outline=(255, 0, 200), width=1
+                [xi - r, yi - r, xi + r, yi + r], outline=kp_base, width=1
             )
 
     if bow_stern_segment_crop is not None:
         p0, p1 = bow_stern_segment_crop
         a = (float(np.clip(p0[0], 0, w - 1)), float(np.clip(p0[1], 0, h - 1)))
         b = (float(np.clip(p1[0], 0, w - 1)), float(np.clip(p1[1], 0, h - 1)))
-        draw.line([a, b], fill=(120, 255, 80), width=lw)
+        if bow_stern_min_confidence is not None:
+            q = float(np.clip(bow_stern_min_confidence, 0.0, 1.0))
+            bs_lw = max(1, int(round(lw * (0.45 + 0.55 * q))))
+            line_col = _blend_conf_rgb(bow_stern_base, q)
+        else:
+            bs_lw = lw
+            line_col = bow_stern_base
+        draw.line([a, b], fill=line_col, width=bs_lw)
 
     if wake_segment_crop is not None:
         p0, p1 = wake_segment_crop

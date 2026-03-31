@@ -17,11 +17,14 @@ Coordinates are mapped back to **full-raster** pixels using the same chip window
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from vessel_detection.detection_config import KeypointsSection
 from vessel_detection.onnx_session_cache import get_ort_session
@@ -180,6 +183,101 @@ def _model_xy_to_fullres(
     return KeypointResult(xy_fullres=out_xy, conf=out_c)
 
 
+def try_predict_keypoints_chip(
+    tci_path: str | Path,
+    cx_full: float,
+    cy_full: float,
+    *,
+    chip_half: int = 320,
+    keypoints_cfg: KeypointsSection | None = None,
+    onnx_path: str | None = None,
+) -> tuple[KeypointResult | None, list[str]]:
+    """
+    Like :func:`predict_keypoints_chip` but returns ``(result, warning_codes)``.
+
+    Warning codes are stable strings for UI/logging (e.g. ``keypoints_onnx_missing_file``).
+    On success, the second element is an empty list.
+    """
+    notes: list[str] = []
+    cfg = keypoints_cfg or KeypointsSection()
+    path_raw = onnx_path if onnx_path is not None else cfg.external_onnx_path
+    if not path_raw:
+        notes.append("keypoints_onnx_path_unset")
+        logger.warning(
+            "Keypoints enabled but external_onnx_path is unset; skipping ONNX pose."
+        )
+        return None, notes
+    path = Path(str(path_raw))
+    if not path.is_file():
+        notes.append("keypoints_onnx_missing_file")
+        logger.warning("Keypoint ONNX not found: %s", path)
+        return None, notes
+
+    sess = get_ort_session(path, providers=cfg.onnx_providers)
+    if sess is None:
+        notes.append("keypoints_onnx_session_failed")
+        logger.warning(
+            "Could not create ONNX Runtime session for keypoints (install onnxruntime?): %s",
+            path,
+        )
+        return None, notes
+
+    bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx_full, cy_full, chip_half)
+    if bgr.size == 0 or cw < 2 or ch < 2:
+        notes.append("keypoints_empty_chip")
+        logger.warning("Keypoint inference skipped: empty or tiny chip at (%.1f, %.1f).", cx_full, cy_full)
+        return None, notes
+
+    import cv2
+
+    S = int(max(32, cfg.onnx_input_size))
+    resized = cv2.resize(bgr, (S, S), interpolation=cv2.INTER_LINEAR)
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
+    if cfg.input_normalize == "divide_255":
+        rgb /= 255.0
+    inp = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+    in_name = sess.get_inputs()[0].name
+    try:
+        raw_out = sess.run(None, {in_name: inp})
+    except Exception as e:
+        notes.append(f"keypoints_onnx_inference:{type(e).__name__}")
+        logger.warning("Keypoint ONNX inference failed: %s", e)
+        return None, notes
+
+    try:
+        xy_m, cf = parse_pose_onnx_output(
+            [np.asarray(o) for o in raw_out],
+            num_keypoints=int(cfg.num_keypoints),
+            layout=str(cfg.output_layout),
+        )
+    except (ValueError, TypeError) as e:
+        notes.append(f"keypoints_onnx_parse:{type(e).__name__}")
+        logger.warning(
+            "Keypoint ONNX output parse failed (check output_layout / export): %s", e
+        )
+        return None, notes
+
+    k_expect = int(cfg.num_keypoints)
+    if xy_m.shape[0] > k_expect:
+        xy_m = xy_m[:k_expect]
+        cf = cf[:k_expect]
+    elif xy_m.shape[0] < k_expect and xy_m.shape[0] > 0:
+        pass
+
+    return (
+        _model_xy_to_fullres(
+            xy_m,
+            cf,
+            chip_c0=c0,
+            chip_r0=r0,
+            chip_w=cw,
+            chip_h=ch,
+            input_size=S,
+        ),
+        notes,
+    )
+
+
 def predict_keypoints_chip(
     tci_path: str | Path,
     cx_full: float,
@@ -194,63 +292,17 @@ def predict_keypoints_chip(
 
     ``onnx_path`` overrides ``keypoints_cfg.external_onnx_path`` when provided.
     Returns ``None`` if path missing, ORT unavailable, or inference fails.
+    For diagnostics, use :func:`try_predict_keypoints_chip`.
     """
-    cfg = keypoints_cfg or KeypointsSection()
-    path_raw = onnx_path if onnx_path is not None else cfg.external_onnx_path
-    if not path_raw:
-        return None
-    path = Path(str(path_raw))
-    if not path.is_file():
-        return None
-
-    sess = get_ort_session(path, providers=cfg.onnx_providers)
-    if sess is None:
-        return None
-
-    bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx_full, cy_full, chip_half)
-    if bgr.size == 0 or cw < 2 or ch < 2:
-        return None
-
-    import cv2
-
-    S = int(max(32, cfg.onnx_input_size))
-    resized = cv2.resize(bgr, (S, S), interpolation=cv2.INTER_LINEAR)
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
-    if cfg.input_normalize == "divide_255":
-        rgb /= 255.0
-    inp = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
-    in_name = sess.get_inputs()[0].name
-    try:
-        raw_out = sess.run(None, {in_name: inp})
-    except Exception:
-        return None
-
-    try:
-        xy_m, cf = parse_pose_onnx_output(
-            [np.asarray(o) for o in raw_out],
-            num_keypoints=int(cfg.num_keypoints),
-            layout=str(cfg.output_layout),
-        )
-    except (ValueError, TypeError):
-        return None
-
-    k_expect = int(cfg.num_keypoints)
-    if xy_m.shape[0] > k_expect:
-        xy_m = xy_m[:k_expect]
-        cf = cf[:k_expect]
-    elif xy_m.shape[0] < k_expect and xy_m.shape[0] > 0:
-        # tolerate variable K from model
-        pass
-
-    return _model_xy_to_fullres(
-        xy_m,
-        cf,
-        chip_c0=c0,
-        chip_r0=r0,
-        chip_w=cw,
-        chip_h=ch,
-        input_size=S,
+    r, _ = try_predict_keypoints_chip(
+        tci_path,
+        cx_full,
+        cy_full,
+        chip_half=chip_half,
+        keypoints_cfg=keypoints_cfg,
+        onnx_path=onnx_path,
     )
+    return r
 
 
 def keypoints_to_jsonable(kp: KeypointResult | None) -> list[dict[str, Any]] | None:

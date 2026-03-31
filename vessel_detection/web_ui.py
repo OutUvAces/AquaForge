@@ -1584,6 +1584,12 @@ def _render_review_deck(
                     f"Fused heading: **{float(sota['heading_fused_deg']):.1f}°** "
                     f"({sota.get('heading_fusion_source', '')})"
                 )
+            sw = sota.get("sota_warnings") or []
+            if isinstance(sw, list) and sw:
+                st.warning(
+                    "SOTA diagnostics: " + "; ".join(str(x) for x in sw if x)
+                    + " — keypoints/wake ONNX may be skipped; heuristic wake can still run."
+                )
 
     pool = st.session_state.get("detector_ranked_unlabeled_pool") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
@@ -1719,6 +1725,17 @@ def _render_review_deck(
         raw_kp = sota.get("keypoints_crop")
         if isinstance(raw_kp, list) and raw_kp:
             _kpc = [(float(t[0]), float(t[1])) for t in raw_kp]
+        _kxc = None
+        raw_kxc = sota.get("keypoints_xy_conf_crop")
+        if isinstance(raw_kxc, list) and raw_kxc:
+            _kxc = [
+                (float(t[0]), float(t[1]), float(t[2]))
+                for t in raw_kxc
+                if isinstance(t, (list, tuple)) and len(t) >= 3
+            ]
+        _bs_conf = None
+        if sota.get("keypoint_heading_trust") is not None:
+            _bs_conf = float(sota["keypoint_heading_trust"])
         _bs = None
         raw_bs = sota.get("bow_stern_segment_crop")
         if isinstance(raw_bs, list) and len(raw_bs) == 2:
@@ -1729,12 +1746,14 @@ def _render_review_deck(
         if isinstance(raw_wk, list) and len(raw_wk) == 2:
             w0, w1 = raw_wk[0], raw_wk[1]
             _wk = ((float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1])))
-        if _poly or _kpc or _bs or _wk:
+        if _poly or _kxc or _kpc or _bs or _wk:
             spot_vis = overlay_sota_on_spot_rgb(
                 spot_vis,
                 yolo_polygon_crop=_poly,
-                keypoints_crop=_kpc,
+                keypoints_crop=None if _kxc else _kpc,
+                keypoints_xy_conf=_kxc,
                 bow_stern_segment_crop=_bs,
+                bow_stern_min_confidence=_bs_conf,
                 wake_segment_crop=_wk,
             )
     mk_draw2 = st.session_state.get(dim_key, [])

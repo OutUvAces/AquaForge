@@ -11,6 +11,7 @@ provide a second wake direction; configure ``wake_fusion.use_onnx_wake`` and
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ from typing import Any
 import numpy as np
 
 from vessel_detection import geodesy_bearing
+
+logger = logging.getLogger(__name__)
 
 
 def _angular_distance_deg(a: float, b: float) -> float:
@@ -287,11 +290,13 @@ def heading_from_wake_onnx_chip(
     path = Path(onnx_path)
     if not path.is_file():
         meta["error"] = "missing_onnx"
+        logger.warning("Wake ONNX file missing: %s", path)
         return None, meta
 
     sess = get_ort_session(path)
     if sess is None:
         meta["error"] = "ort_session_failed"
+        logger.warning("Wake ONNX session failed (onnxruntime?): %s", path)
         return None, meta
 
     bgr, _c0, _r0, cw, ch = read_yolo_chip_bgr(tci_path, cx_full, cy_full, chip_half)
@@ -310,6 +315,7 @@ def heading_from_wake_onnx_chip(
         outs = sess.run(None, {in_name: inp})
     except Exception as e:
         meta["error"] = str(e)
+        logger.warning("Wake ONNX inference failed: %s", e)
         return None, meta
 
     arr = np.asarray(outs[0], dtype=np.float32).ravel()
@@ -337,6 +343,7 @@ def heading_from_wake_onnx_chip(
         h = heading_deg_from_fullres_offset(tci_path, cx_full, cy_full, dx_full, dy_full)
     except Exception as e:
         meta["error"] = str(e)
+        logger.warning("Wake ONNX heading geodesy failed: %s", e)
         return None, meta
 
     conf = float(np.clip(confidence_prior, 0.05, 0.99))
