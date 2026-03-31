@@ -26,7 +26,6 @@ from aquaforge.unified.distill import (
     review_ui_uncertainty_signal,
     small_vessel_length_hint,
 )
-from aquaforge.unified.losses import build_kp_heat_targets_adaptive
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
 from aquaforge.vessel_markers import (
     markers_for_hull,
@@ -263,6 +262,8 @@ def collate_batch(
 ) -> dict[str, Any]:
     """Stack numpy → torch tensors for :func:`aquaforge.unified.losses.aquaforge_joint_loss`."""
     import torch
+
+    from aquaforge.unified.losses import build_kp_heat_targets_adaptive
 
     imgs = torch.stack([torch.from_numpy(b[0]).float() for b in batch_items], dim=0).to(device)
     cls = torch.tensor([b[1] for b in batch_items], device=device, dtype=torch.float32)
