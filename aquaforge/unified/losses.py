@@ -16,8 +16,15 @@ We combine **task-specific** terms with an explicitly documented blend (not a pa
   * Optional ensemble distillation on heading (sin, cos).
 
 **Curriculum** — :class:`CurriculumSchedule` + interpolation between **named stage targets**;
-**DynamicLossBalancer** rescales with optional **batch context** (mask footprint, heading ambiguity
-from the confidence logit, sampler priority) — our stabiliser, not GradNorm/DWA source dumps.
+**DynamicLossBalancer** rescales with optional **batch context** (mask footprint, fraction of
+chips that are small-hull, heading ambiguity, sampler priority, review uncertainty) — our
+stabiliser, not GradNorm/DWA source dumps.
+
+**Hull–exterior coherence** — suppresses segmentation mass **outside a dilated GT hull**, a
+proxy for “open water” on centred S2 chips when no SCL band is in the batch.
+
+**Delta-neck** (see :mod:`aquaforge.unified.model`) fuses YOLO scales via **cross-scale
+difference maps**, not a softmax gate or classic FPN top-down add.
 """
 
 from __future__ import annotations
@@ -78,7 +85,7 @@ def geometry_scene_cohesion_multiplier(seg_gt: torch.Tensor) -> float:
         mean_cov = float(t.mean().item())
     ref = max(0.022, min(0.095, 0.52 * med + 0.48 * mean_cov))
     x = min(1.0, mean_cov / max(ref, 1e-5))
-    return float(1.0 + 0.27 * max(0.0, 1.0 - x))
+    return float(1.0 + 0.34 * max(0.0, 1.0 - x))
 
 
 def heading_confidence_ambiguity_multiplier(hdg: torch.Tensor) -> float:
@@ -275,8 +282,10 @@ def heading_flip_aware_circular_loss(
     ang = torch.acos(cos_sim) / torch.pi
     base = cos_term + 0.42 * ang
     kp_strength = kp_vis.clamp(0, 1).mean(dim=-1)
+    # Bow+stern visible → treat axis as trustworthy; wrong-way (flip) errors hurt more.
+    bow_stern = kp_vis[:, 0].clamp(0, 1) * kp_vis[:, 1].clamp(0, 1)
     flip = (cos_sim < 0.0).float() * valid.float()
-    mult = 1.0 + 0.62 * kp_strength * flip
+    mult = 1.0 + flip * (0.68 * kp_strength + 0.62 * bow_stern)
     weighted = base * mult
     return (weighted * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
 
@@ -331,12 +340,32 @@ def bce_logits_masked_per_sample(
 def small_vessel_sample_weights(seg_gt: torch.Tensor) -> torch.Tensor:
     """
     Higher weight when this chip’s **GT hull footprint is small vs the batch median** — emphasizes
-    small Sentinel-2 vessels without a hand-tuned constant scale.
+    small Sentinel-2 vessels without a hand-tuned constant scale. Stronger tail than v1 so
+    medium/small hulls keep gradient share vs a few large ships in the batch.
     """
     cov = seg_gt.view(seg_gt.shape[0], -1).mean(dim=-1).clamp(1e-5, 1.0)
     med = cov.median(dim=0, keepdim=True).values.clamp_min(1e-5)
-    w = 1.0 + 0.38 * (med / cov).clamp(1.0, 2.65)
+    w = 1.0 + 0.52 * (med / cov).clamp(1.0, 3.35)
     return w.detach()
+
+
+def hull_exterior_context_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """
+    **Scene-context (AquaForge, mask-derived):** outside a dilated GT hull, predicted hull
+    probability should stay low. Training chips are centred on candidates — most pixels are
+    open water; this discourages glitter/coast false mass without requiring SCL in the tensor.
+    """
+    t = target.clamp(0, 1)
+    if float(t.sum().item()) < 1e-6:
+        return logits.sum() * 0.0
+    k = 15
+    pad = k // 2
+    dil = F.max_pool2d(t, kernel_size=k, stride=1, padding=pad)
+    exterior = (1.0 - dil).clamp(0.0, 1.0)
+    p = torch.sigmoid(logits)
+    mass = exterior.sum(dim=(1, 2, 3)).clamp_min(1.0)
+    per_b = (p * exterior).sum(dim=(1, 2, 3)) / mass
+    return per_b.mean()
 
 
 def mask_centroid_cohesion_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -609,20 +638,27 @@ class DynamicLossBalancer:
 
         cov = bc.get("seg_coverage_mean")
         if cov is not None and cov < 0.028:
-            out["seg"] = float(out.get("seg", 0.0) * 1.11)
-            out["kp_hm"] = float(out.get("kp_hm", 0.0) * 1.08)
+            out["seg"] = float(out.get("seg", 0.0) * 1.14)
+            out["kp_hm"] = float(out.get("kp_hm", 0.0) * 1.1)
+        # Fraction of chips with very small GT hulls in this batch — push geometry harder.
+        ssf = bc.get("seg_small_vessel_frac")
+        if ssf is not None and ssf > 0.35:
+            out["seg"] = float(out.get("seg", 0.0) * 1.08)
+            out["kp"] = float(out.get("kp", 0.0) * 1.05)
+            out["kp_hm"] = float(out.get("kp_hm", 0.0) * 1.06)
         amb = bc.get("heading_ambiguity_mean")
-        if amb is not None and amb > 0.38:
-            out["hdg"] = float(out.get("hdg", 0.0) * 1.1)
+        if amb is not None and amb > 0.36:
+            out["hdg"] = float(out.get("hdg", 0.0) * 1.14)
         pr = bc.get("al_priority_mean")
-        if pr is not None and pr > 1.65:
-            out["cls"] = float(out.get("cls", 0.0) * 1.05)
-            out["kp"] = float(out.get("kp", 0.0) * 1.04)
+        if pr is not None and pr > 1.55:
+            out["cls"] = float(out.get("cls", 0.0) * 1.07)
+            out["kp"] = float(out.get("kp", 0.0) * 1.06)
         # Review-export ambiguity (0–1) — optional, from collate when present.
         ru = bc.get("review_uncertainty_mean")
-        if ru is not None and ru > 0.42:
-            out["seg"] = float(out.get("seg", 0.0) * 1.06)
-            out["hdg"] = float(out.get("hdg", 0.0) * 1.05)
+        if ru is not None and ru > 0.38:
+            out["seg"] = float(out.get("seg", 0.0) * 1.08)
+            out["hdg"] = float(out.get("hdg", 0.0) * 1.08)
+            out["kp_hm"] = float(out.get("kp_hm", 0.0) * 1.05)
 
         return out
 
@@ -669,10 +705,19 @@ def aquaforge_joint_loss(
             bce_logits_masked_per_sample(sl, seg_tgt, torch.ones_like(seg_tgt)) * w_sv
         ).mean()
         d_cent = mask_centroid_cohesion_loss(sl, seg_tgt)
-        seg_loss = d_dice + 0.38 * d_iou + 0.22 * d_tversk + 0.42 * d_bce + 0.075 * d_cent
+        d_ctx = hull_exterior_context_loss(sl, seg_tgt)
+        seg_loss = (
+            d_dice
+            + 0.38 * d_iou
+            + 0.22 * d_tversk
+            + 0.42 * d_bce
+            + 0.075 * d_cent
+            + 0.11 * d_ctx
+        )
         total_geo = total_geo + w * seg_loss
         logs["loss_seg"] = float(seg_loss.detach())
         logs["loss_scene_centroid"] = float(d_cent.detach())
+        logs["loss_scene_exterior"] = float(d_ctx.detach())
 
     w = stage_weights.get("kp", 1.0)
     if w > 0:
@@ -762,7 +807,7 @@ def aquaforge_self_training_loss(
     """
     device = out["cls_logit"].device
     dtype = out["cls_logit"].dtype
-    tw = trust.clamp(0.04, 1.0)
+    tw = trust.clamp(0.05, 1.0)
     denom = tw.sum().clamp_min(1e-6)
     logs: dict[str, float] = {}
     total = torch.zeros((), device=device, dtype=dtype)
@@ -773,7 +818,9 @@ def aquaforge_self_training_loss(
         st = soft["seg"]
         if sl.shape[-2:] != st.shape[-2:]:
             st = F.interpolate(st, size=sl.shape[-2:], mode="bilinear", align_corners=False)
-        mse = (torch.sigmoid(sl) - st.clamp(0, 1)).pow(2).mean(dim=(1, 2, 3))
+        # Slightly sharpen teacher hull probs so pseudo chips do not smear into open water.
+        st = st.clamp(0, 1).pow(0.9)
+        mse = (torch.sigmoid(sl) - st).pow(2).mean(dim=(1, 2, 3))
         ls = (mse * tw).sum() / denom
         total = total + w * ls
         logs["loss_st_seg"] = float(ls.detach())
@@ -783,7 +830,8 @@ def aquaforge_self_training_loss(
         p = F.normalize(out["hdg"][:, :2], dim=-1, eps=1e-6)
         tgt = F.normalize(soft["hdg_sc"], dim=-1, eps=1e-6)
         cos_sim = (p * tgt).sum(dim=-1)
-        lh = ((1.0 - cos_sim) * tw).sum() / denom
+        # Squared geodesic-style emphasis on large heading disagreements (pseudo batch).
+        lh = (((1.0 - cos_sim).pow(1.15)) * tw).sum() / denom
         total = total + w * lh
         logs["loss_st_hdg"] = float(lh.detach())
 

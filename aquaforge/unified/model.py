@@ -5,10 +5,10 @@ We provide two architectures (checkpoint ``meta["model_arch"]`` selects at load 
 
 1. **cnn** — ``AquaForgeMultiTask``: lightweight in-repo CNN (default for CPU-only dev, no Ultralytics).
 2. **yolo_unified** — ``AquaForgeUnifiedYOLO``: YOLO11/12 **backbone+neck** tensors taken *just before*
-   the vendor detection head, passed through our **per-scale gates + residual fuse** (sigmoid gates on
-   aligned strides, depthwise fuse, explicit fine/mid residuals) and **custom** heads: hull mask,
-   landmark heatmaps, global keypoint readout, sin/cos heading, wake — trained with
-   ``aquaforge.unified.losses`` and ``scripts/train_aquaforge.py``.
+   the vendor detection head, passed through our **delta-neck** mixer: aligned scales are concatenated
+   with **cross-scale difference maps** (coarser−fine), then depthwise-refined — not a softmax gate or
+   classic FPN top-down sum. **custom** heads: hull mask, landmark heatmaps, global keypoint readout,
+   sin/cos heading, wake — trained with ``aquaforge.unified.losses`` and ``scripts/train_aquaforge.py``.
 
 We do **not** reuse Ultralytics detect/segment losses; only early graph features feed AquaForge.
 """
@@ -75,10 +75,9 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
     raise RuntimeError("AquaForge YOLO backbone produced no 4D feature maps")
 
 
-# --- AquaForge **S2 stride gate + residual fuse** (YOLO neck → our tensor) ---
-# Distinct from a single softmax “harmonizer”: we use **learned sigmoid gates per scale** on aligned
-# neck tensors, then fuse with the finest map via depthwise separable conv and **explicit fine + mid
-# residuals** (Sentinel-2 chips benefit from keeping sharp 10 m structure while borrowing mid-scale context).
+# --- AquaForge **delta-neck** (YOLO neck → our tensor) ---
+# Cross-scale **difference tensors** (ReLU(coarse−fine)) expose disagreements the mixer can explain;
+# stem is 1×1 compress + 3×3 depthwise, then additive fine/mid injections and channel calibration.
 
 
 class _EncoderTower(nn.Module):
@@ -170,21 +169,28 @@ class AquaForgeMultiTask(nn.Module):
         return cls_logit, seg, kp, hdg, wake, kp_hm
 
 
-class _HarmonizerFuseDS(nn.Module):
+class _DeltaNeckMixer(nn.Module):
     """
-    Depthwise 3×3 then pointwise 1×1 on the stacked context+anchor map — fewer dense
-    cross-channel params than one full 3×3 on ``2*hidden`` channels (AquaForge harmonizer).
+    Compress ``concat(p3, p4', p5', relu(p4'−p3), relu(p5'−p3))`` → hidden channels, then
+    depthwise 3×3 spatial refine (AquaForge delta-neck).
     """
 
-    def __init__(self, c_in: int, c_out: int) -> None:
+    def __init__(self, hidden: int) -> None:
         super().__init__()
-        self.dw = nn.Conv2d(c_in, c_in, 3, 1, 1, groups=c_in, bias=False)
-        self.pw = nn.Conv2d(c_in, c_out, 1, bias=False)
-        self.bn = nn.BatchNorm2d(c_out)
-        self.act = nn.ReLU(inplace=True)
+        self.seq = nn.Sequential(
+            nn.Conv2d(hidden * 5, hidden, 1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, 3, 1, 1, groups=hidden, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True),
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.act(self.bn(self.pw(self.dw(x))))
+    def forward(self, p3: torch.Tensor, up4: torch.Tensor, up5: torch.Tensor) -> torch.Tensor:
+        d43 = F.relu(up4 - p3)
+        d53 = F.relu(up5 - p3)
+        x = torch.cat([p3, up4, up5, d43, d53], dim=1)
+        return self.seq(x)
 
 
 class AquaForgeUnifiedYOLO(nn.Module):
@@ -229,15 +235,11 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.neck_proj = nn.ModuleList(
             [nn.Conv2d(d, self.hidden, 1, bias=False) for d in dims]
         )
-        # Per-scale gates (sigmoid) on (fine, mid, coarse) after align — starts near 0.5 each.
-        self.scale_gate_logits = nn.Parameter(torch.zeros(3))
-        # Residual strengths: keep fine detail + mid-scale context in the fused map.
-        self.res_fine_scale = nn.Parameter(torch.tensor(0.28))
-        self.res_mid_scale = nn.Parameter(torch.tensor(0.2))
-        self.fuse = _HarmonizerFuseDS(self.hidden * 2, self.hidden)
-        # Channel recalibration on the fused map (S2-specific: emphasize hull-relevant channels).
+        self.delta_stem = _DeltaNeckMixer(self.hidden)
+        self.fine_inject = nn.Parameter(torch.tensor(0.32))
+        self.mid_inject = nn.Parameter(torch.tensor(0.2))
         se_c = max(8, self.hidden // 8)
-        self.fuse_se = nn.Sequential(
+        self.channel_calib = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(self.hidden, se_c, 1, bias=True),
             nn.ReLU(inplace=True),
@@ -258,15 +260,13 @@ class AquaForgeUnifiedYOLO(nn.Module):
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
         up5 = F.interpolate(p5, size=target_hw, mode="nearest")
-        gw = torch.sigmoid(self.scale_gate_logits).view(3, 1, 1, 1)
-        context = gw[0] * p3 + gw[1] * up4 + gw[2] * up5
-        base = self.fuse(torch.cat([context, p3], dim=1))
+        stem = self.delta_stem(p3, up4, up5)
         fused = (
-            base
-            + torch.tanh(self.res_fine_scale) * p3
-            + torch.tanh(self.res_mid_scale) * up4
+            stem
+            + torch.tanh(self.fine_inject) * p3
+            + torch.tanh(self.mid_inject) * up4
         )
-        fused = fused * self.fuse_se(fused)
+        fused = fused * self.channel_calib(fused)
         seg_lr = self.seg_head(fused)
         seg = F.interpolate(seg_lr, size=(self.imgsz, self.imgsz), mode="bilinear", align_corners=False)
         kp_hm = self.kp_hm_head(fused)
@@ -316,9 +316,12 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
         m = AquaForgeUnifiedYOLO(imgsz=imgsz, n_landmarks=nl, yolo_weights=str(ypath))
     else:
         m = AquaForgeMultiTask(imgsz=imgsz, n_landmarks=nl)
-    # v1 checkpoints predate kp_hm branch weights; allow partial load for graceful upgrade.
     fv = int(meta.get("format_version", 1))
-    m.load_state_dict(ckpt["state_dict"], strict=(fv >= 2))
+    # yolo_unified v3 introduces delta-neck; older state_dict keys differ — load non-strict.
+    if arch == "yolo_unified" and fv < 3:
+        m.load_state_dict(ckpt["state_dict"], strict=False)
+    else:
+        m.load_state_dict(ckpt["state_dict"], strict=(fv >= 2))
     return m, meta
 
 

@@ -8,6 +8,14 @@ from aquaforge.unified.constants import LANDMARK_NAMES, NUM_LANDMARKS
 
 
 class TestReviewUIUncertaintySignal(unittest.TestCase):
+    def test_coastal_and_small_vessel_hints(self) -> None:
+        from aquaforge.unified.distill import coastal_scene_hint, small_vessel_length_hint
+
+        self.assertEqual(coastal_scene_hint(None), 0.0)
+        self.assertEqual(coastal_scene_hint({"coastal_or_land_adjacent": True}), 1.0)
+        self.assertEqual(small_vessel_length_hint({}), 0.0)
+        self.assertGreater(small_vessel_length_hint({"pred_yolo_length_m": 30.0}), 0.5)
+
     def test_uncertainty_signal_range(self) -> None:
         from aquaforge.unified.distill import review_ui_uncertainty_signal
 
@@ -95,6 +103,7 @@ class TestAquaForgeLosses(unittest.TestCase):
         self.assertIn("landmark_vis_boost", logs)
         self.assertIn("scene_geo_full_mult", logs)
         self.assertIn("loss_scene_centroid", logs)
+        self.assertIn("loss_scene_exterior", logs)
 
     def test_cnn_forward_six_outputs(self) -> None:
         try:

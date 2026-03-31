@@ -23,6 +23,32 @@ import numpy as np
 from aquaforge.review_schema import EXTRA_AF_TRAINING_PRIORITY
 
 
+def coastal_scene_hint(extra: dict[str, Any] | None) -> float:
+    """1.0 when review export marks coastal / land-adjacent (for sampler multipliers)."""
+    ex = extra or {}
+    if ex.get("coastal_or_land_adjacent") is True or ex.get("near_coast_proxy") is True:
+        return 1.0
+    return 0.0
+
+
+def small_vessel_length_hint(extra: dict[str, Any] | None) -> float:
+    """
+    0–1 from ``pred_yolo_length_m`` when present (smaller hull proxy → higher).
+    Used alongside :func:`review_ui_active_learning_priority` for the training sampler.
+    """
+    ex = extra or {}
+    ln = ex.get("pred_yolo_length_m")
+    try:
+        if ln is None:
+            return 0.0
+        v = float(ln)
+        if v >= 90.0:
+            return 0.0
+        return float(min(1.0, max(0.0, (90.0 - v) / 90.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
     """
     0–1 score from **review-export** fields only (no forward pass): borderline hybrid score, clouds,
@@ -73,9 +99,10 @@ def self_training_trust_from_outputs(
     """
     u = max(0.0, min(1.0, float(model_uncertainty)))
     pv = max(0.0, min(1.0, float(vessel_prob)))
-    base = max(0.04, min(1.0, (1.0 - u) * pv))
+    # Tighter trust: pseudo chips need clear vessel signal and low model uncertainty.
+    base = max(0.06, min(1.0, (1.0 - u) ** 1.08 * pv ** 1.05))
     eu = max(0.0, min(1.0, float(export_uncertainty)))
-    return float(base * max(0.38, 1.0 - 0.28 * eu))
+    return float(base * max(0.42, 1.0 - 0.35 * eu))
 
 
 def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
@@ -114,23 +141,24 @@ def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     c_conf = torch.sigmoid(out["hdg"][:, 2:3])
     u_conf = float((4.0 * c_conf * (1.0 - c_conf)).mean().item())
 
+    # Weight heatmap / margin terms slightly higher for small-structure ambiguity (S2 hulls).
     if kph is not None:
         u = (
-            0.30 * u_cls
-            + 0.20 * u_h
-            + 0.20 * ent_n
-            + 0.16 * u_kp
-            + 0.14 * u_conf
+            0.26 * u_cls
+            + 0.18 * u_h
+            + 0.18 * ent_n
+            + 0.22 * u_kp
+            + 0.16 * u_conf
         )
     else:
-        u = 0.38 * u_cls + 0.28 * u_h + 0.22 * ent_n + 0.12 * u_conf
+        u = 0.36 * u_cls + 0.26 * u_h + 0.22 * ent_n + 0.16 * u_conf
     return max(0.0, min(1.0, u))
 
 
 def merge_al_priority_with_aquaforge_u(base_priority: float, af_u: float) -> float:
     """Boost sampling weight when the **student** is uncertain (complements UI / ensemble cues)."""
     u = max(0.0, min(1.0, float(af_u)))
-    return float(max(0.45, min(base_priority * (1.0 + 0.55 * u), 5.5)))
+    return float(max(0.45, min(base_priority * (1.0 + 0.72 * u), 5.8)))
 
 
 def review_ui_active_learning_priority(
@@ -168,10 +196,12 @@ def review_ui_active_learning_priority(
     try:
         if ln is not None:
             lnv = float(ln)
-            if lnv < 70.0:
-                p += 0.85
-            if lnv < 45.0:
-                p += 0.45
+            if lnv < 85.0:
+                p += 0.95
+            if lnv < 55.0:
+                p += 0.55
+            if lnv < 38.0:
+                p += 0.4
     except (TypeError, ValueError):
         pass
 
@@ -191,14 +221,14 @@ def review_ui_active_learning_priority(
 
     # Coastal / land-adjacent queue (optional UI flag — not a third-party dataset label).
     if ex.get("coastal_or_land_adjacent") is True or ex.get("near_coast_proxy") is True:
-        p += 0.5
+        p += 0.72
 
     if review_category == "land":
         p += 0.35
 
     # Human chose “Unsure” in the review UI — prioritize if this row is ever used for mining / aux.
     if review_category == "ambiguous":
-        p += 1.25
+        p += 1.55
 
     if heading_labeled:
         p += 0.15

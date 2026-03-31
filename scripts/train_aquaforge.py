@@ -25,6 +25,8 @@ Examples:
       --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
   py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
       --no-dynamic-balance
+  py -3 scripts/train_aquaforge.py --pseudo-jsonl data/labels/pseudo_pool.jsonl \\
+      --pseudo-per-epoch 8 --pseudo-scan-max 256
   py -3 scripts/export_aquaforge_onnx.py --checkpoint data/models/aquaforge/aquaforge.pt
 """
 
@@ -128,6 +130,12 @@ def main() -> None:
     )
     ap.add_argument("--pseudo-min-conf", type=float, default=0.58, help="Min vessel prob to accept pseudo chip.")
     ap.add_argument("--pseudo-max-u", type=float, default=0.62, help="Max AquaForge uncertainty to accept pseudo chip.")
+    ap.add_argument(
+        "--pseudo-scan-max",
+        type=int,
+        default=192,
+        help="Max pseudo chips to score per epoch; highest-trust subset is used (see take_top=pseudo-per-epoch).",
+    )
     args = ap.parse_args()
 
     try:
@@ -200,9 +208,11 @@ def main() -> None:
                 max(float(s.al_priority), 0.25)
                 * (
                     1.0
-                    + 0.11
+                    + 0.13
                     * min(1.0, float(getattr(s, "review_uncertainty", 0.0)))
                 )
+                * (1.0 + 0.22 * float(getattr(s, "coastal_hint", 0.0)))
+                * (1.0 + 0.18 * float(getattr(s, "small_vessel_hint", 0.0)))
                 for s in rows
             ],
             dtype=torch.double,
@@ -321,10 +331,13 @@ def main() -> None:
             if balancer is not None:
                 balancer.update_from_logs(logs)
                 cov = float(batch_dict["seg"].mean().item())
+                per_cov = batch_dict["seg"].mean(dim=(1, 2, 3))
+                ssf = float((per_cov < 0.035).float().mean().item())
                 h_conf = torch.sigmoid(hdg[:, 2:3])
                 h_amb = float((4.0 * h_conf * (1.0 - h_conf)).mean().item())
                 ctx = {
                     "seg_coverage_mean": cov,
+                    "seg_small_vessel_frac": ssf,
                     "heading_ambiguity_mean": h_amb,
                     "al_priority_mean": float(batch_dict["al_priority"].mean().item()),
                     "review_uncertainty_mean": float(
@@ -336,16 +349,17 @@ def main() -> None:
                 sw_eff = dict(base_sw)
 
         if pseudo_pool and pseudo_n > 0 and pseudo_w > 0:
-            random.shuffle(pseudo_pool)
-            chunk = pseudo_pool[: max(1, min(pseudo_n, len(pseudo_pool)))]
+            scan_cap = min(len(pseudo_pool), max(1, int(args.pseudo_scan_max)))
             prep = prepare_pseudo_self_training_batch(
                 model,
                 device,
-                chunk,
+                pseudo_pool,
                 int(args.chip_half),
                 int(args.imgsz),
                 min_vessel_conf=float(args.pseudo_min_conf),
                 max_uncertainty=float(args.pseudo_max_u),
+                max_scan=scan_cap,
+                take_top=max(1, min(pseudo_n, scan_cap)),
             )
             if prep is not None:
                 imgs_p, soft, trust = prep
@@ -387,6 +401,7 @@ def main() -> None:
             "pseudo_jsonl": str(args.pseudo_jsonl) if args.pseudo_jsonl else None,
             "pseudo_per_epoch": pseudo_n,
             "pseudo_mix_weight": pseudo_w,
+            "pseudo_scan_max": int(args.pseudo_scan_max),
         },
     }
     if arch == "yolo_unified":

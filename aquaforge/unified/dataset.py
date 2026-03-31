@@ -21,8 +21,10 @@ import numpy as np
 
 from aquaforge.unified.constants import NUM_LANDMARKS
 from aquaforge.unified.distill import (
+    coastal_scene_hint,
     review_ui_active_learning_priority,
     review_ui_uncertainty_signal,
+    small_vessel_length_hint,
 )
 from aquaforge.unified.losses import build_kp_heat_targets_adaptive
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
@@ -154,6 +156,9 @@ class AquaForgeSample:
     al_priority: float = 1.0
     # Raw 0–1 from review JSONL ``extra`` (balancer + logging; priority already boosts via same signal).
     review_uncertainty: float = 0.0
+    # 0/1 coastal flag and 0–1 small-hull proxy for WeightedRandomSampler (not passed into loss).
+    coastal_hint: float = 0.0
+    small_vessel_hint: float = 0.0
     teacher_heading_sc: np.ndarray | None = None
     teacher_valid: float = 0.0
 
@@ -205,6 +210,8 @@ def iter_aquaforge_samples(
             pr = review_ui_active_learning_priority(
                 ex_fb, heading_labeled=heading is not None, review_category=None
             )
+            ch = coastal_scene_hint(ex_fb)
+            smh = small_vessel_length_hint(ex_fb)
             yield AquaForgeSample(
                 Path(path),
                 cx,
@@ -215,6 +222,8 @@ def iter_aquaforge_samples(
                 rid,
                 al_priority=pr,
                 review_uncertainty=u_sig,
+                coastal_hint=ch,
+                small_vessel_hint=smh,
             )
             continue
 
@@ -231,6 +240,8 @@ def iter_aquaforge_samples(
         pr = review_ui_active_learning_priority(
             extra, heading_labeled=heading is not None, review_category="vessel"
         )
+        ch = coastal_scene_hint(extra)
+        smh = small_vessel_length_hint(extra)
         yield AquaForgeSample(
             Path(path),
             cx,
@@ -241,6 +252,8 @@ def iter_aquaforge_samples(
             rid,
             al_priority=pr,
             review_uncertainty=u_sig,
+            coastal_hint=ch,
+            small_vessel_hint=smh,
         )
 
 
@@ -444,12 +457,17 @@ def prepare_pseudo_self_training_batch(
     *,
     min_vessel_conf: float = 0.58,
     max_uncertainty: float = 0.62,
+    max_scan: int = 192,
+    take_top: int | None = None,
 ) -> tuple[Any, dict[str, Any], Any] | None:
     """
-    Teacher pass (no grad): AquaForge produces soft seg + heading direction and a **trust** scalar
-    per chip from :func:`aquaforge.unified.distill.aquaforge_uncertainty_from_outputs`.
-    Student pass is done in the trainer on the returned ``imgs`` with ``model.train()``.
+    Teacher pass (no grad): AquaForge scores up to ``max_scan`` shuffled candidates, keeps those
+    passing confidence + uncertainty gates, then selects the **highest-trust** ``take_top`` (or all
+    if ``take_top`` is None) for the student step — avoids filling the pseudo batch with mediocre
+    chips from file order alone.
     """
+    import random
+
     import torch
     import torch.nn.functional as Fn
 
@@ -461,14 +479,15 @@ def prepare_pseudo_self_training_batch(
 
     if not candidates:
         return None
-    imgs_list: list[np.ndarray] = []
-    trust_list: list[float] = []
-    soft_seg: list[Any] = []
-    soft_hdg_sc: list[np.ndarray] = []
+    pool = list(candidates)
+    random.shuffle(pool)
+    probe = pool[: max(1, min(int(max_scan), len(pool)))]
+
+    scored: list[tuple[float, np.ndarray, Any, np.ndarray]] = []
 
     model.eval()
     with torch.no_grad():
-        for c in candidates:
+        for c in probe:
             bgr, _, _, cw, ch = read_yolo_chip_bgr(c.tci_path, c.cx, c.cy, chip_half)
             if bgr.size == 0 or cw < 8 or ch < 8:
                 continue
@@ -488,14 +507,22 @@ def prepare_pseudo_self_training_batch(
             trust = self_training_trust_from_outputs(
                 pv, u, export_uncertainty=c.export_uncertainty
             )
-            imgs_list.append(img)
-            trust_list.append(trust)
-            soft_seg.append(torch.sigmoid(seg).detach())
             p = Fn.normalize(hdg[0, :2], dim=-1, eps=1e-6)
-            soft_hdg_sc.append(p.cpu().numpy().astype(np.float32))
+            scored.append(
+                (trust, img, torch.sigmoid(seg).detach(), p.cpu().numpy().astype(np.float32))
+            )
 
-    if not imgs_list:
+    if not scored:
         return None
+    scored.sort(key=lambda t: -t[0])
+    cap = int(take_top) if take_top is not None else len(scored)
+    cap = max(1, min(cap, len(scored)))
+    scored = scored[:cap]
+
+    imgs_list = [t[1] for t in scored]
+    trust_list = [t[0] for t in scored]
+    soft_seg = [t[2] for t in scored]
+    soft_hdg_sc = [t[3] for t in scored]
 
     imgs = torch.tensor(np.stack(imgs_list, axis=0), device=device, dtype=torch.float32)
     seg_t = torch.cat(soft_seg, dim=0).to(device)

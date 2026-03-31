@@ -1186,7 +1186,9 @@ def spot_geometry_gt_from_labels(
         if not raw:
             continue
         p = resolve_stored_asset_path(str(raw), project_root)
-        if p is None or not paths_same_underlying_file(str(p), tci_res, project_root):
+        if p is None or not paths_same_underlying_file(
+            str(p), tci_res, project_root=project_root
+        ):
             continue
         try:
             rx = float(rec["cx_full"])

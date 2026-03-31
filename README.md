@@ -62,7 +62,7 @@ AquaForge is **not** a repackaged Ultralytics or public multi-task recipe. The d
 - **YOLO neck + S2 gate–residual fuse** (`aquaforge/unified/model.py`) — Project → align → **learned sigmoid gates per stride** → **depthwise-separable** fuse with the finest map → **explicit fine + mid residuals** → **channel SE-style recalibration** on the fused map before heads. Seg full-res; heatmaps ~ /8.
 - **Bright spots + ocean mask** — Candidates still come from **bright-spot** detection and **ocean/water masking** (`detection_backend`, `ne_ocean_mask`, hybrid ranking). AquaForge trains on chips from that same human-review path, so the unified model stays tied to the product’s distinctive front end.
 
-**Training:** `py -3 scripts/train_aquaforge.py` — flags include `--no-dynamic-balance`, `--no-priority-sampling`, `--teacher-per-epoch`, `--teacher-distill-weight`, `--pseudo-jsonl`, `--pseudo-per-epoch`, `--pseudo-mix-weight`, `--pseudo-min-conf`, `--pseudo-max-u`.
+**Training:** `py -3 scripts/train_aquaforge.py` — flags include `--no-dynamic-balance`, `--no-priority-sampling`, `--teacher-per-epoch`, `--teacher-distill-weight`, `--pseudo-jsonl`, `--pseudo-per-epoch`, `--pseudo-scan-max` (score many candidates, keep highest-trust pseudo batch), `--pseudo-mix-weight`, `--pseudo-min-conf`, `--pseudo-max-u`. New checkpoints use **format v3** (YOLO path: **delta-neck** fusion + stronger joint loss); v2 YOLO weights load **non-strict** (heads re-init).
 
 ---
 
