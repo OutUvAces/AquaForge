@@ -1,5 +1,7 @@
 # AquaForge
 
+**Repository:** [github.com/OutUvAces/AquaForge](https://github.com/OutUvAces/AquaForge) — clone with `git clone https://github.com/OutUvAces/AquaForge.git`.
+
 **Sentinel-2–based vessel candidate detection** with a **human-in-the-loop** Streamlit review UI: operators confirm vessels, mark bow/stern, adjust footprints, and export labeled training data. Optional **config-driven SOTA backends** add marine **YOLO** instance segmentation, **ShipStructure / SLAD-style keypoints** (ONNX), and **wake–keypoint heading fusion** (heuristic wake and/or ONNX wake), without changing the default offline-first path.
 
 - **Default backend:** `legacy_hybrid` — logistic regression + chip MLP ranking only (no extra ML weights required).
@@ -353,6 +355,15 @@ Marine YOLO weights and ShipStructure are third-party; follow their licenses whe
 
 ---
 
-## Repository naming (GitHub)
+## Migrating from the old remote
 
-The product and Python package are **AquaForge** (`aquaforge/` on disk). Your local folder or GitHub remote may still use an older name (for example `Vessel Detector` / `vessel-detector`); that is fine. After a GitHub repo rename, update `git remote set-url origin …` and any badges or clone URLs you maintain outside this tree.
+If your local clone still has `origin` pointing at the retired **Vessel-Detector** repository, repoint it and pull:
+
+```bash
+git remote set-url origin https://github.com/OutUvAces/AquaForge.git
+git remote -v
+git fetch origin
+git pull
+```
+
+The Python package directory is [`aquaforge/`](aquaforge/) at the repo root.
