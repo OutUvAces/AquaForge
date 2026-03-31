@@ -48,6 +48,18 @@ Entry point: [`app.py`](app.py) imports `aquaforge.web_ui.main`.
 
 **Spot overlays** (masks, keypoints, wake segments) run when `sota_inference_requested` is true: any of YOLO backends, **`aquaforge`**, `keypoints.enabled`, or `ensemble` + `wake_fusion.enabled`. If ONNX fails to load or infer, the pipeline **degrades gracefully**: warnings are logged and surfaced in the UI (`sota_warnings`); heuristic wake can still run without ONNX wake; keypoints are omitted if pose ONNX is missing or invalid.
 
+### What makes AquaForge unique
+
+AquaForge is **not** a repackaged Ultralytics or public multi-task recipe. The design is ours end-to-end:
+
+- **Joint loss** (`aquaforge/unified/losses.py`) — Hull supervision combines soft Dice, **soft IoU**, and masked BCE; landmarks use heatmaps + global readout; heading uses **unit-circle** (sin, cos) matching; wake uses a cosine direction term; optional **distillation** pulls only **normalised heading** from the in-repo **ensemble** teacher into AquaForge’s own heading head (no third-party loss code pasted in).
+- **Curriculum** — `curriculum_base_weights(epoch, total_epochs)` uses **time-normalised smooth ramps** (segmentation + vessel logit first, then landmarks/heatmaps, then heading, then wake/distill). The phase timing is tuned for short **incremental** retraining runs after new UI labels land.
+- **Dynamic balancing** — `DynamicLossBalancer` tracks EMAs of detached per-task losses and **rescales** curriculum weights so one task does not drown the others (custom stabiliser; not copied from published GradNorm/DWA implementations).
+- **Active learning loop** — Labels from the Streamlit review UI already carry audit fields (`review_schema`); `review_ui_active_learning_priority` turns those into **sampler weights** (uncertain hybrid scores, small YOLO length proxies, low keypoint heading trust, cloud obscuration). Optional `af_training_priority` in `extra` scales priority manually. `hydrate_teacher_signals` (in `aquaforge/unified/distill.py`) fills a **small per-epoch budget** of ensemble teacher headings for distillation — repeatable, capped cost.
+- **Bright spots + ocean mask** — Candidates still come from **bright-spot** detection and **ocean/water masking** (`detection_backend`, `ne_ocean_mask`, hybrid ranking). AquaForge trains on chips from that same human-review path, so the unified model stays tied to the product’s distinctive front end.
+
+**Training:** `py -3 scripts/train_aquaforge.py` (see `--no-dynamic-balance`, `--no-priority-sampling`, `--teacher-per-epoch`, `--teacher-distill-weight`).
+
 ---
 
 ## `data/config/detection.yaml` — detailed guide

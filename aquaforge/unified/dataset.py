@@ -20,6 +20,7 @@ from typing import Any, Iterator
 import numpy as np
 
 from aquaforge.unified.constants import NUM_LANDMARKS
+from aquaforge.unified.distill import review_ui_active_learning_priority
 from aquaforge.unified.losses import build_kp_heat_targets
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
 from aquaforge.vessel_markers import (
@@ -146,6 +147,10 @@ class AquaForgeSample:
     heading_deg: float | None
     markers: list[dict[str, Any]] | None
     record_id: str
+    # Active-learning / ensemble teacher (filled by :func:`hydrate_teacher_signals`).
+    al_priority: float = 1.0
+    teacher_heading_sc: np.ndarray | None = None
+    teacher_valid: float = 0.0
 
 
 def iter_aquaforge_samples(
@@ -190,8 +195,10 @@ def iter_aquaforge_samples(
                 except (TypeError, ValueError):
                     heading = None
             cls = 1.0
+            ex_fb = rec.get("extra") if isinstance(rec.get("extra"), dict) else {}
+            pr = review_ui_active_learning_priority(ex_fb, heading_labeled=heading is not None)
             yield AquaForgeSample(
-                Path(path), cx, cy, cls, heading, mlist, rid
+                Path(path), cx, cy, cls, heading, mlist, rid, al_priority=pr
             )
             continue
 
@@ -204,14 +211,17 @@ def iter_aquaforge_samples(
                 heading = float(h2) % 360.0
             except (TypeError, ValueError):
                 heading = None
-        yield AquaForgeSample(Path(path), cx, cy, cls, heading, mlist, rid)
+        pr = review_ui_active_learning_priority(extra, heading_labeled=heading is not None)
+        yield AquaForgeSample(
+            Path(path), cx, cy, cls, heading, mlist, rid, al_priority=pr
+        )
 
 
 def collate_batch(
     batch_items: list[tuple[Any, ...]],
     device: Any,
 ) -> dict[str, Any]:
-    """Stack numpy → torch tensors for :func:`aquaforge.losses.aquaforge_joint_loss`."""
+    """Stack numpy → torch tensors for :func:`aquaforge.unified.losses.aquaforge_joint_loss`."""
     import torch
 
     imgs = torch.stack([torch.from_numpy(b[0]).float() for b in batch_items], dim=0).to(device)
@@ -231,6 +241,22 @@ def collate_batch(
     )
     wake = torch.tensor(np.stack([b[6] for b in batch_items], axis=0), device=device).float()
     wake_v = torch.tensor([b[7] for b in batch_items], device=device, dtype=torch.float32)
+    bsz = len(batch_items)
+    if len(batch_items[0]) >= 11:
+        al_pr = torch.tensor([float(b[8]) for b in batch_items], device=device, dtype=torch.float32)
+        t_stack = []
+        for b in batch_items:
+            ts = b[9]
+            if ts is not None:
+                t_stack.append(np.asarray(ts, dtype=np.float32).reshape(2))
+            else:
+                t_stack.append(np.zeros(2, dtype=np.float32))
+        teacher_sc = torch.tensor(np.stack(t_stack, axis=0), device=device, dtype=torch.float32)
+        teacher_v = torch.tensor([float(b[10]) for b in batch_items], device=device, dtype=torch.float32)
+    else:
+        al_pr = torch.ones(bsz, device=device, dtype=torch.float32)
+        teacher_sc = torch.zeros(bsz, 2, device=device, dtype=torch.float32)
+        teacher_v = torch.zeros(bsz, device=device, dtype=torch.float32)
     imgsz = int(seg.shape[-1])
     hm_h = max(1, imgsz // 8)
     hm_w = max(1, imgsz // 8)
@@ -246,6 +272,9 @@ def collate_batch(
         "hdg_valid": hdg_valid,
         "wake_vec": wake,
         "wake_valid": wake_v,
+        "al_priority": al_pr,
+        "teacher_hdg_sc": teacher_sc,
+        "teacher_valid": teacher_v,
     }
 
 
@@ -262,7 +291,22 @@ def build_training_row(
     sample: AquaForgeSample,
     chip_half: int,
     imgsz: int,
-) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray, float | None, np.ndarray, float] | None:
+) -> (
+    tuple[
+        np.ndarray,
+        float,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        float | None,
+        np.ndarray,
+        float,
+        float,
+        np.ndarray | None,
+        float,
+    ]
+    | None
+):
     from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
 
     bgr, c0, r0, cw, ch = read_yolo_chip_bgr(
@@ -288,4 +332,7 @@ def build_training_row(
         sample.heading_deg,
         wake,
         wake_valid,
+        float(sample.al_priority),
+        sample.teacher_heading_sc,
+        float(sample.teacher_valid),
     )

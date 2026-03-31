@@ -1,16 +1,27 @@
 """
 Train AquaForge (unified multi-task vessel model) from review JSONL + TCIs.
 
-Progressive schedule (default): seg+cls → +keypoints + heatmaps → +heading → +wake auxiliary.
-Optional YOLO11/12 backbone+neck fusion (``--architecture yolo_unified``) with warm-start
-from Ultralytics ``.pt`` and optional ``--freeze-backbone-epochs`` before end-to-end fine-tune.
+**Curriculum** — :func:`aquaforge.unified.losses.curriculum_base_weights`: segmentation + vessel
+logit first, then landmarks + heatmaps, heading, wake (smooth ramps vs ``total_epochs``).
 
-Requires: pip install -r requirements-ml.txt (``ultralytics`` needed for YOLO-unified path).
+**Dynamic loss balancing** — :class:`aquaforge.unified.losses.DynamicLossBalancer`: EMA rescaling
+of curriculum weights from detached per-task losses (our stabiliser, not third-party MT code).
+
+**Active learning** — JSONL rows from the review UI carry ``al_priority`` (uncertainty, small-vessel
+proxies, etc.). Optional :class:`torch.utils.data.WeightedRandomSampler` oversamples hard chips.
+Optional **ensemble teacher** distillation (heading sin/cos only) with a per-epoch CPU budget via
+``hydrate_teacher_signals`` in :mod:`aquaforge.unified.distill`.
+
+YOLO11/12 backbone path: ``--architecture yolo_unified``, ``--freeze-backbone-epochs``.
+
+Requires: pip install -r requirements-ml.txt (``ultralytics`` for YOLO-unified).
 
 Examples:
   py -3 scripts/train_aquaforge.py --project-root . --epochs 12 --batch-size 4
   py -3 scripts/train_aquaforge.py --architecture yolo_unified --yolo-weights yolo11n.pt \\
       --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
+  py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
+      --no-dynamic-balance
   py -3 scripts/export_aquaforge_onnx.py --checkpoint data/models/aquaforge/aquaforge.pt
 """
 
@@ -24,49 +35,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-
-def _stage_weights(epoch: int) -> dict[str, float]:
-    """Piecewise curriculum (epoch 0-based); aligns with aquaforge.unified.losses kp_hm term."""
-    if epoch < 3:
-        return {
-            "cls": 1.0,
-            "seg": 1.0,
-            "kp": 0.0,
-            "kp_hm": 0.0,
-            "hdg": 0.0,
-            "wake": 0.0,
-            "distill": 0.0,
-        }
-    if epoch < 6:
-        return {
-            "cls": 1.0,
-            "seg": 1.0,
-            "kp": 0.5,
-            "kp_hm": 0.6,
-            "hdg": 0.0,
-            "wake": 0.0,
-            "distill": 0.0,
-        }
-    if epoch < 9:
-        return {
-            "cls": 1.0,
-            "seg": 1.0,
-            "kp": 0.6,
-            "kp_hm": 0.5,
-            "hdg": 1.0,
-            "wake": 0.0,
-            "distill": 0.0,
-        }
-    return {
-        "cls": 1.0,
-        "seg": 1.0,
-        "kp": 0.7,
-        "kp_hm": 0.4,
-        "hdg": 1.0,
-        "wake": 0.4,
-        "distill": 0.0,
-    }
 
 
 def main() -> None:
@@ -116,22 +84,32 @@ def main() -> None:
         help="cnn only: optional yolo11*-seg.pt to partially copy early conv weights into our trunk.",
     )
     ap.add_argument(
-        "--teacher-max-samples",
+        "--no-dynamic-balance",
+        action="store_true",
+        help="Disable EMA-based rescaling of curriculum weights (fixed ramps only).",
+    )
+    ap.add_argument(
+        "--no-priority-sampling",
+        action="store_true",
+        help="Disable WeightedRandomSampler; uniform shuffle over labeled chips.",
+    )
+    ap.add_argument(
+        "--teacher-per-epoch",
         type=int,
         default=0,
-        help="Reserved: ensemble distillation hooks in aquaforge.unified.distill (0 = off).",
+        help="Run ensemble teacher on up to this many unique record_ids per epoch (0 = off). CPU-heavy.",
+    )
+    ap.add_argument(
+        "--teacher-distill-weight",
+        type=float,
+        default=0.38,
+        help="Max curriculum weight for heading distillation when teacher targets exist (scaled by curriculum).",
     )
     args = ap.parse_args()
-    if int(args.teacher_max_samples) > 0:
-        print(
-            "Note: --teacher-max-samples > 0 reserved; use aquaforge.unified.distill in a notebook or "
-            "extend this script to align batch indices with JSONL rows.",
-            flush=True,
-        )
 
     try:
         import torch
-        from torch.utils.data import DataLoader, Dataset
+        from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
     except ImportError as e:
         print("Install requirements-ml.txt (torch).", file=sys.stderr)
         raise SystemExit(1) from e
@@ -143,7 +121,12 @@ def main() -> None:
         collate_batch,
         iter_aquaforge_samples,
     )
-    from aquaforge.unified.losses import aquaforge_joint_loss
+    from aquaforge.unified.distill import clear_teacher_signals, hydrate_teacher_signals
+    from aquaforge.unified.losses import (
+        DynamicLossBalancer,
+        aquaforge_joint_loss,
+        curriculum_base_weights,
+    )
     from aquaforge.unified.model import (
         AquaForgeMultiTask,
         build_model,
@@ -165,8 +148,6 @@ def main() -> None:
         )
         raise SystemExit(1)
 
-    random.shuffle(rows)
-
     class _DS(Dataset):  # noqa: N801
         def __init__(self, samples: list[AquaForgeSample]) -> None:
             self.samples = samples
@@ -181,14 +162,27 @@ def main() -> None:
                 return self.__getitem__((i + 1) % len(self.samples))
             return row
 
-    ds = _DS(rows)
-    dl = DataLoader(
-        ds,
-        batch_size=int(args.batch_size),
-        shuffle=True,
-        drop_last=False,
-        collate_fn=lambda b: list(b),
-    )
+    use_sampler = not bool(args.no_priority_sampling)
+    if use_sampler:
+        wts = torch.tensor([max(float(s.al_priority), 0.25) for s in rows], dtype=torch.double)
+        sampler = WeightedRandomSampler(wts, num_samples=len(rows), replacement=True)
+        dl = DataLoader(
+            _DS(rows),
+            batch_size=int(args.batch_size),
+            sampler=sampler,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=lambda b: list(b),
+        )
+    else:
+        random.shuffle(rows)
+        dl = DataLoader(
+            _DS(rows),
+            batch_size=int(args.batch_size),
+            shuffle=True,
+            drop_last=False,
+            collate_fn=lambda b: list(b),
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     arch = str(args.architecture).strip().lower()
@@ -225,6 +219,10 @@ def main() -> None:
         opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
 
     freeze_n = int(args.freeze_backbone_epochs)
+    teacher_budget = int(args.teacher_per_epoch)
+    distill_w = float(args.teacher_distill_weight)
+    use_balance = not bool(args.no_dynamic_balance)
+
     for epoch in range(int(args.epochs)):
         model.train()
         if arch == "yolo_unified":
@@ -238,7 +236,22 @@ def main() -> None:
                 opt.param_groups[0]["lr"] = lr_head
                 opt.param_groups[1]["lr"] = lr_bb
 
-        sw = _stage_weights(epoch)
+        clear_teacher_signals(rows)
+        if teacher_budget > 0:
+            n_t = hydrate_teacher_signals(
+                project_root,
+                rows,
+                teacher_budget,
+                int(args.chip_half),
+            )
+            print(f"epoch {epoch + 1}: ensemble teacher targets filled for {n_t} sample(s)", flush=True)
+
+        distill_cap = distill_w if teacher_budget > 0 else 0.0
+        base_sw = curriculum_base_weights(epoch, int(args.epochs), distill_cap=distill_cap)
+        sw_eff = dict(base_sw)
+        # Fresh EMA each epoch: coarse schedule from curriculum; balancer only redistributes within the epoch.
+        balancer = DynamicLossBalancer() if use_balance else None
+
         total_loss = 0.0
         n_batches = 0
         for batch_list in dl:
@@ -253,15 +266,25 @@ def main() -> None:
                 "wake": wake,
                 "kp_hm": kp_hm,
             }
-            loss, logs = aquaforge_joint_loss(out, batch_dict, sw)
+            loss, logs = aquaforge_joint_loss(out, batch_dict, sw_eff)
             opt.zero_grad()
             loss.backward()
             opt.step()
             total_loss += float(logs.get("loss_total", 0.0))
             n_batches += 1
+            if balancer is not None:
+                balancer.update_from_logs(logs)
+                sw_eff = balancer.scale_weights(base_sw)
+            else:
+                sw_eff = dict(base_sw)
+
         avg = total_loss / max(n_batches, 1)
         fr = "frozen" if arch == "yolo_unified" and epoch < freeze_n else "e2e"
-        print(f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} stage={sw} backbone={fr}", flush=True)
+        print(
+            f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} curriculum={base_sw} backbone={fr} "
+            f"balance={'on' if use_balance else 'off'}",
+            flush=True,
+        )
 
     meta: dict[str, object] = {
         "format_version": AQUAFORGE_FORMAT_VERSION,
@@ -270,6 +293,12 @@ def main() -> None:
         "chip_half": int(args.chip_half),
         "jsonl": str(jp),
         "model_arch": arch,
+        "train_aquaforge": {
+            "dynamic_balance": use_balance,
+            "priority_sampling": use_sampler,
+            "teacher_per_epoch": teacher_budget,
+            "teacher_distill_weight": distill_w,
+        },
     }
     if arch == "yolo_unified":
         ypath = yolo_w.resolve() if yolo_w.is_file() else str(args.yolo_weights)

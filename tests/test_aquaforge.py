@@ -67,6 +67,9 @@ class TestAquaForgeLosses(unittest.TestCase):
             "hdg_valid": torch.ones(b),
             "wake_vec": torch.tensor([[1.0, 0.0], [1.0, 0.0]]),
             "wake_valid": torch.ones(b),
+            "teacher_hdg_sc": torch.zeros(b, 2),
+            "teacher_valid": torch.zeros(b),
+            "al_priority": torch.ones(b),
         }
         sw = {"cls": 1.0, "seg": 1.0, "kp": 0.0, "kp_hm": 1.0, "hdg": 0.0, "wake": 0.0, "distill": 0.0}
         total, logs = aquaforge_joint_loss(out, batch, sw)
@@ -87,6 +90,46 @@ class TestAquaForgeLosses(unittest.TestCase):
         y = m(x)
         self.assertEqual(len(y), 6)
         self.assertEqual(y[5].shape, (1, NUM_LANDMARKS, 16, 16))
+
+    def test_soft_iou_and_curriculum_and_balancer(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+        from aquaforge.unified.losses import (
+            DynamicLossBalancer,
+            curriculum_base_weights,
+            soft_iou_loss_with_logits,
+        )
+
+        logits = torch.zeros(1, 1, 16, 16)
+        tgt = torch.ones(1, 1, 16, 16)
+        li = soft_iou_loss_with_logits(logits, tgt)
+        self.assertTrue(torch.isfinite(li))
+        self.assertGreaterEqual(float(li), 0.0)
+
+        c0 = curriculum_base_weights(0, 12, distill_cap=0.0)
+        c_late = curriculum_base_weights(11, 12, distill_cap=0.5)
+        self.assertGreater(c0["seg"], 0.0)
+        self.assertGreater(c_late["wake"], c0["wake"])
+
+        bal = DynamicLossBalancer()
+        base = {"cls": 1.0, "seg": 1.0, "kp": 0.5, "kp_hm": 0.5, "hdg": 0.0, "wake": 0.0, "distill": 0.0}
+        bal.update_from_logs({"loss_cls": 0.5, "loss_seg": 2.0})
+        out = bal.scale_weights(base)
+        self.assertGreater(out["cls"], 0.0)
+        self.assertIn("seg", out)
+
+    def test_active_learning_priority(self) -> None:
+        from aquaforge.unified.distill import review_ui_active_learning_priority
+
+        p1 = review_ui_active_learning_priority({}, heading_labeled=False)
+        self.assertGreaterEqual(p1, 0.45)
+        p2 = review_ui_active_learning_priority(
+            {"pred_combined_proba": 0.5, "pred_yolo_length_m": 40.0},
+            heading_labeled=True,
+        )
+        self.assertGreater(p2, p1)
 
 
 if __name__ == "__main__":

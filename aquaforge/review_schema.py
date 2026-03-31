@@ -10,6 +10,7 @@ Common ``extra`` keys written by the review UI include:
 - ``label_spatial_fingerprint`` — short hash for dedup / API correlation with image + rounded pixel center.
 - ``hull_aspect_ratio`` / ``hull_aspect_ratio_source`` — length÷width (≥1) from graphic hull or footprint.
 - ``wake_present``, ``partial_cloud_obscuration`` — image-level training flags.
+- ``af_training_priority`` — optional float multiplier (Streamlit / tooling) for AquaForge **active-learning** oversampling (see :mod:`aquaforge.unified.distill`).
 
 Multi-task sklearn heads (after UI retrain) learn many of these keys from LR+chip features; see
 :mod:`aquaforge.review_multitask_train` and ``data/models/ship_review_multitask.joblib``.
@@ -48,6 +49,9 @@ EXTRA_PRED_WAKE_COMBINE_SOURCE = "pred_wake_combine_source"
 EXTRA_PRED_KP_BOW_CONF = "pred_keypoint_bow_confidence"
 EXTRA_PRED_KP_STERN_CONF = "pred_keypoint_stern_confidence"
 EXTRA_PRED_KP_HEADING_TRUST = "pred_keypoint_heading_trust"
+
+# Optional manual boost for AquaForge training sampler (see aquaforge.unified.distill).
+EXTRA_AF_TRAINING_PRIORITY = "af_training_priority"
 
 DEFAULT_COMBINED_WEIGHT_LR = 0.35
 DEFAULT_COMBINED_WEIGHT_MLP = 0.65
