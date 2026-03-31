@@ -192,6 +192,7 @@ def try_predict_keypoints_chip(
     keypoints_cfg: KeypointsSection | None = None,
     onnx_path: str | None = None,
     onnx_runtime: OnnxRuntimeSection | None = None,
+    onnx_providers: list[str] | None = None,
 ) -> tuple[KeypointResult | None, list[str]]:
     """
     Like :func:`predict_keypoints_chip` but returns ``(result, warning_codes)``.
@@ -214,9 +215,10 @@ def try_predict_keypoints_chip(
         logger.warning("Keypoint ONNX not found: %s", path)
         return None, notes
 
+    ort_prov = onnx_providers if onnx_providers is not None else cfg.onnx_providers
     sess = get_ort_session(
         path,
-        providers=cfg.onnx_providers,
+        providers=ort_prov,
         quantize_dynamic=bool(cfg.quantize),
         onnx_runtime=onnx_runtime,
     )

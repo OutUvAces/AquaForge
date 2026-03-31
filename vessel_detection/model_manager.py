@@ -1,8 +1,8 @@
 """
 Performance: cached heavy models (marine YOLO) and optional warm-up of ONNX sessions.
 
-Call :func:`warm_sota_models` once per scene or at UI startup to hide first-inference latency
-behind predictable work (weights already on disk).
+Call :func:`warm_sota_models` (or :func:`schedule_background_warm` from Streamlit) to hide
+first-inference latency behind predictable work (weights already on disk).
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def warm_sota_models(project_root: Path, settings: Any) -> None:
 
     Safe no-op when backends are disabled or files are missing.
     """
-    from vessel_detection.detection_config import yolo_requested
+    from vessel_detection.detection_config import merged_onnx_providers, yolo_requested
     from vessel_detection.onnx_session_cache import get_ort_session
 
     if yolo_requested(settings):
@@ -67,7 +67,9 @@ def warm_sota_models(project_root: Path, settings: Any) -> None:
         if p.is_file():
             get_ort_session(
                 p,
-                providers=settings.keypoints.onnx_providers,
+                providers=merged_onnx_providers(
+                    settings, settings.keypoints.onnx_providers
+                ),
                 quantize_dynamic=bool(settings.keypoints.quantize),
                 onnx_runtime=ort_cfg,
             )
@@ -83,9 +85,22 @@ def warm_sota_models(project_root: Path, settings: Any) -> None:
         if p.is_file():
             get_ort_session(
                 p,
+                providers=merged_onnx_providers(settings, None),
                 quantize_dynamic=bool(settings.wake_fusion.quantize),
                 onnx_runtime=ort_cfg,
             )
+
+
+def schedule_background_warm(project_root: Path, settings: Any) -> None:
+    """Performance: warm SOTA models without blocking the Streamlit main thread."""
+
+    def _run() -> None:
+        try:
+            warm_sota_models(project_root, settings)
+        except Exception as e:
+            logger.debug("Background SOTA warm-up skipped: %s", e)
+
+    threading.Thread(target=_run, name="vd_warm_sota", daemon=True).start()
 
 
 def clear_model_cache_for_tests() -> None:

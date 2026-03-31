@@ -42,6 +42,12 @@ onnx_runtime:
 # Optional: skip keypoints / wake when hybrid P(vessel) is below this (Streamlit passes hybrid per spot).
 # sota_min_hybrid_proba_for_expensive: 0.2
 
+# Optional: ORT ExecutionProviders for every ONNX session (overrides keypoints.onnx_providers; for GPU later).
+# onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+# Streamlit: opt-in before running SOTA on a spot; lazy-draw heavy RGB overlays (default off = prior behavior).
+# ui_require_checkbox_for_sota: false
+# ui_lazy_sota_overlays: false
+
 keypoints:
   enabled: false
   # SLAD / ShipStructure landmark indices (verify against your ONNX export).

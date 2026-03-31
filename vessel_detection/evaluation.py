@@ -1127,6 +1127,35 @@ def spot_geometry_gt_from_labels(
     return {"heading_deg": float(h), "provenance": prov}
 
 
+def _print_profile_rollups(pr: Any) -> None:
+    """Performance: stdout roll-up of cProfile by file (tottime %) then cumulative top."""
+    import io
+
+    import pstats
+
+    stats = pstats.Stats(pr)
+    file_tot: dict[str, float] = {}
+    for (filename, _ln, _name), stat in stats.stats.items():
+        tt = float(stat[2])
+        file_tot[filename] = file_tot.get(filename, 0.0) + tt
+    total_tt = sum(file_tot.values()) or 1e-9
+    ranked = sorted(file_tot.items(), key=lambda x: -x[1])[:30]
+    print(
+        "--- Profile: by file (tottime % of total self-time across profiled code) ---",
+        flush=True,
+    )
+    for fn, t in ranked:
+        pct = 100.0 * t / total_tt
+        disp = fn.replace("\\", "/")
+        if len(disp) > 96:
+            disp = "…" + disp[-94:]
+        print(f"  {pct:5.1f}%  {t:8.3f}s  {disp}", flush=True)
+    buf = io.StringIO()
+    pstats.Stats(pr, stream=buf).sort_stats("cumulative").print_stats(40)
+    print("--- Profile: top functions by cumulative time ---", flush=True)
+    print(buf.getvalue(), flush=True)
+
+
 def main_cli(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -1169,7 +1198,7 @@ def main_cli(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--profile",
         action="store_true",
-        help="Run cProfile during evaluation and print top 40 functions by cumulative time (stdout)",
+        help="Run cProfile: file-level tottime %% roll-up + top functions by cumulative time",
     )
     args = ap.parse_args(argv)
 
@@ -1247,16 +1276,12 @@ def main_cli(argv: list[str] | None = None) -> int:
 
     if args.profile:
         import cProfile
-        import io
-        import pstats
 
         pr = cProfile.Profile()
         pr.enable()
         text_reports, json_payload = collect_reports()
         pr.disable()
-        buf = io.StringIO()
-        pstats.Stats(pr, stream=buf).sort_stats("cumulative").print_stats(40)
-        print(buf.getvalue(), flush=True)
+        _print_profile_rollups(pr)
     else:
         text_reports, json_payload = collect_reports()
 

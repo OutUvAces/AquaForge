@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import tempfile
 import threading
 from pathlib import Path
@@ -27,17 +28,34 @@ from vessel_detection.detection_config import OnnxRuntimeSection
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
-# Key: (resolved path str, mtime_ns, mode, options_fingerprint) -> InferenceSession  mode: "f32" | "q8"
-_sessions: dict[tuple[str, int, str, str], Any] = {}
+# Key: (resolved path str, mtime_ns, mode, options_fingerprint, providers_key) -> InferenceSession
+_sessions: dict[tuple[str, int, str, str, str], Any] = {}
+
+
+def _effective_ort_thread_counts(
+    onnx_runtime: OnnxRuntimeSection | None,
+) -> tuple[int, int | None]:
+    """Performance: when intra/inter are 0, pick CPU-friendly defaults (intra ~ half cores)."""
+    ncpu = int(os.cpu_count() or 2)
+    auto_intra = max(1, ncpu // 2)
+    if onnx_runtime is None:
+        return (auto_intra, None)
+    intra = int(onnx_runtime.intra_op_num_threads)
+    intra_eff = auto_intra if intra <= 0 else intra
+    inter = int(onnx_runtime.inter_op_num_threads)
+    inter_eff: int | None = None if inter <= 0 else inter
+    return (intra_eff, inter_eff)
 
 
 def _ort_runtime_fingerprint(onnx_runtime: OnnxRuntimeSection | None) -> str:
-    """Performance: distinguish ORT SessionOptions in the process cache."""
+    """Performance: cache key includes resolved thread counts and graph/mode flags."""
+    intra_eff, inter_eff = _effective_ort_thread_counts(onnx_runtime)
+    inter_s = "a" if inter_eff is None else str(inter_eff)
     if onnx_runtime is None:
-        return "d"
+        return f"i{intra_eff}_o{inter_s}_parallel_all"
     return (
-        f"i{int(onnx_runtime.intra_op_num_threads)}"
-        f"_o{int(onnx_runtime.inter_op_num_threads)}"
+        f"i{intra_eff}"
+        f"_o{inter_s}"
         f"_{onnx_runtime.execution_mode}"
         f"_{onnx_runtime.graph_optimization_level}"
     )
@@ -48,19 +66,23 @@ def _apply_ort_session_options(
     onnx_runtime: OnnxRuntimeSection | None,
 ) -> None:
     """Performance: CPU threads, execution mode, graph optimizations (additive YAML)."""
-    if onnx_runtime is None:
-        return
     import onnxruntime as ort
 
-    if int(onnx_runtime.intra_op_num_threads) > 0:
-        sess_options.intra_op_num_threads = int(onnx_runtime.intra_op_num_threads)
-    if int(onnx_runtime.inter_op_num_threads) > 0:
-        sess_options.inter_op_num_threads = int(onnx_runtime.inter_op_num_threads)
-    if str(onnx_runtime.execution_mode).strip().lower() == "sequential":
+    intra_eff, inter_eff = _effective_ort_thread_counts(onnx_runtime)
+    sess_options.intra_op_num_threads = intra_eff
+    if inter_eff is not None:
+        sess_options.inter_op_num_threads = inter_eff
+
+    em = "parallel"
+    gol = "all"
+    if onnx_runtime is not None:
+        em = str(onnx_runtime.execution_mode).strip().lower()
+        gol = str(onnx_runtime.graph_optimization_level).strip().lower()
+    if em == "sequential":
         sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     else:
         sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
-    lvl = str(onnx_runtime.graph_optimization_level).strip().lower()
+    lvl = gol.lower()
     gmap = {
         "all": ort.GraphOptimizationLevel.ORT_ENABLE_ALL,
         "extended": ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED,
@@ -174,7 +196,15 @@ def get_ort_session(
     try:
         st2 = path_for_session.stat()
         fp = _ort_runtime_fingerprint(onnx_runtime)
-        cache_key = (str(path_for_session.resolve()), int(st2.st_mtime_ns), mode, fp)
+        prov = providers if providers else ["CPUExecutionProvider"]
+        prov_key = "|".join(prov)
+        cache_key = (
+            str(path_for_session.resolve()),
+            int(st2.st_mtime_ns),
+            mode,
+            fp,
+            prov_key,
+        )
     except OSError:
         return None
 
@@ -187,7 +217,6 @@ def get_ort_session(
     except ImportError:
         return None
 
-    prov = providers if providers else ["CPUExecutionProvider"]
     sess_options = ort.SessionOptions()
     cfg: OnnxRuntimeSection | None = onnx_runtime
     _apply_ort_session_options(sess_options, cfg)

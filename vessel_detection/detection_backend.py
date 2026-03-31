@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 from vessel_detection.detection_config import (
     DetectionSettings,
+    merged_onnx_providers,
     sota_inference_requested,
     yolo_requested,
 )
@@ -119,7 +120,7 @@ def rank_candidates_from_config(
     wy = float(max(0.0, min(1.0, settings.yolo.weight_vs_hybrid)))
     wh = 1.0 - wy
 
-    # Performance: batch marine YOLO chips on the same TCI (order preserved; bs=1 = one chip per ORT call).
+    # Performance: batch YOLO chips; per-chip LRU cache dedupes ranking vs SOTA / rank_score for same center.
     yolo_batch_out: list[Any] | None = None
     if pred is not None and len(base) > 0:
         centers = [(float(cx), float(cy)) for cx, cy, _sc in base]
@@ -288,6 +289,9 @@ def run_sota_spot_inference(
                 chip_half=int(settings.yolo.chip_half),
                 keypoints_cfg=settings.keypoints,
                 onnx_runtime=settings.onnx_runtime,
+                onnx_providers=merged_onnx_providers(
+                    settings, settings.keypoints.onnx_providers
+                ),
             )
             warnings.extend(kp_notes)
         out["keypoints_json"] = keypoints_to_jsonable(kp)
@@ -412,6 +416,7 @@ def run_sota_spot_inference(
                 ),
                 quantize_dynamic=bool(settings.wake_fusion.quantize),
                 onnx_runtime=settings.onnx_runtime,
+                onnx_providers=merged_onnx_providers(settings, None),
             )
             out["wake_segment_meta_onnx"] = meta_onnx
             if h_onnx is not None:

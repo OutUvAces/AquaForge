@@ -70,7 +70,7 @@ from vessel_detection.detection_config import (
     sota_inference_requested,
     yolo_requested,
 )
-from vessel_detection.model_manager import warm_sota_models
+from vessel_detection.model_manager import schedule_background_warm
 from vessel_detection.evaluation import (
     angular_error_deg,
     rank_score_at_point,
@@ -1517,6 +1517,33 @@ def _render_review_deck(
 
     tci_p = Path(tci_loaded)
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
+    det_settings = load_detection_settings(ROOT)
+
+    # Performance: optional consent before expensive SOTA; default off in YAML keeps prior behavior.
+    _sota_allow = True
+    if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
+        _sota_allow = st.checkbox(
+            "Enable SOTA neural inference for this spot (YOLO / keypoints / wake ONNX)",
+            key=f"{spot_k}_sota_neural_allow",
+        )
+
+    # Performance: background warm — YOLO/ORT load off the main thread when models may run soon.
+    _need_warm = yolo_requested(det_settings) or (
+        sota_inference_requested(det_settings)
+        and (not det_settings.ui_require_checkbox_for_sota or _sota_allow)
+    )
+    if _need_warm:
+        _warm_fp = (
+            float(_detection_yaml_mtime(ROOT)),
+            str(det_settings.backend),
+            str(det_settings.yolo.weights_path or ""),
+            str(det_settings.yolo.weights_file),
+            bool(_sota_allow) if det_settings.ui_require_checkbox_for_sota else True,
+        )
+        if st.session_state.get("_vd_warm_bg_fp") != _warm_fp:
+            st.session_state["_vd_warm_bg_fp"] = _warm_fp
+            schedule_background_warm(ROOT, det_settings)
+
     chip_px, locator_px, gdx, gdy, gavg = _cached_review_crop_metrics(
         str(tci_p.resolve()), mt
     )
@@ -1524,10 +1551,6 @@ def _render_review_deck(
     loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = (
         read_locator_and_spot_rgb_matching_stretch(tci_p, cx, cy, chip_px, locator_px)
     )
-
-    det_settings = load_detection_settings(ROOT)
-    if sota_inference_requested(det_settings):
-        warm_sota_models(ROOT, det_settings)
     _mscl = (meta or {}).get("scl_path")
     _scl_sota = Path(str(_mscl)) if _mscl else None
     if _scl_sota is not None and not _scl_sota.is_file():
@@ -1543,11 +1566,16 @@ def _render_review_deck(
         det_settings.backend,
         int(sc0),
         int(sr0),
-    ) + _hyb_sig
+    ) + _hyb_sig + (
+        (_sota_allow,) if det_settings.ui_require_checkbox_for_sota else ()
+    )
     sota_k = f"vd_sota_{spot_k}"
     sota: dict = {}
     if sota_inference_requested(det_settings):
-        if st.session_state.get(sota_k + "_sig") != sota_sig:
+        if det_settings.ui_require_checkbox_for_sota and not _sota_allow:
+            st.session_state[sota_k] = {}
+            st.session_state[sota_k + "_sig"] = sota_sig
+        elif st.session_state.get(sota_k + "_sig") != sota_sig:
             st.session_state[sota_k] = run_sota_spot_inference(
                 ROOT,
                 tci_p,
@@ -1817,6 +1845,18 @@ def _render_review_deck(
     if sel_mk not in st.session_state:
         st.session_state[sel_mk] = MARKER_ROLES[0]
 
+    # Performance: defer heavy polygon/keypoint/wake drawing until the user opts in (YAML-gated).
+    _draw_full_sota_vis = True
+    if (
+        det_settings.ui_lazy_sota_overlays
+        and sota_inference_requested(det_settings)
+        and sota
+    ):
+        _draw_full_sota_vis = st.checkbox(
+            "Draw full SOTA overlays on spot (mask, keypoints, wake segments)",
+            key=f"{spot_k}_sota_overlay_lazy",
+        )
+
     spot_vis = annotate_spot_detection_center(
         spot_rgb,
         cx,
@@ -1826,7 +1866,7 @@ def _render_review_deck(
         meters_per_pixel=gavg,
         draw_footprint_outline=False,
     )
-    if sota_inference_requested(det_settings) and sota:
+    if _draw_full_sota_vis and sota_inference_requested(det_settings) and sota:
         _poly = None
         raw_poly = sota.get("yolo_polygon_crop")
         if isinstance(raw_poly, list) and len(raw_poly) >= 3:

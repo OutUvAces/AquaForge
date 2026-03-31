@@ -277,12 +277,13 @@ Default command runs [`scripts/train_all_models.py`](scripts/train_all_models.py
 
 ### Interactive UI and ensemble speed (CPU)
 
-- **Model cache** — Marine YOLO loads **once per process** (`vessel_detection/model_manager.py`). When SOTA is enabled, the review UI calls **`warm_sota_models`** so weights and ORT sessions are touched early (less first-spot stall).
+- **Model cache** — Marine YOLO loads **once per process** (`vessel_detection/model_manager.py`). When YOLO or SOTA may run, the review UI schedules **`schedule_background_warm`** (daemon thread) so weights and ORT sessions load without blocking the first paint.
 - **Batched YOLO** — `yolo.chip_batch_size` (default **6**) batches chip inference when ranking **many candidates on the same TCI** and during **sliding-window merge** grid passes. Set **`chip_batch_size: 1`** for strictly sequential behavior (e.g. debugging).
-- **ONNX Runtime tuning** — Top-level YAML **`onnx_runtime`**: `intra_op_num_threads`, `inter_op_num_threads` (use **0** for ORT defaults), `execution_mode` (`parallel` \| `sequential`), `graph_optimization_level` (`all` \| `extended` \| `basic` \| `disable`). Options are part of the session cache key in `onnx_session_cache.py`.
+- **ONNX Runtime tuning** — Top-level YAML **`onnx_runtime`**: `intra_op_num_threads`, `inter_op_num_threads` (**≤0** → `intra` defaults to about half of CPU cores; see `onnx_session_cache.py`), `execution_mode` (`parallel` \| `sequential`), `graph_optimization_level` (`all` \| `extended` \| `basic` \| `disable`). Optional root **`onnx_providers`**: list of ORT provider names (wins over per-section lists; for future GPU EPs). Options + providers are part of the session cache key.
+- **Streamlit UX / CPU** — Root **`ui_require_checkbox_for_sota`**: user must opt in before YOLO/keypoints/wake run for the current spot. **`ui_lazy_sota_overlays`**: metrics/expander still use SOTA dict, but the spot RGB mask/keypoint/wake drawing runs only if the user checks the overlay box.
 - **Lazy pose / wake** — **`keypoints.min_yolo_confidence`** and **`wake_fusion.min_yolo_confidence`** skip keypoint ONNX and wake fusion when marine YOLO confidence is below the threshold (**0** = no gate, backward compatible). **`sota_min_hybrid_proba_for_expensive`** skips keypoints + wake after YOLO when hybrid P(vessel) is below the threshold; the Streamlit UI passes hybrid **automatically** when this is set.
 - **Geodesy / GSD** — Repeated bearings and meters-per-pixel lookups reuse small **LRU caches** (`geodesy_bearing.py`, `raster_gsd.py`).
-- **Profiling** — After a benchmark run, print **cProfile** top callees:
+- **Profiling** — After a benchmark run, **`--profile`** prints a **file-level tottime %** roll-up plus cumulative top functions (`vessel_detection/evaluation.py`):
 
 ```bash
 py -3 scripts/run_detection_eval.py --profile --max-spots 30 --jsonl data/labels/ship_reviews.jsonl

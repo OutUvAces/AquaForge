@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 
 from vessel_detection.detection_config import (
+    DetectionSettings,
+    KeypointsSection,
     load_detection_settings,
+    merged_onnx_providers,
     sota_inference_requested,
     yolo_requested,
 )
@@ -109,6 +112,38 @@ class TestDetectionConfig(unittest.TestCase):
             self.assertEqual(s.onnx_runtime.intra_op_num_threads, 2)
             self.assertEqual(s.onnx_runtime.execution_mode, "sequential")
             self.assertEqual(s.onnx_runtime.graph_optimization_level, "extended")
+
+    def test_ui_streamlit_perf_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "backend: yolo_fusion\n"
+                "ui_require_checkbox_for_sota: true\n"
+                "ui_lazy_sota_overlays: true\n",
+                encoding="utf-8",
+            )
+            s = load_detection_settings(root)
+            self.assertTrue(s.ui_require_checkbox_for_sota)
+            self.assertTrue(s.ui_lazy_sota_overlays)
+
+    def test_merged_onnx_providers_global_wins(self) -> None:
+        s = DetectionSettings(
+            onnx_providers=["CUDAExecutionProvider"],
+            keypoints=KeypointsSection(onnx_providers=["CPUExecutionProvider"]),
+        )
+        self.assertEqual(
+            merged_onnx_providers(s, s.keypoints.onnx_providers),
+            ["CUDAExecutionProvider"],
+        )
+        s2 = DetectionSettings(
+            keypoints=KeypointsSection(onnx_providers=["CPUExecutionProvider"])
+        )
+        self.assertEqual(
+            merged_onnx_providers(s2, s2.keypoints.onnx_providers),
+            ["CPUExecutionProvider"],
+        )
 
 
 if __name__ == "__main__":

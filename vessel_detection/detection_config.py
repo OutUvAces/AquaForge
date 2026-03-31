@@ -25,8 +25,9 @@ VALID_BACKENDS = frozenset(
 class OnnxRuntimeSection:
     """CPU thread and graph options for ``onnxruntime.InferenceSession`` (additive YAML)."""
 
-    # 0 = ORT default (usually all physical cores).
+    # 0 = auto: ``max(1, cpu_count // 2)`` for interactive CPU load (see onnx_session_cache).
     intra_op_num_threads: int = 0
+    # 0 = leave ORT default for inter-op parallelism.
     inter_op_num_threads: int = 0
     # parallel | sequential
     execution_mode: str = "parallel"
@@ -115,6 +116,22 @@ class DetectionSettings:
     # If set and ``hybrid_proba`` is passed to :func:`run_sota_spot_inference`, skip keypoints + wake
     # after YOLO when hybrid P(vessel) is below this (UI can pass hybrid to save CPU on weak spots).
     sota_min_hybrid_proba_for_expensive: float | None = None
+    # Optional ORT providers for all ONNX sessions (overrides per-section lists when set). E.g. CUDA EP.
+    onnx_providers: list[str] | None = None
+    # Streamlit: require checkbox before running full SOTA (YOLO/pose/wake) for the current spot.
+    ui_require_checkbox_for_sota: bool = False
+    # Streamlit: draw YOLO/keypoint/wake overlays on the spot RGB only when the user checks the box.
+    ui_lazy_sota_overlays: bool = False
+
+
+def merged_onnx_providers(
+    settings: DetectionSettings,
+    section_providers: list[str] | None,
+) -> list[str] | None:
+    """Global ``onnx_providers`` wins over section-level lists (additive GPU path)."""
+    if settings.onnx_providers:
+        return list(settings.onnx_providers)
+    return section_providers
 
 
 def default_detection_yaml_path(project_root: Path) -> Path:
@@ -301,6 +318,11 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
         except (TypeError, ValueError):
             sota_hybrid = None
 
+    gop = data.get("onnx_providers")
+    global_onnx_prov: list[str] | None = None
+    if isinstance(gop, list) and all(isinstance(x, str) for x in gop):
+        global_onnx_prov = list(gop)
+
     return DetectionSettings(
         backend=backend,
         yolo=_parse_yolo(data.get("yolo") if isinstance(data.get("yolo"), dict) else None),
@@ -316,6 +338,9 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
             else None
         ),
         sota_min_hybrid_proba_for_expensive=sota_hybrid,
+        onnx_providers=global_onnx_prov,
+        ui_require_checkbox_for_sota=bool(data.get("ui_require_checkbox_for_sota", False)),
+        ui_lazy_sota_overlays=bool(data.get("ui_lazy_sota_overlays", False)),
     )
 
 

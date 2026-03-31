@@ -272,6 +272,7 @@ def heading_from_wake_onnx_chip(
     confidence_prior: float = 0.72,
     quantize_dynamic: bool = False,
     onnx_runtime: Any | None = None,
+    onnx_providers: list[str] | None = None,
 ) -> tuple[float | None, dict[str, Any]]:
     """
     Run an ONNX wake-direction model on the same chip geometry as YOLO/keypoints.
@@ -295,8 +296,10 @@ def heading_from_wake_onnx_chip(
         logger.warning("Wake ONNX file missing: %s", path)
         return None, meta
 
+    # Performance: optional ORT providers (global YAML or future CUDA EP).
     sess = get_ort_session(
         path,
+        providers=onnx_providers,
         quantize_dynamic=bool(quantize_dynamic),
         onnx_runtime=onnx_runtime,
     )

@@ -7,7 +7,10 @@ gracefully and the UI falls back to legacy rankers.
 
 from __future__ import annotations
 
+import logging
 import math
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,7 @@ import numpy as np
 from vessel_detection.detection_config import YoloSection
 from vessel_detection.raster_rgb import read_rgba_window
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class YoloSpotResult:
@@ -28,6 +32,65 @@ class YoloSpotResult:
     chip_row_off: int
     chip_w: int
     chip_h: int
+
+
+# Performance: reuse YOLO outputs for the same TCI + center (ranking then SOTA, duplicate queue coords).
+_CHIP_CACHE_MAX = 512  # Performance: scene-sized queues + SOTA reuse without churning the LRU
+_chip_result_lock = threading.Lock()
+_chip_result_cache: OrderedDict[tuple[Any, ...], YoloSpotResult | None] = OrderedDict()
+_CACHE_MISS = object()
+
+
+def clear_yolo_chip_result_cache() -> None:
+    """Test helper: drop per-chip YOLO result cache."""
+    with _chip_result_lock:
+        _chip_result_cache.clear()
+
+
+def _tci_cache_key(tci_path: str | Path) -> tuple[str, int]:
+    p = Path(tci_path).resolve()
+    try:
+        return (str(p), int(p.stat().st_mtime_ns))
+    except OSError:
+        return (str(p), 0)
+
+
+def _chip_result_cache_key(
+    weights_sig: tuple[str, int],
+    tci_key: tuple[str, int],
+    chip_half: int,
+    imgsz: int,
+    conf_threshold: float,
+    cx: float,
+    cy: float,
+) -> tuple[Any, ...]:
+    return (
+        weights_sig[0],
+        weights_sig[1],
+        tci_key[0],
+        tci_key[1],
+        int(chip_half),
+        int(imgsz),
+        round(float(conf_threshold), 6),
+        int(round(float(cx) * 4.0)),
+        int(round(float(cy) * 4.0)),
+    )
+
+
+def _chip_cache_get(key: tuple[Any, ...]) -> Any:
+    with _chip_result_lock:
+        if key in _chip_result_cache:
+            _chip_result_cache.move_to_end(key)
+            return _chip_result_cache[key]
+    return _CACHE_MISS
+
+
+def _chip_cache_put(key: tuple[Any, ...], val: YoloSpotResult | None) -> None:
+    with _chip_result_lock:
+        _chip_result_cache[key] = val
+        _chip_result_cache.move_to_end(key)
+        while len(_chip_result_cache) > _CHIP_CACHE_MAX:
+            _chip_result_cache.popitem(last=False)
 
 
 def default_marine_yolo_dir(project_root: Path) -> Path:
@@ -92,6 +155,12 @@ class MarineYOLOPredictor:
     def __init__(self, weights_path: Path) -> None:
         from ultralytics import YOLO
 
+        wp = Path(weights_path)
+        try:
+            st = wp.stat()
+            self._weights_sig = (str(wp.resolve()), int(st.st_mtime_ns))
+        except OSError:
+            self._weights_sig = (str(wp.resolve()), 0)
         self._model = YOLO(str(weights_path))
 
     def _spot_from_yolo_result(
@@ -161,20 +230,19 @@ class MarineYOLOPredictor:
             chip_h=int(ch),
         )
 
-    def predict_at_candidate(
+    def _infer_single_bgr(
         self,
-        tci_path: str | Path,
-        cx: float,
-        cy: float,
+        bgr: np.ndarray,
         *,
-        chip_half: int,
+        cx_full: float,
+        cy_full: float,
+        c0: int,
+        r0: int,
+        cw: int,
+        ch: int,
         imgsz: int,
         conf_threshold: float,
     ) -> YoloSpotResult | None:
-        bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, chip_half)
-        if bgr.size == 0 or cw < 4 or ch < 4:
-            return None
-
         results = self._model.predict(
             bgr,
             imgsz=int(imgsz),
@@ -185,13 +253,56 @@ class MarineYOLOPredictor:
             return None
         return self._spot_from_yolo_result(
             results[0],
+            cx_full=cx_full,
+            cy_full=cy_full,
+            c0=c0,
+            r0=r0,
+            cw=cw,
+            ch=ch,
+        )
+
+    def predict_at_candidate(
+        self,
+        tci_path: str | Path,
+        cx: float,
+        cy: float,
+        *,
+        chip_half: int,
+        imgsz: int,
+        conf_threshold: float,
+    ) -> YoloSpotResult | None:
+        tk = _tci_cache_key(tci_path)
+        ck = _chip_result_cache_key(
+            self._weights_sig,
+            tk,
+            chip_half,
+            imgsz,
+            conf_threshold,
+            cx,
+            cy,
+        )
+        hit = _chip_cache_get(ck)
+        if hit is not _CACHE_MISS:
+            return hit
+
+        bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, chip_half)
+        if bgr.size == 0 or cw < 4 or ch < 4:
+            _chip_cache_put(ck, None)
+            return None
+
+        spot = self._infer_single_bgr(
+            bgr,
             cx_full=float(cx),
             cy_full=float(cy),
             c0=c0,
             r0=r0,
             cw=cw,
             ch=ch,
+            imgsz=int(imgsz),
+            conf_threshold=float(conf_threshold),
         )
+        _chip_cache_put(ck, spot)
+        return spot
 
     def predict_batch_at_candidates(
         self,
@@ -204,34 +315,87 @@ class MarineYOLOPredictor:
         batch_size: int = 4,
     ) -> list[YoloSpotResult | None]:
         """
-        Performance: batched chip inference for many (cx, cy) on the same TCI; order matches ``centers``.
-
-        Empty or tiny chips yield ``None`` at that index without calling the model for that slot.
+        Performance: batched chip inference; skips cache hits; adaptive chunk size; batch OOM -> sequential.
         """
         n = len(centers)
         out: list[YoloSpotResult | None] = [None] * n
         if n == 0:
             return out
 
-        bs = max(1, min(32, int(batch_size)))
+        tk = _tci_cache_key(tci_path)
+        configured_bs = max(1, min(32, int(batch_size)))
         valid: list[tuple[int, Any, int, int, int, int]] = []
         for i, (cx, cy) in enumerate(centers):
+            ck = _chip_result_cache_key(
+                self._weights_sig,
+                tk,
+                chip_half,
+                imgsz,
+                conf_threshold,
+                cx,
+                cy,
+            )
+            hit = _chip_cache_get(ck)
+            if hit is not _CACHE_MISS:
+                out[i] = hit
+                continue
             bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, chip_half)
             if bgr.size == 0 or cw < 4 or ch < 4:
+                _chip_cache_put(ck, None)
+                out[i] = None
                 continue
             valid.append((i, bgr, c0, r0, cw, ch))
 
-        for start in range(0, len(valid), bs):
-            chunk = valid[start : start + bs]
+        vpos = 0
+        while vpos < len(valid):
+            remaining = len(valid) - vpos
+            chunk_len = min(configured_bs, remaining)
+            chunk = valid[vpos : vpos + chunk_len]
+            vpos += chunk_len
             images = [t[1] for t in chunk]
-            results = self._model.predict(
-                images,
-                imgsz=int(imgsz),
-                conf=float(conf_threshold),
-                verbose=False,
-            )
-            if not results:
+            results = None
+            try:
+                results = self._model.predict(
+                    images,
+                    imgsz=int(imgsz),
+                    conf=float(conf_threshold),
+                    verbose=False,
+                )
+                if not results or len(results) < len(chunk):
+                    raise RuntimeError("yolo_batch_incomplete")
+            except Exception as e:
+                logger.warning(
+                    "Performance: YOLO batch failed (%s); sequential fallback for %d chip(s)",
+                    e,
+                    len(chunk),
+                )
+                for t in chunk:
+                    idx, bgr, c0, r0, cw, ch = t
+                    cx, cy = centers[idx]
+                    spot = self._infer_single_bgr(
+                        bgr,
+                        cx_full=float(cx),
+                        cy_full=float(cy),
+                        c0=c0,
+                        r0=r0,
+                        cw=cw,
+                        ch=ch,
+                        imgsz=int(imgsz),
+                        conf_threshold=float(conf_threshold),
+                    )
+                    out[idx] = spot
+                    ck = _chip_result_cache_key(
+                        self._weights_sig,
+                        tk,
+                        chip_half,
+                        imgsz,
+                        conf_threshold,
+                        cx,
+                        cy,
+                    )
+                    _chip_cache_put(ck, spot)
                 continue
+
             for j, res in enumerate(results):
                 if j >= len(chunk):
                     break
@@ -247,6 +411,16 @@ class MarineYOLOPredictor:
                     ch=ch,
                 )
                 out[idx] = spot
+                ck = _chip_result_cache_key(
+                    self._weights_sig,
+                    tk,
+                    chip_half,
+                    imgsz,
+                    conf_threshold,
+                    cx,
+                    cy,
+                )
+                _chip_cache_put(ck, spot)
         return out
 
 
