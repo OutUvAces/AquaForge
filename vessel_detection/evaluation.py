@@ -71,6 +71,43 @@ def circular_median_abs_error_deg(errors: list[float]) -> float | None:
     return float(statistics.median(errors))
 
 
+_NA = "N/A"
+
+
+def fmt_eval_num(
+    x: float | None,
+    *,
+    ndigits: int = 3,
+    suffix: str = "",
+) -> str:
+    """Format a metric for tables; partial GT / missing model -> ``N/A``."""
+    if x is None:
+        return _NA
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return _NA
+    if not math.isfinite(v):
+        return _NA
+    return f"{v:.{ndigits}f}{suffix}"
+
+
+def fmt_eval_pct(x: float | None, *, ndigits: int = 1) -> str:
+    if x is None:
+        return _NA
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return _NA
+    if not math.isfinite(v):
+        return _NA
+    return f"{v:.{ndigits}f}%"
+
+
+def _mean_list(vals: list[float]) -> float | None:
+    return float(sum(vals) / len(vals)) if vals else None
+
+
 def best_wake_line_error_deg(wake_heading: float | None, gt: float | None) -> float | None:
     """
     Wake axis is undirected: take the smaller error vs ``gt`` between ``wake_heading`` and
@@ -370,10 +407,11 @@ class EvalRunResult:
     n_heading_gt: int
     pearson_r_by_backend: dict[str, float | None]
     n_ranking_scored: int
+    n_scored_by_backend: dict[str, int]
     heading_buckets: dict[str, HeadingErrorBucket]
-    rel_length_errors: list[float]
-    rel_width_errors: list[float]
-    mask_ious: list[float]
+    rel_length_by_backend: dict[str, list[float]]
+    rel_width_by_backend: dict[str, list[float]]
+    mask_iou_by_backend: dict[str, list[float]]
     pct_keypoint_better_than_wake_line: float | None
     n_kp_vs_wake_pairs: int
     pct_fusion_better_than_wake_ambiguity: float | None
@@ -419,9 +457,18 @@ def eval_result_to_jsonable(res: EvalRunResult) -> dict[str, Any]:
         "heading_bucket_summary": hb,
         "mean_rel_length_error": res.mean_rel_length_error,
         "mean_rel_width_error": res.mean_rel_width_error,
-        "rel_length_n": len(res.rel_length_errors),
+        "rel_length_by_backend": {
+            k: {"n": len(v), "mean": _mean_list(v)} for k, v in res.rel_length_by_backend.items()
+        },
+        "rel_width_by_backend": {
+            k: {"n": len(v), "mean": _mean_list(v)} for k, v in res.rel_width_by_backend.items()
+        },
+        "mask_iou_by_backend": {
+            k: {"n": len(v), "mean": _mean_list(v)} for k, v in res.mask_iou_by_backend.items()
+        },
         "mean_mask_iou": res.mean_mask_iou,
         "n_mask_iou": res.n_mask_iou,
+        "n_scored_by_backend": dict(res.n_scored_by_backend),
         "pct_keypoint_better_than_wake_line": res.pct_keypoint_better_than_wake_line,
         "n_kp_vs_wake_pairs": res.n_kp_vs_wake_pairs,
         "pct_fusion_better_than_wake_ambiguity": res.pct_fusion_better_than_wake_ambiguity,
@@ -522,8 +569,10 @@ def run_detection_evaluation(
 
     pearson_r: dict[str, float | None] = {}
     n_rank = 0
+    n_scored_by_backend: dict[str, int] = {}
     for key in ("legacy_hybrid", "yolo_fusion", "ensemble"):
         pearson_r[key] = _corrcoef_safe(pearson_by[key], pearson_y[key])
+        n_scored_by_backend[key] = len(pearson_by[key])
         n_rank = max(n_rank, len(pearson_by[key]))
 
     geo = collect_vessel_geometry_ground_truth(
@@ -536,9 +585,9 @@ def run_detection_evaluation(
         "yolo_fusion": HeadingErrorBucket(),
         "ensemble": HeadingErrorBucket(),
     }
-    rel_len: list[float] = []
-    rel_wid: list[float] = []
-    ious: list[float] = []
+    rel_len_bb: dict[str, list[float]] = {"yolo_fusion": [], "ensemble": []}
+    rel_wid_bb: dict[str, list[float]] = {"yolo_fusion": [], "ensemble": []}
+    iou_bb: dict[str, list[float]] = {"yolo_fusion": [], "ensemble": []}
     kp_better = 0
     kp_pairs = 0
     fusion_better = 0
@@ -571,28 +620,27 @@ def run_detection_evaluation(
             if gt_h is not None:
                 _append_heading_errors(buckets[bname], sota, float(gt_h))
 
-            # Measurements + IoU: use either backend's YOLO polygon (same if YOLO on)
-            if bname == "ensemble":
-                gl, gw = g.length_m, g.width_m
-                if gl is not None:
-                    e = _rel_dim_error(sota.get("yolo_length_m"), gl)
-                    if e is not None:
-                        rel_len.append(e)
-                if gw is not None:
-                    e = _rel_dim_error(sota.get("yolo_width_m"), gw)
-                    if e is not None:
-                        rel_wid.append(e)
-                yolo_full = sota.get("yolo_polygon_fullres")
-                if (
-                    isinstance(yolo_full, list)
-                    and len(yolo_full) >= 3
-                    and gt_quad
-                    and len(gt_quad) >= 3
-                ):
-                    poly_y = [(float(p[0]), float(p[1])) for p in yolo_full]
-                    iou = mask_polygon_iou(gt_quad, poly_y)
-                    if iou is not None:
-                        ious.append(iou)
+            # Measurements + IoU per backend (YOLO config identical -> values usually match).
+            gl, gw = g.length_m, g.width_m
+            if gl is not None:
+                e = _rel_dim_error(sota.get("yolo_length_m"), gl)
+                if e is not None:
+                    rel_len_bb[bname].append(e)
+            if gw is not None:
+                e = _rel_dim_error(sota.get("yolo_width_m"), gw)
+                if e is not None:
+                    rel_wid_bb[bname].append(e)
+            yolo_full = sota.get("yolo_polygon_fullres")
+            if (
+                isinstance(yolo_full, list)
+                and len(yolo_full) >= 3
+                and gt_quad
+                and len(gt_quad) >= 3
+            ):
+                poly_y = [(float(p[0]), float(p[1])) for p in yolo_full]
+                iou = mask_polygon_iou(gt_quad, poly_y)
+                if iou is not None:
+                    iou_bb[bname].append(iou)
 
             if bname == "ensemble" and gt_h is not None:
                 h_kp = sota.get("heading_keypoint_deg")
@@ -633,10 +681,11 @@ def run_detection_evaluation(
         n_heading_gt=n_heading_gt,
         pearson_r_by_backend=pearson_r,
         n_ranking_scored=n_rank,
+        n_scored_by_backend=n_scored_by_backend,
         heading_buckets=buckets,
-        rel_length_errors=rel_len,
-        rel_width_errors=rel_wid,
-        mask_ious=ious,
+        rel_length_by_backend=rel_len_bb,
+        rel_width_by_backend=rel_wid_bb,
+        mask_iou_by_backend=iou_bb,
         pct_keypoint_better_than_wake_line=pct_kp,
         n_kp_vs_wake_pairs=kp_pairs,
         pct_fusion_better_than_wake_ambiguity=pct_fusion,
@@ -646,77 +695,127 @@ def run_detection_evaluation(
         mean_abs_heading_error_keypoint=circular_mae_deg(ens.keypoint),
         mean_abs_heading_error_fused=circular_mae_deg(ens.fused),
         median_abs_heading_error_keypoint=circular_median_abs_error_deg(ens.keypoint),
-        mean_rel_length_error=(
-            float(sum(rel_len) / len(rel_len)) if rel_len else None
-        ),
-        mean_rel_width_error=(
-            float(sum(rel_wid) / len(rel_wid)) if rel_wid else None
-        ),
-        mean_mask_iou=float(sum(ious) / len(ious)) if ious else None,
-        n_mask_iou=len(ious),
+        mean_rel_length_error=_mean_list(rel_len_bb["ensemble"]),
+        mean_rel_width_error=_mean_list(rel_wid_bb["ensemble"]),
+        mean_mask_iou=_mean_list(iou_bb["ensemble"]),
+        n_mask_iou=len(iou_bb["ensemble"]),
         corr_hybrid_vs_label=pearson_r.get("legacy_hybrid"),
         corr_rank_sota_vs_label=pearson_r.get(settings_sota.backend),
         n_heading_eval=len(ens.keypoint),
         n_heading_wake_eval=len(ens.wake_line),
-        n_dim_eval=len(rel_len),
+        n_dim_eval=len(rel_len_bb["ensemble"]),
     )
     return res
 
 
+def _heading_cell_mae(bucket: HeadingErrorBucket, field: str) -> str:
+    seq = getattr(bucket, field, [])
+    return fmt_eval_num(circular_mae_deg(seq), ndigits=2)
+
+
+def _heading_cell_median_kp(bucket: HeadingErrorBucket) -> str:
+    return fmt_eval_num(circular_median_abs_error_deg(bucket.keypoint), ndigits=2)
+
+
 def format_eval_report(res: EvalRunResult, *, settings_sota: DetectionSettings) -> str:
+    """Verbose plain-text + markdown-style tables (uses N/A for missing partial GT)."""
+    yf = res.heading_buckets.get("yolo_fusion") or HeadingErrorBucket()
+    ens = res.heading_buckets.get("ensemble") or HeadingErrorBucket()
     lines: list[str] = [
-        "=== Vessel-Detector detection / SOTA evaluation ===",
-        f"YAML backend (reference): {settings_sota.backend}",
+        "## Vessel Detector - detection / SOTA evaluation",
+        f"**YAML backend (reference):** `{settings_sota.backend}`",
         "",
         f"Labeled points (binary): {res.n_labeled_points}",
         f"Vessel geometry rows: {res.n_geometry_spots}",
         f"Rows with heading GT (stored or bow/stern markers): {res.n_heading_gt}",
         "",
-        "### Ranking quality (Pearson r vs human binary label)",
+        "### Ranking (Pearson r vs binary label)",
         "",
-        "| Backend        | Pearson r |",
-        "|----------------|-----------|",
+        "| | Legacy | YOLO-fusion | Ensemble |",
+        "|:--|:--|:--|:--|",
+        "| Pearson r | "
+        f"{fmt_eval_num(res.pearson_r_by_backend.get('legacy_hybrid'), ndigits=4)} | "
+        f"{fmt_eval_num(res.pearson_r_by_backend.get('yolo_fusion'), ndigits=4)} | "
+        f"{fmt_eval_num(res.pearson_r_by_backend.get('ensemble'), ndigits=4)} |",
+        "| N scored | "
+        f"{res.n_scored_by_backend.get('legacy_hybrid', 0)} | "
+        f"{res.n_scored_by_backend.get('yolo_fusion', 0)} | "
+        f"{res.n_scored_by_backend.get('ensemble', 0)} |",
+        "",
+        "### Heading - circular MAE (deg, shortest arc; wake uses min of two directions)",
+        "_Legacy has no heading model - N/A._",
+        "",
+        "| Metric | Legacy | YOLO-fusion | Ensemble |",
+        "|:--|:--|:--|:--|",
+        "| Wake line MAE | "
+        f"{_NA} | {_heading_cell_mae(yf, 'wake_line')} | {_heading_cell_mae(ens, 'wake_line')} |",
+        "| Keypoint MAE | "
+        f"{_NA} | {_heading_cell_mae(yf, 'keypoint')} | {_heading_cell_mae(ens, 'keypoint')} |",
+        "| Keypoint median | "
+        f"{_NA} | {_heading_cell_median_kp(yf)} | {_heading_cell_median_kp(ens)} |",
+        "| Fused MAE | "
+        f"{_NA} | {_heading_cell_mae(yf, 'fused')} | {_heading_cell_mae(ens, 'fused')} |",
+        "",
+        "### Fusion benefit (ensemble, vs undirected wake; +5 deg margin)",
+        "",
+        "| Metric | Value |",
+        "|:--|:--|",
+        f"| % keypoint beats wake alone | {fmt_eval_pct(res.pct_keypoint_better_than_wake_line)} "
+        f"(n={res.n_kp_vs_wake_pairs if res.n_kp_vs_wake_pairs else _NA}) |",
+        f"| % fused beats wake alone | {fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)} "
+        f"(n={res.n_fusion_vs_wake_pairs if res.n_fusion_vs_wake_pairs else _NA}) |",
+        "",
+        "### Measurements - mean relative abs error vs labeled L/W",
+        "",
+        "| | Legacy | YOLO-fusion | Ensemble |",
+        "|:--|:--|:--|:--|",
+        "| Mean rel. length err | "
+        f"{_NA} | "
+        f"{fmt_eval_num(_mean_list(res.rel_length_by_backend.get('yolo_fusion', [])), ndigits=4)} | "
+        f"{fmt_eval_num(_mean_list(res.rel_length_by_backend.get('ensemble', [])), ndigits=4)} |",
+        "| Mean rel. width err | "
+        f"{_NA} | "
+        f"{fmt_eval_num(_mean_list(res.rel_width_by_backend.get('yolo_fusion', [])), ndigits=4)} | "
+        f"{fmt_eval_num(_mean_list(res.rel_width_by_backend.get('ensemble', [])), ndigits=4)} |",
+        "| N (length) | "
+        f"{_NA} | {len(res.rel_length_by_backend.get('yolo_fusion', []))} | "
+        f"{len(res.rel_length_by_backend.get('ensemble', []))} |",
+        "",
+        "### Hull overlap - mean IoU (labeled quad vs YOLO polygon)",
+        "",
+        "| | Legacy | YOLO-fusion | Ensemble |",
+        "|:--|:--|:--|:--|",
+        "| Mean IoU | "
+        f"{_NA} | "
+        f"{fmt_eval_num(_mean_list(res.mask_iou_by_backend.get('yolo_fusion', [])), ndigits=4)} | "
+        f"{fmt_eval_num(_mean_list(res.mask_iou_by_backend.get('ensemble', [])), ndigits=4)} |",
+        "| N | "
+        f"{_NA} | {len(res.mask_iou_by_backend.get('yolo_fusion', []))} | "
+        f"{len(res.mask_iou_by_backend.get('ensemble', []))} |",
+        "",
+        "### Notes",
     ]
-    for k in ("legacy_hybrid", "yolo_fusion", "ensemble"):
-        lines.append(f"| {k:14} | {res.pearson_r_by_backend.get(k)} |")
-    lines.extend(
-        [
-            "",
-            "### Heading accuracy (circular MAE deg, [0..180])",
-            "",
-            "| Source / backend   | Wake line | Keypoint MAE | KP median | Fused MAE |",
-            "|--------------------|-----------|--------------|-----------|-----------|",
-        ]
-    )
-    for bkey, label in (("yolo_fusion", "yolo_fusion"), ("ensemble", "ensemble")):
-        b = res.heading_buckets.get(bkey) or HeadingErrorBucket()
-        lines.append(
-            f"| {label:18} | {circular_mae_deg(b.wake_line)} | "
-            f"{circular_mae_deg(b.keypoint)} | "
-            f"{circular_median_abs_error_deg(b.keypoint)} | "
-            f"{circular_mae_deg(b.fused)} |"
-        )
-    lines.extend(
-        [
-            "",
-            "### Ambiguity resolution (strict +5 deg margin vs undirected wake)",
-            f"% keypoint beats wake line alone: {res.pct_keypoint_better_than_wake_line} "
-            f"(n={res.n_kp_vs_wake_pairs})",
-            f"% fused beats wake line alone: {res.pct_fusion_better_than_wake_ambiguity} "
-            f"(n={res.n_fusion_vs_wake_pairs})",
-            "",
-            "### Measurement accuracy (ensemble YOLO mask vs labeled L/W, mean rel. abs error)",
-            f"N length: {res.n_dim_eval}  mean rel. length err: {res.mean_rel_length_error}",
-            f"Mean rel. width err: {res.mean_rel_width_error}",
-            "",
-            "### Hull overlap (mean IoU, labeled quad vs YOLO polygon full-res)",
-            f"N: {res.n_mask_iou}  mean IoU: {res.mean_mask_iou}",
-            "",
-            "### Notes",
-        ]
-    )
     lines.extend(f"- {n}" for n in res.notes) if res.notes else lines.append("- (none)")
     return "\n".join(lines) + "\n"
+
+
+def format_eval_summary_markdown(
+    res: EvalRunResult,
+    *,
+    settings_sota: DetectionSettings,
+    jsonl_path: str | None = None,
+) -> str:
+    """
+    GitHub-flavored markdown (CI / PR bodies). Same tables as :func:`format_eval_report` with a
+    top-level heading and dataset line; uses N/A for missing partial GT.
+    """
+    sub = (
+        f"_Reference backend: `{settings_sota.backend}`_\n\n"
+        if not jsonl_path
+        else f"_JSONL: `{jsonl_path}` - reference backend: `{settings_sota.backend}`_\n\n"
+    )
+    body = format_eval_report(res, settings_sota=settings_sota)
+    return sub + body
 
 
 def iter_jsonl_files_in_dir(folder: Path) -> Iterator[Path]:
@@ -808,6 +907,11 @@ def main_cli(argv: list[str] | None = None) -> int:
         default=None,
         help="Write structured results as JSON (UTF-8)",
     )
+    ap.add_argument(
+        "--summary-markdown",
+        action="store_true",
+        help="GitHub-ready markdown only (no ### file preamble); good for PR comments / GFM",
+    )
     args = ap.parse_args(argv)
 
     root = args.project_root.resolve()
@@ -850,13 +954,23 @@ def main_cli(argv: list[str] | None = None) -> int:
             settings_sota=settings_sota,
             max_spots=args.max_spots,
         )
-        text_reports.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
+        if args.summary_markdown:
+            text_reports.append(
+                format_eval_summary_markdown(
+                    res,
+                    settings_sota=settings_sota,
+                    jsonl_path=str(jp),
+                )
+            )
+        else:
+            text_reports.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
         jd = eval_result_to_jsonable(res)
         jd["jsonl"] = str(jp)
         jd["settings_backend"] = settings_sota.backend
         json_payload.append(jd)
 
-    full = "\n".join(text_reports)
+    sep = "\n\n---\n\n" if args.summary_markdown else "\n"
+    full = sep.join(text_reports)
     print(full, flush=True)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

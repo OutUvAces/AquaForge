@@ -69,7 +69,11 @@ from vessel_detection.detection_config import (
     sota_inference_requested,
     yolo_requested,
 )
-from vessel_detection.evaluation import angular_error_deg, spot_geometry_gt_from_labels
+from vessel_detection.evaluation import (
+    angular_error_deg,
+    rank_score_at_point,
+    spot_geometry_gt_from_labels,
+)
 from vessel_detection.review_overlay import (
     annotate_locator_spot_outline,
     annotate_spot_detection_center,
@@ -1552,8 +1556,6 @@ def _render_review_deck(
     if sota_inference_requested(det_settings) and sota:
         with st.expander("SOTA overlays & heading hints", expanded=False):
             if clf_disp is not None or bundle_disp is not None:
-                from vessel_detection.evaluation import rank_score_at_point
-
                 _rs = rank_score_at_point(
                     ROOT,
                     tci_p,
@@ -1591,20 +1593,36 @@ def _render_review_deck(
             if _gt_hint and isinstance(sota, dict):
                 gth = float(_gt_hint["heading_deg"])
                 prov = str(_gt_hint.get("provenance", ""))
+                ef = (
+                    angular_error_deg(float(sota["heading_fused_deg"]), gth)
+                    if sota.get("heading_fused_deg") is not None
+                    else None
+                )
+                ek = (
+                    angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
+                    if sota.get("heading_keypoint_deg") is not None
+                    else None
+                )
+                fused_closer = (
+                    ef is not None
+                    and ek is not None
+                    and ef < ek - 0.05
+                )
                 _ins_parts: list[str] = []
-                if sota.get("heading_fused_deg") is not None:
-                    ef = angular_error_deg(float(sota["heading_fused_deg"]), gth)
-                    if ef is not None:
-                        _ins_parts.append(f"fused vs GT **{ef:.1f}°**")
-                if sota.get("heading_keypoint_deg") is not None:
-                    ek = angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
-                    if ek is not None:
-                        _ins_parts.append(f"keypoint vs GT **{ek:.1f}°**")
+                if ek is not None:
+                    _ins_parts.append(f"Keypoint vs labeled heading: **{ek:.1f}°** error")
+                if ef is not None:
+                    if fused_closer:
+                        _ins_parts.append(
+                            f"**Fused vs labeled: {ef:.1f}° error — closer to GT than keypoint alone**"
+                        )
+                    else:
+                        _ins_parts.append(f"Fused vs labeled heading: **{ef:.1f}°** error")
                 if _ins_parts:
-                    st.caption(
-                        "**Benchmark insight** (nearby `vessel_size_feedback` heading, "
-                        f"source `{prov}`): "
-                        + "; ".join(_ins_parts)
+                    st.markdown(
+                        "**Benchmark insight** (matched `vessel_size_feedback`, "
+                        f"source `{prov}`)  \n"
+                        + "  \n".join(_ins_parts)
                     )
             if sota.get("yolo_confidence") is not None:
                 st.metric("Marine YOLO confidence", f"{float(sota['yolo_confidence']):.3f}")

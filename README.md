@@ -179,9 +179,12 @@ See the script docstring for ONNX I/O alignment with [`vessel_detection.shipstru
 ```bash
 py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl -o eval_report.txt
 py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl --output-json eval_report.json
+py -3 scripts/run_detection_eval.py --summary-markdown -o eval_github.md
 py -3 scripts/run_detection_eval.py --backend ensemble --max-spots 50
 py -3 scripts/run_detection_eval.py --labels-dir data/labels
 ```
+
+Use **`--summary-markdown`** for a GitHub-flavored report (no `### path` preamble; multiple JSONL files separated by `---`). Missing partial ground truth shows as **`N/A`** in tables.
 
 Or: `py -3 -m vessel_detection.evaluation --help`.
 
@@ -248,7 +251,22 @@ wake_fusion:
   quantize: true   # same for optional wake ONNX
 ```
 
-Default is `false` (full-precision weights). On typical pose MLP-heavy graphs, **1.2×–2.2×** faster single-inference on CPU is common, but depends on model opset and ORT version; accuracy can shift slightly—validate with `scripts/export_shipstructure_to_onnx.py validate-chip` and your eval JSON. The **first** quantized load pays a one-time compile/write to the temp cache; subsequent Streamlit reruns reuse the session cache.
+Default is `false` (full-precision weights). On typical pose MLP-heavy graphs, **1.2×–2.2×** faster single-inference on CPU is common, but depends on model opset and ORT version; accuracy can shift slightly.
+
+**When to enable**
+
+- **Interactive web UI (Streamlit):** reasonable default **off** until you have validated your ONNX; then turn on for lower per-spot latency on CPU-only machines. Logs on first load show cache build and session creation (see `vessel_detection/onnx_session_cache.py`).
+- **Batch / eval / CI:** keep **off** for the reference metrics run; run a second pass with `quantize: true` or use the script below to compare speed and heading delta on a few chips before enabling in production YAML.
+
+**Validate before/after**
+
+```bash
+py -3 scripts/validate_quantization.py --onnx data/models/ship_pose_384.onnx --tci path/to/TCI.jp2 --cx 5000 --cy 3200 --repeat 15
+```
+
+Reports mean inference time (float vs quant) and circular heading difference when bow/stern indices produce a geodesic heading. Full IoU / dataset metrics: use `run_detection_eval.py` with labeled JSONL.
+
+The **first** quantized load pays a one-time compile/write to the temp cache; subsequent Streamlit reruns reuse the in-process session cache.
 
 ---
 

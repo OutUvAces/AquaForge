@@ -13,7 +13,9 @@ from vessel_detection.evaluation import (
     circular_mae_deg,
     collect_vessel_geometry_ground_truth,
     eval_result_to_jsonable,
+    fmt_eval_num,
     format_eval_report,
+    format_eval_summary_markdown,
     mask_polygon_iou,
     resolve_heading_gt_from_feedback_row,
     run_detection_evaluation,
@@ -99,6 +101,7 @@ class TestEvalReportJson(unittest.TestCase):
             self.assertIn("heading_bucket_summary", d)
             self.assertIn("legacy_hybrid", d["pearson_r_by_backend"])
             self.assertIn("pct_fusion_better_than_wake_ambiguity", d)
+            self.assertIn("n_scored_by_backend", d)
         finally:
             jp.unlink(missing_ok=True)
 
@@ -116,9 +119,10 @@ class TestEvalReportJson(unittest.TestCase):
                 settings_sota=DetectionSettings(),
             )
             txt = format_eval_report(res, settings_sota=DetectionSettings())
-            self.assertIn("Ranking quality", txt)
-            self.assertIn("yolo_fusion", txt)
+            self.assertIn("Ranking (Pearson", txt)
+            self.assertIn("YOLO-fusion", txt)
             self.assertIn("Hull overlap", txt)
+            self.assertIn("N/A", txt)
         finally:
             jp.unlink(missing_ok=True)
 
@@ -140,6 +144,38 @@ class TestHeadingGroundTruthParse(unittest.TestCase):
 
     def test_circular_mae_simple(self) -> None:
         self.assertAlmostEqual(circular_mae_deg([10.0, 20.0]), 15.0)
+
+
+class TestFmtEvalNa(unittest.TestCase):
+    def test_fmt_eval_num_na(self) -> None:
+        self.assertEqual(fmt_eval_num(None), "N/A")
+        self.assertEqual(fmt_eval_num(float("nan")), "N/A")
+
+
+class TestSummaryMarkdown(unittest.TestCase):
+    def test_format_eval_summary_markdown(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("")
+            jp = Path(f.name)
+        try:
+            res = run_detection_evaluation(
+                root,
+                jp,
+                settings_sota=DetectionSettings(),
+            )
+            md = format_eval_summary_markdown(
+                res,
+                settings_sota=DetectionSettings(),
+                jsonl_path=str(jp),
+            )
+            self.assertIn("JSONL:", md)
+            self.assertIn("Vessel Detector", md)
+            self.assertIn("| Legacy |", md)
+        finally:
+            jp.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

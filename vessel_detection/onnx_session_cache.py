@@ -45,6 +45,11 @@ def _quantized_model_path(src: Path) -> Path | None:
     out = dest_dir / f"{h}.onnx"
     if out.is_file() and out.stat().st_size > 0:
         return out
+    logger.info(
+        "Building dynamic INT8 ONNX cache (first load; may take a few seconds): %s -> %s",
+        src.name,
+        out.name,
+    )
     try:
         from onnxruntime.quantization import QuantType, quantize_dynamic
     except ImportError:
@@ -67,7 +72,14 @@ def _quantized_model_path(src: Path) -> Path | None:
         except OSError:
             pass
         return None
-    return out if out.is_file() and out.stat().st_size > 0 else None
+    if out.is_file() and out.stat().st_size > 0:
+        logger.info(
+            "Quantized ONNX ready (%d bytes): %s",
+            out.stat().st_size,
+            out,
+        )
+        return out
+    return None
 
 
 def get_ort_session(
@@ -101,6 +113,10 @@ def get_ort_session(
             path_for_session = qpath
             mode = "q8"
         else:
+            logger.info(
+                "Quantization unavailable or failed; using float32 ONNX: %s",
+                path.name,
+            )
             mode = "f32"
 
     try:
@@ -125,8 +141,14 @@ def get_ort_session(
         return None
 
     with _lock:
-        _sessions[cache_key] = sess
-    return sess
+        if cache_key not in _sessions:
+            if mode == "q8":
+                logger.info(
+                    "ORT session loaded (quantized INT8 weights): %s",
+                    path_for_session.name,
+                )
+            _sessions[cache_key] = sess
+        return _sessions[cache_key]
 
 
 def clear_ort_session_cache() -> None:
