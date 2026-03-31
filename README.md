@@ -11,22 +11,22 @@ Repository layout (core package): [`aquaforge/`](aquaforge/) — `detection_conf
 
 ## Run the web UI
 
-1. **Python 3.10+**, then `pip install -r requirements.txt`. For richer overlays on each spot: `pip install -r requirements-ml.txt`.
+1. **Python 3.10+**, then `pip install -r requirements.txt`. For automatic outline hints on each spot: `pip install -r requirements-ml.txt`.
 2. **`py -3 -m streamlit run app.py`** (or `run_web.bat`).
 3. Open the URL shown (often [http://localhost:8501](http://localhost:8501)).
 
-**Main column:** choose your satellite file → **Refresh** → **Back / Next** through the list. **Hull preview** is small on top; **close-up is large** with the map in a narrower column beside it. Use the four switches (**Ship outline**, **Point markers**, **Direction arrow**, **Wake line**) to show or hide drawings. Save with **Ship**, **Not a ship**, **Unsure**, etc. Open **“Sizes and directions”** only if you want length/width and angle readouts.
+**Calm daily flow:** the **left panel starts closed** (arrow on the edge). Open it to pick the **scene** and press **Refresh spot list**. The **main** area shows one **large close-up**. Use **Drawings** (top-right) only if you want to change what is painted — default is **ship outline + direction arrow**. At the bottom: **← Back**, **Next →**, **Ship**, **Not a ship**, **Unsure**. Cloud, land, skip, and “how sure” live under **More choices**.
 
-**Sidebar (optional):** how spots are **found**, satellite **download**, **sort-order** retrain, **exports**, **duplicate** search.
+**In the left panel:** finding bright spots, satellite download, re-sort training, exports, duplicate search, and a **whole-scene map**.
 
-**Defaults:** `legacy_hybrid` in `data/config/detection.yaml` needs no extra model files. **`ensemble`** or **`aquaforge`** adds stronger overlays when configured.
+**Defaults:** `legacy_hybrid` in `data/config/detection.yaml` needs no extra model files. **`ensemble`** or **`aquaforge`** adds stronger on-image hints when configured.
 
 Entry point: [`app.py`](app.py) → `aquaforge.web_ui.main`.
 
 ### Improve the model over time
 
-1. **Review regularly** — Saving labels writes JSONL. Tricky cases (borderline scores, clouds, hand-placed map picks, small-ship cues) get a **higher sampling weight** and a **review-uncertainty** signal the trainer uses in the loss balancer.
-2. **Train** — `py -3 scripts/train_aquaforge.py` oversamples those rows (unless `--no-priority-sampling`). `--teacher-per-epoch` fills ensemble heading hints on the **same** high-priority IDs first. `--pseudo-jsonl` adds self-training on a curated list; optional **`extra.af_export_uncertainty`** (0–1) on each row softens trust for chips you flagged as ambiguous when exporting.
+1. **Review regularly** — Saving labels writes JSONL. Tricky cases (borderline scores, clouds, hand-placed map picks, small-ship cues, coast-like flags) get a **higher sampling weight** and a **review-uncertainty** signal the trainer feeds into the loss balancer.
+2. **Train** — `py -3 scripts/train_aquaforge.py` oversamples those rows (unless `--no-priority-sampling`). `--teacher-per-epoch` fills ensemble heading hints on the **same** high-priority IDs first. **`--pseudo-jsonl`** adds self-training: AquaForge picks **high-confidence, low-uncertainty** unlabeled chips, builds soft targets, and mixes them each epoch with weight **`--pseudo-mix-weight`** (see logs for `trust_mean`). Optional **`extra.af_export_uncertainty`** (0–1) on pseudo rows lowers trust when you exported a “hard” chip.
 3. **Deploy** — Point YAML at `data/models/aquaforge/aquaforge.pt` (or ONNX) and keep the same review habit.
 
 ---
@@ -47,11 +47,11 @@ Entry point: [`app.py`](app.py) → `aquaforge.web_ui.main`.
 
 AquaForge is **not** a repackaged Ultralytics or public multi-task recipe. The design is ours end-to-end:
 
-- **Joint loss** (`aquaforge/unified/losses.py`) — Dice + IoU + Tversky + BCE on the hull; **scene calibration** scales all geometry losses by small-hull footprint × heading-confidence ambiguity × **mean landmark visibility** (more marked points → slightly stronger shape supervision). Classification stays unscaled. Adaptive heatmaps, **cosine + geodesic** heading, wake **coherence**, optional ensemble distill on heading.
+- **Joint loss** (`aquaforge/unified/losses.py`) — Hull: Dice + IoU + Tversky + BCE with **per-chip weights** that up-rank small masks vs the **batch median**, plus a **centroid cohesion** term (keep predicted mass near the labeled hull). **Scene calibration** still scales the geometry block by batch-relative footprint × heading ambiguity × landmark visibility. **Heading**: cosine + geodesic, with **extra penalty on ~180° flips** when keypoints are marked visible. Wake coherence + optional ensemble heading distill.
 - **Curriculum** — `CurriculumSchedule` defines **explicit stage targets** in normalized time; `curriculum_base_weights` **interpolates** between them with smooth global easing. Tune the node table in code for your fleet — it is independent of any YOLO training recipe.
 - **Dynamic balancing** — `DynamicLossBalancer`: EMA rescale plus **batch context** (mask coverage, heading ambiguity, AL priority, **mean review-export uncertainty** from JSONL) nudges task weights.
-- **Active learning** — Review JSONL drives sampling priority and **`review_ui_uncertainty_signal`**; batches feed **`review_uncertainty_mean`** into the balancer. **`aquaforge_uncertainty_from_outputs`** (incl. heatmap entropy when present) filters pseudo chips. **`self_training_trust_from_outputs`** combines vessel probability, model uncertainty, and optional **`extra.af_export_uncertainty`** (0–1) on pseudo JSONL rows you curated as “hard.” **`hydrate_teacher_signals`** still ranks ensemble teacher fills by the same priorities.
-- **YOLO neck + stride harmonizer** (`aquaforge/unified/model.py`) — Project → align → **temperature-sharpened softmax** over strides + **fine anchor** → **depthwise-separable** harmonizer fuse → **+ tanh mid-stride residual**. Seg full-res; heatmaps ~ /8.
+- **Active learning** — Review JSONL drives sampling priority and **`review_ui_uncertainty_signal`**; batches feed **`review_uncertainty_mean`** into the balancer. **`aquaforge_uncertainty_from_outputs`** blends vessel **margin**, heading strength, hull entropy, heatmap entropy, and heading-confidence entropy for pseudo filtering. **`self_training_trust_from_outputs`** mixes that with optional **`extra.af_export_uncertainty`**. **`hydrate_teacher_signals`** ranks ensemble teacher fills by the same priorities. Rows tagged **Unsure** get a sampling boost when that metadata is honored.
+- **YOLO neck + S2 gate–residual fuse** (`aquaforge/unified/model.py`) — Project → align → **learned sigmoid gates per stride** → **depthwise-separable** fuse with the finest map → **explicit fine + mid residuals**. Seg full-res; heatmaps ~ /8.
 - **Bright spots + ocean mask** — Candidates still come from **bright-spot** detection and **ocean/water masking** (`detection_backend`, `ne_ocean_mask`, hybrid ranking). AquaForge trains on chips from that same human-review path, so the unified model stays tied to the product’s distinctive front end.
 
 **Training:** `py -3 scripts/train_aquaforge.py` — flags include `--no-dynamic-balance`, `--no-priority-sampling`, `--teacher-per-epoch`, `--teacher-distill-weight`, `--pseudo-jsonl`, `--pseudo-per-epoch`, `--pseudo-mix-weight`, `--pseudo-min-conf`, `--pseudo-max-u`.

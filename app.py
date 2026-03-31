@@ -6,7 +6,7 @@ then use the bookmark file ``AquaForge.url`` or http://127.0.0.1:8501
 
 **Terminal:** ``py -3 -m streamlit run app.py`` or ``run_web.bat``
 
-**Main:** large close-up, simple **Save** buttons, switches for each overlay. **Sidebar:** spot-finding settings, downloads, exports, re-sort training, duplicate search.
+**Main:** large close-up, **Drawings** expander (outline, direction, markers, wake), bottom **Back / Next** and **Ship / Not a ship / Unsure**. **Left panel:** scene, refresh, finding spots, downloads, re-sort, exports, map, duplicates.
 
 The app only answers at that URL while this computer is running the server.
 For a public URL with no local server, host the app (e.g. Streamlit Community Cloud).

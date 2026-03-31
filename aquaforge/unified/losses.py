@@ -4,12 +4,13 @@ Joint AquaForge losses (our design — not Ultralytics defaults).
 We combine **task-specific** terms with an explicitly documented blend (not a pasted vendor recipe):
 
   * Classification: BCE on vessel logit.
-  * Segmentation: soft Dice + soft IoU + **Tversky** (asymmetric FP/FN) + masked BCE — favours
-    recall on thin hulls typical of small S2 vessels without copying a single public loss.
+  * Segmentation: **per-chip small-vessel weights** (vs batch median mask area) on Dice + IoU + Tversky
+    + masked BCE, plus a light **centroid cohesion** term (pred mass vs GT hull centroid) — favours
+    tight hulls on Sentinel-2 without a pasted vendor recipe.
   * Landmarks: L1 + visibility BCE + **adaptive-width** Gaussian heatmaps (tighter when GT mask
     footprint is small — our resolution heuristic, not a fixed Gaussian from a paper).
-  * Heading: **cosine + normalised angular (geodesic) term** on (sin, cos) — proper circular
-    treatment beyond cosine-only shortcuts.
+  * Heading: **flip-aware** circular loss — same cosine + geodesic mix, but ~180° errors are
+    up-weighted when landmark visibility is high (confident bow/stern → harsher wrong-way penalty).
   * Wake: cosine to supervised wake vector plus **coherence** with the model’s own heading
     (same convention as training wake targets).
   * Optional ensemble distillation on heading (sin, cos).
@@ -251,6 +252,116 @@ def heading_combined_circular_loss(pred_sc: torch.Tensor, gt_deg: torch.Tensor, 
     ang = torch.acos(cos_sim) / torch.pi
     ang_term = (ang * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
     return cos_term + 0.42 * ang_term
+
+
+def heading_flip_aware_circular_loss(
+    pred_sc: torch.Tensor,
+    gt_deg: torch.Tensor,
+    valid: torch.Tensor,
+    kp_vis: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Same circular heading mix as :func:`heading_combined_circular_loss`, but **up-weights ~180° flips**
+    when **more hull joints are visible** in the label — confident keypoints make bow/stern trustworthy,
+    so opposite-heading mistakes are penalized harder (AquaForge-specific coupling).
+    """
+    rad = gt_deg * (torch.pi / 180.0)
+    tgt = torch.stack([torch.sin(rad), torch.cos(rad)], dim=-1)
+    p = F.normalize(pred_sc, dim=-1, eps=1e-6)
+    if valid.sum() < 1:
+        return pred_sc.sum() * 0.0
+    cos_sim = (p * tgt).sum(dim=-1).clamp(-1.0 + 1e-4, 1.0 - 1e-4)
+    cos_term = 1.0 - cos_sim
+    ang = torch.acos(cos_sim) / torch.pi
+    base = cos_term + 0.42 * ang
+    kp_strength = kp_vis.clamp(0, 1).mean(dim=-1)
+    flip = (cos_sim < 0.0).float() * valid.float()
+    mult = 1.0 + 0.62 * kp_strength * flip
+    weighted = base * mult
+    return (weighted * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
+
+
+def dice_loss_per_sample(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Soft Dice loss per batch item, shape (B,)."""
+    p = torch.sigmoid(logits)
+    t = target.clamp(0, 1)
+    inter = (p * t).sum(dim=(2, 3))
+    denom = p.pow(2).sum(dim=(2, 3)) + t.pow(2).sum(dim=(2, 3)) + eps
+    dice = (2 * inter + eps) / denom
+    return 1.0 - dice
+
+
+def soft_iou_per_sample(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    p = torch.sigmoid(logits)
+    t = target.clamp(0, 1)
+    inter = (p * t).sum(dim=(2, 3))
+    union = p.sum(dim=(2, 3)) + t.sum(dim=(2, 3)) - inter
+    iou = (inter + eps) / (union + eps)
+    return 1.0 - iou
+
+
+def tversky_loss_per_sample(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 1e-6,
+    *,
+    alpha: float = 0.32,
+    beta: float = 0.68,
+) -> torch.Tensor:
+    p = torch.sigmoid(logits)
+    t = target.clamp(0, 1)
+    tp = (p * t).sum(dim=(2, 3))
+    fp = (p * (1.0 - t)).sum(dim=(2, 3))
+    fn = ((1.0 - p) * t).sum(dim=(2, 3))
+    tversky = (tp + eps) / (tp + float(alpha) * fp + float(beta) * fn + eps)
+    return 1.0 - tversky
+
+
+def bce_logits_masked_per_sample(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    m = mask.clamp(0, 1)
+    loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    num = m.sum(dim=(1, 2, 3)).clamp_min(1e-6)
+    return (loss * m).sum(dim=(1, 2, 3)) / num
+
+
+def small_vessel_sample_weights(seg_gt: torch.Tensor) -> torch.Tensor:
+    """
+    Higher weight when this chip’s **GT hull footprint is small vs the batch median** — emphasizes
+    small Sentinel-2 vessels without a hand-tuned constant scale.
+    """
+    cov = seg_gt.view(seg_gt.shape[0], -1).mean(dim=-1).clamp(1e-5, 1.0)
+    med = cov.median(dim=0, keepdim=True).values.clamp_min(1e-5)
+    w = 1.0 + 0.38 * (med / cov).clamp(1.0, 2.65)
+    return w.detach()
+
+
+def mask_centroid_cohesion_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """
+    **Scene-style cohesion** without a full land mask in-chip: nudge predicted hull mass to sit near the
+    GT hull’s soft centroid when the label has real area — discourages scattered false positives.
+    """
+    p = torch.sigmoid(logits)
+    t = target.clamp(0, 1)
+    mask_ok = (t.sum(dim=(2, 3)) > 0.12).float()
+    if mask_ok.sum() < 1:
+        return logits.sum() * 0.0
+    b, _, h, w = p.shape
+    device, dtype = p.device, p.dtype
+    ys = torch.arange(h, device=device, dtype=dtype).view(1, 1, h, 1)
+    xs = torch.arange(w, device=device, dtype=dtype).view(1, 1, 1, w)
+    mass_p = p.sum(dim=(2, 3)).clamp_min(1e-5)
+    mass_t = t.sum(dim=(2, 3)).clamp_min(1e-5)
+    pcy = (p * ys).sum(dim=(2, 3)) / mass_p
+    pcx = (p * xs).sum(dim=(2, 3)) / mass_p
+    tcy = (t * ys).sum(dim=(2, 3)) / mass_t
+    tcx = (t * xs).sum(dim=(2, 3)) / mass_t
+    diag = float((h * h + w * w) ** 0.5) + 1e-6
+    d = (((pcx - tcx) ** 2 + (pcy - tcy) ** 2).sqrt() / diag) * mask_ok
+    return d.sum() / mask_ok.sum().clamp_min(1.0)
 
 
 def wake_cosine_loss(pred: torch.Tensor, tgt: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -550,13 +661,18 @@ def aquaforge_joint_loss(
         seg_tgt = batch["seg"]
         if sl.shape[-2:] != seg_tgt.shape[-2:]:
             seg_tgt = F.interpolate(seg_tgt, size=sl.shape[-2:], mode="nearest")
-        d_dice = dice_loss_with_logits(sl, seg_tgt)
-        d_iou = soft_iou_loss_with_logits(sl, seg_tgt)
-        d_tversk = tversky_loss_with_logits(sl, seg_tgt)
-        d_bce = bce_logits_masked(sl, seg_tgt, torch.ones_like(seg_tgt))
-        seg_loss = d_dice + 0.38 * d_iou + 0.22 * d_tversk + 0.42 * d_bce
+        w_sv = small_vessel_sample_weights(seg_tgt)
+        d_dice = (dice_loss_per_sample(sl, seg_tgt) * w_sv).mean()
+        d_iou = (soft_iou_per_sample(sl, seg_tgt) * w_sv).mean()
+        d_tversk = (tversky_loss_per_sample(sl, seg_tgt) * w_sv).mean()
+        d_bce = (
+            bce_logits_masked_per_sample(sl, seg_tgt, torch.ones_like(seg_tgt)) * w_sv
+        ).mean()
+        d_cent = mask_centroid_cohesion_loss(sl, seg_tgt)
+        seg_loss = d_dice + 0.38 * d_iou + 0.22 * d_tversk + 0.42 * d_bce + 0.075 * d_cent
         total_geo = total_geo + w * seg_loss
         logs["loss_seg"] = float(seg_loss.detach())
+        logs["loss_scene_centroid"] = float(d_cent.detach())
 
     w = stage_weights.get("kp", 1.0)
     if w > 0:
@@ -582,7 +698,12 @@ def aquaforge_joint_loss(
     w = stage_weights.get("hdg", 1.0)
     if w > 0:
         h = out["hdg"]
-        lh = heading_combined_circular_loss(h[:, :2], batch["hdg_deg"], batch["hdg_valid"] > 0)
+        lh = heading_flip_aware_circular_loss(
+            h[:, :2],
+            batch["hdg_deg"],
+            batch["hdg_valid"] > 0,
+            batch["kp_vis"],
+        )
         total_geo = total_geo + w * lh
         logs["loss_hdg"] = float(lh.detach())
 

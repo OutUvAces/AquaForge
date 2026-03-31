@@ -80,15 +80,19 @@ def self_training_trust_from_outputs(
 
 def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     """
-    Single **uncertainty** score from AquaForge’s own tensors (0 ≈ sure, ~1 ≈ unsure).
-    Blends vessel confidence, heading direction, hull pixel “busy-ness”, optional dot-map busy-ness,
-    and heading confidence — tuned for self-training filters, not MC dropout.
+    One **uncertainty** number from AquaForge’s own outputs (0 ≈ confident, 1 ≈ doubtful).
+
+    We mix: (1) how close the ship / not-ship score is to a coin-flip (**margin**),
+    (2) how strong the heading vector is vs empty, (3) hull-mask **entropy**,
+    (4) landmark heatmap entropy when present, (5) heading **confidence** channel entropy.
+    Used to filter self-training chips and to complement review-export sampling — not MC dropout.
     """
     import torch
     import torch.nn.functional as F
 
     cls = out["cls_logit"].reshape(-1)
     p = torch.sigmoid(cls[0])
+    # Margin: 0 at 0/1, 1 at 0.5
     u_cls = float((1.0 - (2.0 * p - 1.0).abs()).item())
 
     h = out["hdg"][:, :2]
@@ -112,14 +116,14 @@ def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
 
     if kph is not None:
         u = (
-            0.28 * u_cls
-            + 0.22 * u_h
-            + 0.22 * ent_n
-            + 0.14 * u_kp
+            0.30 * u_cls
+            + 0.20 * u_h
+            + 0.20 * ent_n
+            + 0.16 * u_kp
             + 0.14 * u_conf
         )
     else:
-        u = 0.36 * u_cls + 0.30 * u_h + 0.22 * ent_n + 0.12 * u_conf
+        u = 0.38 * u_cls + 0.28 * u_h + 0.22 * ent_n + 0.12 * u_conf
     return max(0.0, min(1.0, u))
 
 
@@ -187,6 +191,10 @@ def review_ui_active_learning_priority(
 
     if review_category == "land":
         p += 0.35
+
+    # Human chose “Unsure” in the review UI — prioritize if this row is ever used for mining / aux.
+    if review_category == "ambiguous":
+        p += 1.12
 
     if heading_labeled:
         p += 0.15

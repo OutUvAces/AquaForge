@@ -345,9 +345,10 @@ def main() -> None:
                 opt.zero_grad()
                 (pseudo_w * loss_st).backward()
                 opt.step()
+                tm = float(trust.mean().item())
                 print(
                     f"epoch {epoch + 1}: self-training batch size={imgs_p.shape[0]} "
-                    f"loss_st={float(loss_st.detach().item()):.4f}",
+                    f"loss_st={float(loss_st.detach().item()):.4f} trust_mean={tm:.3f}",
                     flush=True,
                 )
 

@@ -94,6 +94,7 @@ class TestAquaForgeLosses(unittest.TestCase):
         self.assertIn("scene_calib_mult", logs)
         self.assertIn("landmark_vis_boost", logs)
         self.assertIn("scene_geo_full_mult", logs)
+        self.assertIn("loss_scene_centroid", logs)
 
     def test_cnn_forward_six_outputs(self) -> None:
         try:

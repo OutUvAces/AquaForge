@@ -5,9 +5,10 @@ We provide two architectures (checkpoint ``meta["model_arch"]`` selects at load 
 
 1. **cnn** — ``AquaForgeMultiTask``: lightweight in-repo CNN (default for CPU-only dev, no Ultralytics).
 2. **yolo_unified** — ``AquaForgeUnifiedYOLO``: YOLO11/12 **backbone+neck** tensors taken *just before*
-   the vendor detection head, passed through our **stride harmonizer** (learned blend of scales + fine
-   anchor) and **custom** heads: hull mask, landmark heatmaps, global keypoint readout, sin/cos
-   heading, wake — trained with ``aquaforge.unified.losses`` and ``scripts/train_aquaforge.py``.
+   the vendor detection head, passed through our **per-scale gates + residual fuse** (sigmoid gates on
+   aligned strides, depthwise fuse, explicit fine/mid residuals) and **custom** heads: hull mask,
+   landmark heatmaps, global keypoint readout, sin/cos heading, wake — trained with
+   ``aquaforge.unified.losses`` and ``scripts/train_aquaforge.py``.
 
 We do **not** reuse Ultralytics detect/segment losses; only early graph features feed AquaForge.
 """
@@ -74,13 +75,10 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
     raise RuntimeError("AquaForge YOLO backbone produced no 4D feature maps")
 
 
-# --- AquaForge **stride harmonizer** (YOLO neck → our tensor) ---
-# We read the tensors that would feed Ultralytics Detect/Segment, then:
-#   1) 1×1 ``neck_proj`` to a shared ``hidden`` (decouples vendor channel layouts from our heads).
-#   2) Nearest upsample coarser maps to the **finest** stride (preserves sharp edges for S2 hulls).
-#   3) **Harmonic blend**: softmax weights over the three aligned maps produce one *context* tensor;
-#      concatenate with the **fine** map (anchor) → :class:`_HarmonizerFuseDS` (depthwise 3×3 + pw 1×1)
-#      → add **scaled mid-stride residual** (``tanh(mid_residual_scale) * up4``).
+# --- AquaForge **S2 stride gate + residual fuse** (YOLO neck → our tensor) ---
+# Distinct from a single softmax “harmonizer”: we use **learned sigmoid gates per scale** on aligned
+# neck tensors, then fuse with the finest map via depthwise separable conv and **explicit fine + mid
+# residuals** (Sentinel-2 chips benefit from keeping sharp 10 m structure while borrowing mid-scale context).
 
 
 class _EncoderTower(nn.Module):
@@ -231,12 +229,11 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.neck_proj = nn.ModuleList(
             [nn.Conv2d(d, self.hidden, 1, bias=False) for d in dims]
         )
-        # Learned softmax weights over (fine, mid, coarse) for the context branch — starts near uniform.
-        self.stride_harmonic_logits = nn.Parameter(torch.zeros(3))
-        # Temperature sharpens / softens the stride mixture (distinctive AquaForge knob).
-        self.harmonic_temperature = nn.Parameter(torch.tensor(1.0))
-        # Mid-stride residual: adds coarse–mid structure without a second fusion path (AquaForge-only knob).
-        self.mid_residual_scale = nn.Parameter(torch.tensor(0.22))
+        # Per-scale gates (sigmoid) on (fine, mid, coarse) after align — starts near 0.5 each.
+        self.scale_gate_logits = nn.Parameter(torch.zeros(3))
+        # Residual strengths: keep fine detail + mid-scale context in the fused map.
+        self.res_fine_scale = nn.Parameter(torch.tensor(0.28))
+        self.res_mid_scale = nn.Parameter(torch.tensor(0.2))
         self.fuse = _HarmonizerFuseDS(self.hidden * 2, self.hidden)
         self.seg_head = nn.Conv2d(self.hidden, 1, 1, bias=False)
         self.kp_hm_head = nn.Conv2d(self.hidden, n_landmarks, 1, bias=False)
@@ -252,12 +249,14 @@ class AquaForgeUnifiedYOLO(nn.Module):
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
         up5 = F.interpolate(p5, size=target_hw, mode="nearest")
-        tau = self.harmonic_temperature.clamp(0.38, 3.8)
-        w = F.softmax(self.stride_harmonic_logits / tau, dim=0)
-        w3, w4, w5 = w[0].reshape(1, 1, 1, 1), w[1].reshape(1, 1, 1, 1), w[2].reshape(1, 1, 1, 1)
-        context = w3 * p3 + w4 * up4 + w5 * up5
+        g = torch.sigmoid(self.scale_gate_logits).view(3, 1, 1, 1)
+        context = g[0] * p3 + g[1] * up4 + g[2] * up5
         base = self.fuse(torch.cat([context, p3], dim=1))
-        fused = base + torch.tanh(self.mid_residual_scale) * up4
+        fused = (
+            base
+            + torch.tanh(self.res_fine_scale) * p3
+            + torch.tanh(self.res_mid_scale) * up4
+        )
         seg_lr = self.seg_head(fused)
         seg = F.interpolate(seg_lr, size=(self.imgsz, self.imgsz), mode="bilinear", align_corners=False)
         kp_hm = self.kp_hm_head(fused)

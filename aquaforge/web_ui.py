@@ -1,12 +1,17 @@
 """
-Streamlit UI: pick a satellite scene, refresh the spot queue, label each candidate.
+Streamlit UI: pick a scene, refresh the queue, label each candidate.
 
-Daily flow stays on the **main** column (big close-up, simple save buttons). Downloads, exports,
-retraining, and duplicate-finder live in the **sidebar** expanders.
+**Left panel (starts closed):** scene, refresh, finding spots, downloads, re-sort training, exports,
+duplicates, whole-scene map.
+
+**Main:** one large close-up, optional drawings in a small **Drawings** expander (default: outline +
+direction), then a bottom row (**Back / Next / Ship / Not a ship / Unsure**). Advanced labels and
+outline tools live in collapsed expanders below.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import sys
@@ -163,8 +168,8 @@ DEFAULT_DATETIME = "2024-06-01T00:00:00Z/2024-06-15T23:59:59Z"
 MIN_OPEN_WATER_FRACTION = 0.01
 REVIEW_CHIP_TARGET_SIDE_M = 1000.0
 REVIEW_LOCATOR_TARGET_SIDE_M = 10000.0
-# Close-up (main focus) vs smaller hull preview / map column.
-CHIP_DISPLAY_MAIN = 656
+# Close-up (main focus) — single large square in the calm review layout.
+CHIP_DISPLAY_MAIN = 820
 CHIP_DISPLAY_SIDE = 288
 # Back-compat: some helpers still reference one name for letterboxing.
 CHIP_DISPLAY_PX = CHIP_DISPLAY_MAIN
@@ -222,20 +227,31 @@ def _ui_styles() -> None:
     st.markdown(
         """
 <style>
-  /* App shell — calm “ops desk” palette, works in light + Streamlit default */
-  div.block-container { padding-top: 0.5rem; max-width: 1000px; }
-  /* Review deck: fit full marker-role labels on one row */
+  /* Wide calm main column; sidebar stays narrow when opened */
+  div.block-container { padding-top: 0.35rem; max-width: min(1180px, 96vw); }
+  /* Optional outline tools: compact secondary buttons */
   button[kind="secondary"] {
     font-size: 0.68rem !important;
     line-height: 1.12 !important;
     padding: 0.2rem 0.35rem !important;
     white-space: nowrap !important;
   }
-  /* Larger primary actions for the save row (Ship / Not a ship / …) */
+  /* Daily review: large, obvious Ship / Not a ship / Unsure + nav */
   button[kind="primary"] {
-    font-size: 1.02rem !important;
-    padding: 0.5rem 0.65rem !important;
-    min-height: 2.6rem !important;
+    font-size: 1.08rem !important;
+    padding: 0.55rem 0.75rem !important;
+    min-height: 2.85rem !important;
+  }
+  /* Sticky-ish footer row: stays near viewport bottom on short pages */
+  .vd-review-footer-anchor {
+    position: sticky;
+    bottom: 0;
+    z-index: 50;
+    background: linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(248,250,252,0.97) 18%, rgba(248,250,252,1) 100%);
+    padding-top: 0.5rem;
+    margin-top: 0.25rem;
+    border-top: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 10px 10px 0 0;
   }
   .vd-hero {
     background: linear-gradient(125deg, #0c1220 0%, #152238 42%, #1e3a5f 100%);
@@ -276,27 +292,6 @@ def _ui_styles() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def _render_hero() -> None:
-    st.markdown(
-        '<div class="vd-hero"><div class="vd-badge">Ships on satellite</div>'
-        "<h1>AquaForge</h1>"
-        "<p>Work through bright spots on water — one scene at a time.</p></div>",
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "← Sidebar: downloads, exports, how spots are found, re-sort training, duplicate search."
-    )
-    # Embedded training UI (session state): ``st.switch_page("pages/...")`` is unreliable
-    # when ``PagesManager.get_pages()`` only lists the main script (Streamlit v2-style).
-    if st.button(
-        "Fix saved labels",
-        key="vd_nav_training_review",
-        help="Open the label editor without leaving the app.",
-    ):
-        st.session_state["vd_ui_mode"] = "training_review"
-        st.rerun()
 
 
 def discover_tci_jp2() -> list[Path]:
@@ -836,7 +831,7 @@ def _sidebar_spot_finding_settings() -> None:
     Detector queue limits and mask path — lives in the sidebar so the main column stays calm.
     Widget keys must stay stable for ``Refresh`` / overview logic.
     """
-    with st.expander("How spots are found", expanded=False):
+    with st.expander("Finding bright spots", expanded=False):
         st.caption(
             "Looks for bright patches on **open water** using your land/water mask. "
             "You usually do not need to change this."
@@ -897,7 +892,6 @@ def main() -> None:
         page_icon="🛰️",
     )
     _ui_styles()
-    _render_hero()
     load_env(ROOT)
     SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     PREVIEW_THUMB_DIR.mkdir(parents=True, exist_ok=True)
@@ -913,82 +907,87 @@ def main() -> None:
         )
         return
 
+    tci_list = discover_tci_jp2()
+    choice: Path | None = None
+    refresh = False
+
     with st.sidebar:
-        st.markdown("##### Sidebar")
-        st.caption("Everything here is optional. The main page is for reviewing spots.")
+        st.caption("Open this panel for the scene, refresh, downloads, and other tools.")
+        if not tci_list:
+            st.info(
+                "No images yet. Use **Download satellite image** below, or add a `*TCI_10m*.jp2` under **data/**."
+            )
+        else:
+            st.markdown("##### Scene")
+            file_help = "Which satellite scene you are working on."
+            if len(tci_list) <= 12:
+                pick_i = st.radio(
+                    "Scene",
+                    options=list(range(len(tci_list))),
+                    format_func=lambda i: tci_list[i].name,
+                    help=file_help,
+                    key="workbench_tci_radio",
+                    label_visibility="visible",
+                )
+                choice = tci_list[int(pick_i)]
+            else:
+                choice = st.selectbox(
+                    "Scene",
+                    options=tci_list,
+                    format_func=lambda p: p.name,
+                    help=file_help,
+                    key="workbench_tci_select",
+                )
+            refresh = st.button(
+                "Refresh spot list",
+                type="primary",
+                use_container_width=True,
+                key="workbench_refresh",
+            )
         _sidebar_spot_finding_settings()
-        with st.expander("Satellite download", expanded=False):
+        with st.expander("Download satellite image", expanded=False):
             _render_catalog_panel()
         _ranking_models_expander(labels_path)
         _exports_and_analytics_expander(labels_path)
         render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
+        if st.button(
+            "Fix saved labels",
+            key="vd_nav_training_review",
+            help="Open the label editor.",
+        ):
+            st.session_state["vd_ui_mode"] = "training_review"
+            st.rerun()
 
-    tci_list = discover_tci_jp2()
     if not tci_list:
-        st.markdown('<div class="vd-card">', unsafe_allow_html=True)
         st.info(
-            "No satellite image found under **data/**. Use **Sidebar → Satellite download**, or add a `*TCI_10m*.jp2` file."
+            "Add a satellite image (**← panel → Download**), then come back here to review."
         )
-        st.caption(f"Labels file: `{labels_path}`")
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.caption(f"Labels: `{labels_path}`")
         return
 
-    st.markdown("## Your image")
-    st.caption("Pick the satellite file, then **Refresh** to load spots to review.")
-
-    file_help = "Which scene to work on."
-    col_scene, col_ref = st.columns([5, 1])
-    with col_scene:
-        if len(tci_list) <= 12:
-            pick_i = st.radio(
-                "Scene",
-                options=list(range(len(tci_list))),
-                format_func=lambda i: tci_list[i].name,
-                help=file_help,
-                horizontal=True,
-                key="workbench_tci_radio",
-            )
-            choice = tci_list[int(pick_i)]
-        else:
-            choice = st.selectbox(
-                "Scene",
-                options=tci_list,
-                format_func=lambda p: p.name,
-                help=file_help,
-                key="workbench_tci_select",
-            )
-    with col_ref:
-        st.markdown(
-            "<div style='height:1.5rem'></div>", unsafe_allow_html=True
-        )
-        refresh = st.button(
-            "Refresh",
-            type="primary",
-            use_container_width=True,
-            key="workbench_refresh",
-        )
-
+    assert choice is not None
     tci_path_sel = Path(choice)
     scl_found = find_scl_for_tci(tci_path_sel)
     ready_dl, _ = cdse_download_ready()
 
     if scl_found is None:
         st.warning(
-            "Missing land/water mask (`*_SCL_20m.jp2` next to the image). Needed to find water pixels."
+            "This scene needs a **land/water mask** file next to the image (name contains **SCL**). "
+            "Without it we cannot limit spots to open water."
         )
         if ready_dl:
-            if st.button("Download SCL for this product", key="workbench_dl_scl"):
-                with st.spinner("SCL download…"):
+            if st.button("Download mask for this scene", key="workbench_dl_scl"):
+                with st.spinner("Downloading mask…"):
                     try:
                         tok = get_access_token()
                         download_scl_for_local_tci(tci_path_sel, tci_path_sel.parent, tok)
-                        st.success("SCL saved. Press **Refresh**.")
+                        st.success("Mask saved. Press **Refresh spot list** in the left panel.")
                         st.session_state.last_scene_key = ""
                         st.rerun()
                     except Exception as e:
                         st.error(str(e))
         else:
-            st.caption("Add `.env` credentials or copy an SCL JP2 next to the TCI.")
+            st.caption("Sign in via **.env** (see **.env.example**) or copy the mask JP2 next to your image.")
 
     tci_path = Path(choice)
     ds_factor = int(st.session_state.get("webui_ds_factor", 4))
@@ -999,10 +998,6 @@ def main() -> None:
     if st.session_state.get("_pending_scene_key") != scene_key:
         st.session_state.pending_locator_candidates = []
         st.session_state._pending_scene_key = scene_key
-
-    st.caption(
-        "Skips spots you already saved. The map and queue use the same list."
-    )
 
     should_load = refresh or (st.session_state.last_scene_key != scene_key)
 
@@ -1084,7 +1079,7 @@ def main() -> None:
                 if not cands:
                     if raw:
                         st.warning(
-                            "Every spot is already saved or filtered. Raise **Max spots** under **Finding spots**, then **Refresh**, or pick another scene."
+                            "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another scene."
                         )
                     else:
                         st.warning(
@@ -1109,19 +1104,22 @@ def main() -> None:
     tci_loaded = st.session_state.tci_loaded
 
     if tci_loaded:
-        _render_hundred_cell_overview(
-            tci_loaded=tci_loaded,
-            labels_path=labels_path,
-            meta=meta if isinstance(meta, dict) else {},
-        )
+        with st.sidebar:
+            with st.expander("Whole-scene map", expanded=False):
+                _render_hundred_cell_overview(
+                    tci_loaded=tci_loaded,
+                    labels_path=labels_path,
+                    meta=meta if isinstance(meta, dict) else {},
+                    wrap_expander=False,
+                )
 
     if not candidates_ready(cands, tci_loaded):
         if tci_loaded:
             st.info(
-                "Nothing in the queue — press **Refresh**, or use the **scene map** to add a spot."
+                "Nothing to review — press **Refresh spot list** in the left panel, or use **Whole-scene map** there to add a spot."
             )
         else:
-            st.info("Pick a scene and press **Refresh**.")
+            st.info("Choose a scene in the left panel, then press **Refresh spot list**.")
         return
 
     _render_review_deck(
@@ -1141,15 +1139,27 @@ def _render_hundred_cell_overview(
     tci_loaded: str,
     labels_path: Path,
     meta: dict,
+    wrap_expander: bool = True,
+    expander_title: str = "Scene map",
 ) -> None:
-    exp = st.expander(
-        "Scene map",
-        expanded=False,
+    """
+    ``wrap_expander=False`` lets the caller place the same UI inside the sidebar (or another expander)
+    without a nested duplicate expander — daily review stays uncluttered.
+    """
+    outer = (
+        st.expander(expander_title, expanded=False)
+        if wrap_expander
+        else contextlib.nullcontext()
     )
-    with exp:
-        st.caption(
-            "Whole image in a 10×10 grid. **Orange** = suggested spots (when a land/water mask exists, land is dimmed)."
-        )
+    with outer:
+        if wrap_expander:
+            st.caption(
+                "Whole image in a 10×10 grid. **Orange** = suggested spots (when a land/water mask exists, land is dimmed)."
+            )
+        else:
+            st.caption(
+                "10×10 grid of this image. Orange dots are suggested spots; land may be dimmed if a mask is present."
+            )
         ds_factor = int(st.session_state.get("webui_ds_factor", 6))
         scl_raw = st.session_state.get("webui_scl_path", "") or ""
         scl_opt: Path | None = Path(scl_raw.strip()) if str(scl_raw).strip() else None
@@ -1427,37 +1437,9 @@ def _render_review_deck(
     n = len(cands)
     if idx >= n:
         st.success(
-            "Done with this batch. Press **Refresh** for more spots (orange rings may already be saved or past your **Max spots** cap)."
+            "Done with this batch. Press **Refresh spot list** in the left panel for more (some spots may already be saved)."
         )
         return
-
-    na, nb, nc = st.columns([1, 2.8, 1])
-    with na:
-        if st.button(
-            "← Back",
-            disabled=idx <= 0,
-            use_container_width=True,
-            key="vd_review_spot_back",
-        ):
-            st.session_state.idx = idx - 1
-            st.rerun()
-    with nb:
-        _sc_prev = cands[idx][2]
-        _hint = (
-            " — you chose this on the map"
-            if _sc_prev == LOCATOR_MANUAL_SCORE
-            else ""
-        )
-        st.caption(f"**Spot {idx + 1}** of **{n}**{_hint}. Scroll down to **save**.")
-    with nc:
-        if st.button(
-            "Next →",
-            disabled=idx >= n - 1,
-            use_container_width=True,
-            key="vd_review_spot_next",
-        ):
-            st.session_state.idx = idx + 1
-            st.rerun()
 
     cx, cy, score = cands[idx]
     spot_k = hashlib.sha256(
@@ -1500,50 +1482,49 @@ def _render_review_deck(
     )
     p_lr, p_mlp = proba_pair_at(clf_disp, bundle_disp, Path(tci_loaded), cx, cy)
     p_comb = combined_vessel_proba_with_bundle(p_lr, p_mlp, bundle_disp)
-    with st.expander("Scores from your sort models (optional)", expanded=False):
-        if p_comb is not None:
-            cols_p = st.columns(
-                min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0))
-            )
-            i_col = 0
-            if p_lr is not None:
-                cols_p[i_col].metric("Model A", f"{p_lr:.2f}")
-                i_col += 1
-            if p_mlp is not None:
-                cols_p[i_col].metric("Model B", f"{p_mlp:.2f}")
-                i_col += 1
-            if p_lr is not None and p_mlp is not None and i_col < len(cols_p):
-                cols_p[i_col].metric("Mixed", f"{p_comb:.2f}")
-            st.caption("Higher = more like past **Ship** saves (after you retrain sort models).")
-        elif clf_disp is not None or bundle_disp is not None:
-            st.caption("No score on this spot — try **Refresh**.")
 
     mt_path = default_multitask_path(ROOT)
     mt_bundle = load_review_multitask_bundle(mt_path)
+    mt_pred: dict[str, Any] = {}
     if mt_bundle and mt_bundle.get("heads"):
         try:
             mt_pred = predict_review_multitask_at(mt_bundle, Path(tci_loaded), cx, cy)
         except Exception:
             mt_pred = {}
-        if mt_pred:
-            with st.expander("Hints from past labels", expanded=False):
-                st.caption("Rough guesses — only shows if you have enough saved examples.")
-                items = sorted(mt_pred.items(), key=lambda t: t[0])
-                for k, v in items:
-                    if isinstance(v, float):
-                        st.markdown(f"**{k}** — `{v:.4f}`")
-                    else:
-                        st.markdown(f"**{k}** — `{v}`")
 
     tci_p = Path(tci_loaded)
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
     det_settings = load_detection_settings(ROOT)
 
+    # Calm header: tiny progress text + optional overlay switches (top-right expander).
+    _sc_prev_hdr = cands[idx][2]
+    _hint_hdr = " · from map" if _sc_prev_hdr == LOCATOR_MANUAL_SCORE else ""
+    _hl, _hr = st.columns([3.4, 1.2])
+    with _hl:
+        st.caption(f"Spot **{idx + 1}** of **{n}**{_hint_hdr}")
+    with _hr:
+        if sota_inference_requested(det_settings):
+            # Default: outline + direction only (less clutter). Keys are global across spots.
+            for _xk, _dv in (
+                ("vd_ov_hull", True),
+                ("vd_ov_mark", False),
+                ("vd_ov_dir", True),
+                ("vd_ov_wake", False),
+            ):
+                if _xk not in st.session_state:
+                    st.session_state[_xk] = _dv
+            with st.expander("Drawings", expanded=False):
+                st.caption("Optional overlays on the close-up.")
+                st.toggle("Ship outline", key="vd_ov_hull")
+                st.toggle("Direction arrow", key="vd_ov_dir")
+                st.toggle("Point markers", key="vd_ov_mark")
+                st.toggle("Wake line", key="vd_ov_wake")
+
     # Performance: optional consent before expensive SOTA; default off in YAML keeps prior behavior.
     _sota_allow = True
     if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
         _sota_allow = st.checkbox(
-            "Allow automatic drawings on this spot",
+            "Run extra outline hints for this spot (uses more CPU/GPU)",
             key=f"{spot_k}_sota_neural_allow",
         )
 
@@ -1856,28 +1837,10 @@ def _render_review_deck(
     if sel_mk not in st.session_state:
         st.session_state[sel_mk] = MARKER_ROLES[0]
 
-    # Plain-language overlay toggles (defaults on; YAML “lazy” starts all off until you turn them on).
-    _lazy_ov = bool(getattr(det_settings, "ui_lazy_sota_overlays", False))
-    if sota_inference_requested(det_settings):
-        _ov0 = not _lazy_ov
-        for _xk in ("vd_ov_hull", "vd_ov_mark", "vd_ov_dir", "vd_ov_wake"):
-            if _xk not in st.session_state:
-                st.session_state[_xk] = _ov0
-        st.caption("On the big picture below:")
-        _tc1, _tc2, _tc3, _tc4 = st.columns(4)
-        with _tc1:
-            st.toggle("Ship outline", key="vd_ov_hull")
-        with _tc2:
-            st.toggle("Point markers", key="vd_ov_mark")
-        with _tc3:
-            st.toggle("Direction arrow", key="vd_ov_dir")
-        with _tc4:
-            st.toggle("Wake line", key="vd_ov_wake")
-
     _show_hull = bool(st.session_state.get("vd_ov_hull", True))
-    _show_mark = bool(st.session_state.get("vd_ov_mark", True))
+    _show_mark = bool(st.session_state.get("vd_ov_mark", False))
     _show_dir = bool(st.session_state.get("vd_ov_dir", True))
-    _show_wake = bool(st.session_state.get("vd_ov_wake", True))
+    _show_wake = bool(st.session_state.get("vd_ov_wake", False))
 
     spot_vis = annotate_spot_detection_center(
         spot_rgb,
@@ -1976,37 +1939,27 @@ def _render_review_deck(
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
     loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, side_px)
 
-    st.markdown("##### Hull shape (small preview)")
-    if is_twin:
-        _exr1, _exr2 = st.columns(2)
-        with _exr1:
-            st.image(extent_sq1, width=side_px)
-        with _exr2:
-            st.image(extent_sq2, width=side_px)
-    else:
-        st.image(extent_sq1, width=side_px)
-
-    st.markdown("##### Close-up — click to place markers")
-    st.caption("Wide map is on the right — click there to queue another location.")
-    col_spot, col_loc = st.columns([2.45, 1])
-    click_spot_dim = None
+    # Large single close-up; hull preview + map + extra checkboxes live in optional expanders below.
+    click_spot_dim = streamlit_image_coordinates(
+        spot_sq,
+        key=f"spot_dim_{spot_k}",
+        width=main_px,
+        height=main_px,
+        use_container_width=False,
+        cursor="crosshair",
+    )
+    loc_nat_w = int(loc_vis.shape[1])
+    loc_nat_h = int(loc_vis.shape[0])
+    loc_comp_key = hashlib.sha256(
+        f"{tci_loaded}|{idx}|{lc0}|{lr0}|{loc_nat_w}|{loc_nat_h}|"
+        f"{len(st.session_state.pending_locator_candidates)}".encode()
+    ).hexdigest()[:20]
     click_loc = None
-    with col_spot:
-        click_spot_dim = streamlit_image_coordinates(
-            spot_sq,
-            key=f"spot_dim_{spot_k}",
-            width=main_px,
-            height=main_px,
-            use_container_width=False,
-            cursor="crosshair",
+    with st.expander("Small map — add another location", expanded=False):
+        st.caption(
+            "Click where you want another bright spot queued. Orange = suggestions · green = queued · "
+            "purple = saved · yellow = this spot."
         )
-    with col_loc:
-        loc_nat_w = int(loc_vis.shape[1])
-        loc_nat_h = int(loc_vis.shape[0])
-        loc_comp_key = hashlib.sha256(
-            f"{tci_loaded}|{idx}|{lc0}|{lr0}|{loc_nat_w}|{loc_nat_h}|"
-            f"{len(st.session_state.pending_locator_candidates)}".encode()
-        ).hexdigest()[:20]
         click_loc = streamlit_image_coordinates(
             loc_sq,
             key=f"loc_vessel_{loc_comp_key}",
@@ -2017,17 +1970,18 @@ def _render_review_deck(
         )
 
     wake_vis_k = f"wake_vis_{spot_k}"
-    st.checkbox(
-        "Wake visible behind the ship",
-        key=wake_vis_k,
-        help="Helps training use water patterns.",
-    )
     cloud_partial_k = f"cloud_partial_{spot_k}"
-    st.checkbox(
-        "Partly hidden by cloud",
-        key=cloud_partial_k,
-        help="Marks harder examples for training.",
-    )
+    with st.expander("Optional: quick notes for training", expanded=False):
+        st.checkbox(
+            "Wake visible behind the ship",
+            key=wake_vis_k,
+            help="Helps the model learn water patterns.",
+        )
+        st.checkbox(
+            "Partly hidden by cloud",
+            key=cloud_partial_k,
+            help="Marks a harder example.",
+        )
     mk_list_fb = st.session_state.get(dim_key, [])
     if not isinstance(mk_list_fb, list):
         mk_list_fb = []
@@ -2085,136 +2039,138 @@ def _render_review_deck(
         lab = f"<b>{label}</b> " if label else ""
         return f'<p class="vd-deck-foot">{lab}{body}{note}</p>'
 
-    f_extent, f_spot, f_loc = st.columns(3)
-    with f_extent:
-        if is_twin:
-            h1t = ""
-            h2t = ""
-            if fp is not None:
-                w1, l1, _fs = fp
-                h1t = f"H1 L×W **{l1:.0f}×{w1:.0f} m** · "
+    with st.expander("Optional: sizes and outline markers", expanded=False):
+        st.caption("Bow, stern, sides: pick a role, then click the **large** image above.")
+        f_extent, f_spot, f_loc = st.columns(3)
+        with f_extent:
+            if is_twin:
+                h1t = ""
+                h2t = ""
+                if fp is not None:
+                    w1, l1, _fs = fp
+                    h1t = f"H1 L×W **{l1:.0f}×{w1:.0f} m** · "
+                else:
+                    h1t = "H1: ≥2 markers · "
+                if fp_h2 is not None:
+                    w2, l2, _fs2 = fp_h2
+                    h2t = f"H2 L×W **{l2:.0f}×{w2:.0f} m**"
+                else:
+                    h2t = "H2: ≥2 markers"
+                st.markdown(
+                    "<p class=\"vd-deck-foot\">Extent preview: keel-aligned rectangle when bow, stern, and "
+                    f"**two side** points are set.<br/>{h1t}{h2t}</p>",
+                    unsafe_allow_html=True,
+                )
             else:
-                h1t = "H1: ≥2 markers · "
-            if fp_h2 is not None:
-                w2, l2, _fs2 = fp_h2
-                h2t = f"H2 L×W **{l2:.0f}×{w2:.0f} m**"
+                if fp is not None:
+                    width_m, length_m, _fss = fp
+                    st.markdown(
+                        f"<p class=\"vd-deck-foot\">Footprint <b>{length_m:.0f}×{width_m:.0f} m</b> — "
+                        f"hull from markers (edges through sides) or PCA.</p>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<p class="vd-deck-foot">Hull from markers when ≥2 hull points; '
+                        "bow + stern + two **side** points give the edge-aligned rectangle.</p>",
+                        unsafe_allow_html=True,
+                    )
+        with f_spot:
+            spot_body = ""
+            if is_twin:
+                spot_body = _derived_metrics_html(gm, "H1 ")
+                spot_body += _derived_metrics_html(gm2, "H2 ")
             else:
-                h2t = "H2: ≥2 markers"
+                spot_body = _derived_metrics_html(gm, "") if gm else (
+                    '<p class="vd-deck-foot">Spot: pick role, then click to place.</p>'
+                )
+            st.markdown(spot_body, unsafe_allow_html=True)
+        with f_loc:
             st.markdown(
-                "<p class=\"vd-deck-foot\">Extent preview: keel-aligned rectangle when bow, stern, and "
-                f"**two side** points are set.<br/>{h1t}{h2t}</p>",
+                '<p class="vd-deck-foot"><b>Map</b> — orange: suggestions · green: queued · purple: saved · yellow: here</p>',
                 unsafe_allow_html=True,
             )
-        else:
-            if fp is not None:
-                width_m, length_m, _fss = fp
-                st.markdown(
-                    f"<p class=\"vd-deck-foot\">Footprint <b>{length_m:.0f}×{width_m:.0f} m</b> — "
-                    f"hull from markers (edges through sides) or PCA.</p>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    '<p class="vd-deck-foot">Hull from markers when ≥2 hull points; '
-                    "bow + stern + two **side** points give the edge-aligned rectangle.</p>",
-                    unsafe_allow_html=True,
-                )
-    with f_spot:
-        spot_body = ""
-        if is_twin:
-            spot_body = _derived_metrics_html(gm, "H1 ")
-            spot_body += _derived_metrics_html(gm2, "H2 ")
-        else:
-            spot_body = _derived_metrics_html(gm, "") if gm else (
-                '<p class="vd-deck-foot">Spot: pick role, then click to place.</p>'
-            )
-        st.markdown(spot_body, unsafe_allow_html=True)
-    with f_loc:
-        st.markdown(
-            '<p class="vd-deck-foot"><b>Map</b> — orange: suggestions · green: queued · purple: saved · yellow: here</p>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("##### Ships in this chip")
-    v1, v2, v3, v4 = st.columns(4)
-    with v1:
-        if st.button(
-            "One ship",
-            key=f"hull_single_{spot_k}",
-            use_container_width=True,
-            type="primary" if not is_twin else "secondary",
-            help="Single vessel in this chip",
-        ):
-            st.session_state[hull_mode_k] = "single"
-            st.session_state[dim_key] = [
-                m
-                for m in st.session_state.get(dim_key, [])
-                if marker_hull_index(m) == 1
-            ]
-            st.rerun()
-    with v2:
-        if st.button(
-            "Two ships",
-            key=f"hull_twin_{spot_k}",
-            use_container_width=True,
-            type="primary" if is_twin else "secondary",
-            help="Two vessels side by side",
-        ):
-            st.session_state[hull_mode_k] = "twin"
-            st.session_state[active_hull_k] = 1
-            st.rerun()
-    with v3:
-        if st.button(
-            "→ H1",
-            key=f"edit_h1_{spot_k}",
-            use_container_width=True,
-            disabled=not is_twin,
-            type="primary"
-            if is_twin and int(st.session_state.get(active_hull_k, 1)) == 1
-            else "secondary",
-            help="Markers apply to hull 1",
-        ):
-            st.session_state[active_hull_k] = 1
-            st.rerun()
-    with v4:
-        if st.button(
-            "→ H2",
-            key=f"edit_h2_{spot_k}",
-            use_container_width=True,
-            disabled=not is_twin,
-            type="primary"
-            if is_twin and int(st.session_state.get(active_hull_k, 1)) == 2
-            else "secondary",
-            help="Markers apply to hull 2",
-        ):
-            st.session_state[active_hull_k] = 2
-            st.rerun()
-
-    st.markdown("##### Markers")
-    st.caption("Pick a role, then click the **center** image. **Clear** removes all points.")
-    r_cols = st.columns(6)
-    for i, role in enumerate(MARKER_ROLES):
-        with r_cols[i]:
-            active = st.session_state.get(sel_mk) == role
+        
+        st.markdown("##### Ships in this chip")
+        v1, v2, v3, v4 = st.columns(4)
+        with v1:
             if st.button(
-                MARKER_ROLE_BUTTON_LABELS.get(role, role),
-                key=f"mkpick_{role}_{spot_k}",
+                "One ship",
+                key=f"hull_single_{spot_k}",
                 use_container_width=True,
-                type="primary" if active else "secondary",
+                type="primary" if not is_twin else "secondary",
+                help="Single vessel in this chip",
             ):
-                st.session_state[sel_mk] = role
+                st.session_state[hull_mode_k] = "single"
+                st.session_state[dim_key] = [
+                    m
+                    for m in st.session_state.get(dim_key, [])
+                    if marker_hull_index(m) == 1
+                ]
                 st.rerun()
-    with r_cols[5]:
-        if st.button(
-            "Clear",
-            key=f"clr_dim_{spot_k}",
-            use_container_width=True,
-        ):
-            st.session_state[dim_key] = []
-            st.rerun()
-    if is_twin:
-        st.caption(f"Placing on **hull {int(st.session_state.get(active_hull_k, 1))}**.")
-
+        with v2:
+            if st.button(
+                "Two ships",
+                key=f"hull_twin_{spot_k}",
+                use_container_width=True,
+                type="primary" if is_twin else "secondary",
+                help="Two vessels side by side",
+            ):
+                st.session_state[hull_mode_k] = "twin"
+                st.session_state[active_hull_k] = 1
+                st.rerun()
+        with v3:
+            if st.button(
+                "→ H1",
+                key=f"edit_h1_{spot_k}",
+                use_container_width=True,
+                disabled=not is_twin,
+                type="primary"
+                if is_twin and int(st.session_state.get(active_hull_k, 1)) == 1
+                else "secondary",
+                help="Markers apply to hull 1",
+            ):
+                st.session_state[active_hull_k] = 1
+                st.rerun()
+        with v4:
+            if st.button(
+                "→ H2",
+                key=f"edit_h2_{spot_k}",
+                use_container_width=True,
+                disabled=not is_twin,
+                type="primary"
+                if is_twin and int(st.session_state.get(active_hull_k, 1)) == 2
+                else "secondary",
+                help="Markers apply to hull 2",
+            ):
+                st.session_state[active_hull_k] = 2
+                st.rerun()
+        
+        st.markdown("##### Markers")
+        st.caption("Pick a role, then click the **center** image. **Clear** removes all points.")
+        r_cols = st.columns(6)
+        for i, role in enumerate(MARKER_ROLES):
+            with r_cols[i]:
+                active = st.session_state.get(sel_mk) == role
+                if st.button(
+                    MARKER_ROLE_BUTTON_LABELS.get(role, role),
+                    key=f"mkpick_{role}_{spot_k}",
+                    use_container_width=True,
+                    type="primary" if active else "secondary",
+                ):
+                    st.session_state[sel_mk] = role
+                    st.rerun()
+        with r_cols[5]:
+            if st.button(
+                "Clear",
+                key=f"clr_dim_{spot_k}",
+                use_container_width=True,
+            ):
+                st.session_state[dim_key] = []
+                st.rerun()
+        if is_twin:
+            st.caption(f"Placing on **hull {int(st.session_state.get(active_hull_k, 1))}**.")
+        
     if click_spot_dim is not None:
         sdd = (
             f"{click_spot_dim.get('unix_time')}|{click_spot_dim.get('x')}|"
@@ -2361,86 +2317,212 @@ def _render_review_deck(
                         "**Already in the pending queue** — green ring on locator (same click tolerance)."
                     )
 
-    st.markdown("##### How sure are you? (skip if you tapped **Unsure** above)")
     conf_k = f"label_conf_{spot_k}"
     if conf_k not in st.session_state:
         st.session_state[conf_k] = "high"
-    ch1, ch2, ch3, _ = st.columns(4)
-    cur_conf = str(st.session_state.get(conf_k, "high")).lower()
-    with ch1:
-        if st.button(
-            "High",
-            key=f"conf_hi_{spot_k}",
-            type="primary" if cur_conf == "high" else "secondary",
-        ):
-            st.session_state[conf_k] = "high"
-            st.rerun()
-    with ch2:
-        if st.button(
-            "Medium",
-            key=f"conf_med_{spot_k}",
-            type="primary" if cur_conf == "medium" else "secondary",
-        ):
-            st.session_state[conf_k] = "medium"
-            st.rerun()
-    with ch3:
-        if st.button(
-            "Low",
-            key=f"conf_lo_{spot_k}",
-            type="primary" if cur_conf == "low" else "secondary",
-        ):
-            st.session_state[conf_k] = "low"
-            st.rerun()
 
-    st.divider()
-    st.markdown("##### Save your answer")
+    st.markdown('<div class="vd-review-footer-anchor"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    fb1, fb2, fb3, fb4, fb5 = st.columns([0.62, 0.62, 1.15, 1.15, 1.15])
+    with fb1:
+        if st.button(
+            "← Back",
+            disabled=idx <= 0,
+            use_container_width=True,
+            key="vd_review_spot_back",
+        ):
+            st.session_state.idx = idx - 1
+            st.rerun()
+    with fb2:
+        if st.button(
+            "Next →",
+            disabled=idx >= n - 1,
+            use_container_width=True,
+            key="vd_review_spot_next",
+        ):
+            st.session_state.idx = idx + 1
+            st.rerun()
+    with fb3:
+        if st.button(
+            "Ship",
+            key=f"lbl_vessel_{idx}",
+            use_container_width=True,
+            type="primary",
+        ):
+            _commit_review_label(
+                ckey="vessel",
+                idx=idx,
+                cx=cx,
+                cy=cy,
+                score=score,
+                spot_k=spot_k,
+                dim_key=dim_key,
+                tci_loaded=tci_loaded,
+                meta=meta,
+                labels_path=labels_path,
+                tci_p=tci_p,
+                sc0=sc0,
+                sr0=sr0,
+                fp=fp,
+            )
+    with fb4:
+        if st.button(
+            "Not a ship",
+            key=f"lbl_not_vessel_{idx}",
+            use_container_width=True,
+        ):
+            _commit_review_label(
+                ckey="not_vessel",
+                idx=idx,
+                cx=cx,
+                cy=cy,
+                score=score,
+                spot_k=spot_k,
+                dim_key=dim_key,
+                tci_loaded=tci_loaded,
+                meta=meta,
+                labels_path=labels_path,
+                tci_p=tci_p,
+                sc0=sc0,
+                sr0=sr0,
+                fp=fp,
+            )
+    with fb5:
+        if st.button(
+            "Unsure",
+            key=f"lbl_ambiguous_{idx}",
+            use_container_width=True,
+        ):
+            _commit_review_label(
+                ckey="ambiguous",
+                idx=idx,
+                cx=cx,
+                cy=cy,
+                score=score,
+                spot_k=spot_k,
+                dim_key=dim_key,
+                tci_loaded=tci_loaded,
+                meta=meta,
+                labels_path=labels_path,
+                tci_p=tci_p,
+                sc0=sc0,
+                sr0=sr0,
+                fp=fp,
+            )
 
-    all_lbl = [
-        "vessel",
-        "not_vessel",
-        "cloud",
-        "land",
-        "ambiguous",
-        "_skip",
-    ]
-    row_l = st.columns(len(all_lbl))
-    for i, ckey in enumerate(all_lbl):
-        with row_l[i]:
-            if ckey == "_skip":
-                if st.button(
-                    "Skip ▷",
-                    key=f"vd_skip_{spot_k}_{idx}",
-                    use_container_width=True,
-                ):
-                    st.session_state.pending_locator_candidates = remove_pending_near(
-                        st.session_state.pending_locator_candidates, cx, cy
-                    )
-                    st.session_state.idx = idx + 1
-                    st.rerun()
-            else:
-                if st.button(
-                    REVIEW_CATEGORY_BUTTON_LABELS.get(ckey, ckey),
-                    key=f"lbl_{ckey}_{idx}",
-                    use_container_width=True,
-                    type="primary" if ckey == "vessel" else "secondary",
-                ):
-                    _commit_review_label(
-                        ckey=ckey,
-                        idx=idx,
-                        cx=cx,
-                        cy=cy,
-                        score=score,
-                        spot_k=spot_k,
-                        dim_key=dim_key,
-                        tci_loaded=tci_loaded,
-                        meta=meta,
-                        labels_path=labels_path,
-                        tci_p=tci_p,
-                        sc0=sc0,
-                        sr0=sr0,
-                        fp=fp,
-                    )
-    st.caption("Skip → next spot (nothing saved).")
+    with st.expander("More choices and how sure you feel", expanded=False):
+        st.caption("Use **Unsure** above if that is enough. Cloud / land / skip are here if you need them.")
+        mx1, mx2, mx3 = st.columns(3)
+        with mx1:
+            if st.button(
+                "Cloud",
+                key=f"lbl_cloud_{idx}",
+                use_container_width=True,
+            ):
+                _commit_review_label(
+                    ckey="cloud",
+                    idx=idx,
+                    cx=cx,
+                    cy=cy,
+                    score=score,
+                    spot_k=spot_k,
+                    dim_key=dim_key,
+                    tci_loaded=tci_loaded,
+                    meta=meta,
+                    labels_path=labels_path,
+                    tci_p=tci_p,
+                    sc0=sc0,
+                    sr0=sr0,
+                    fp=fp,
+                )
+        with mx2:
+            if st.button(
+                "Land",
+                key=f"lbl_land_{idx}",
+                use_container_width=True,
+            ):
+                _commit_review_label(
+                    ckey="land",
+                    idx=idx,
+                    cx=cx,
+                    cy=cy,
+                    score=score,
+                    spot_k=spot_k,
+                    dim_key=dim_key,
+                    tci_loaded=tci_loaded,
+                    meta=meta,
+                    labels_path=labels_path,
+                    tci_p=tci_p,
+                    sc0=sc0,
+                    sr0=sr0,
+                    fp=fp,
+                )
+        with mx3:
+            if st.button(
+                "Skip — next spot",
+                key=f"vd_skip_{spot_k}_{idx}",
+                use_container_width=True,
+            ):
+                st.session_state.pending_locator_candidates = remove_pending_near(
+                    st.session_state.pending_locator_candidates, cx, cy
+                )
+                st.session_state.idx = idx + 1
+                st.rerun()
+        st.markdown("**How sure are you?** (only matters if you did not pick **Unsure**)")
+        ch1, ch2, ch3, _ = st.columns(4)
+        cur_conf = str(st.session_state.get(conf_k, "high")).lower()
+        with ch1:
+            if st.button(
+                "High",
+                key=f"conf_hi_{spot_k}",
+                type="primary" if cur_conf == "high" else "secondary",
+            ):
+                st.session_state[conf_k] = "high"
+                st.rerun()
+        with ch2:
+            if st.button(
+                "Medium",
+                key=f"conf_med_{spot_k}",
+                type="primary" if cur_conf == "medium" else "secondary",
+            ):
+                st.session_state[conf_k] = "medium"
+                st.rerun()
+        with ch3:
+            if st.button(
+                "Low",
+                key=f"conf_lo_{spot_k}",
+                type="primary" if cur_conf == "low" else "secondary",
+            ):
+                st.session_state[conf_k] = "low"
+                st.rerun()
+
+    with st.expander("Sort-model scores (optional)", expanded=False):
+        if p_comb is not None:
+            cols_p = st.columns(
+                min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0))
+            )
+            i_col = 0
+            if p_lr is not None:
+                cols_p[i_col].metric("Model A", f"{p_lr:.2f}")
+                i_col += 1
+            if p_mlp is not None:
+                cols_p[i_col].metric("Model B", f"{p_mlp:.2f}")
+                i_col += 1
+            if p_lr is not None and p_mlp is not None and i_col < len(cols_p):
+                cols_p[i_col].metric("Mixed", f"{p_comb:.2f}")
+            st.caption("Higher = closer to your past **Ship** saves (after you retrain sort models).")
+        elif clf_disp is not None or bundle_disp is not None:
+            st.caption("No score on this spot — try **Refresh spot list**.")
+
+    if mt_pred:
+        with st.expander("Guesses from past labels (optional)", expanded=False):
+            st.caption("Rough hints when you have enough saved examples.")
+            items = sorted(mt_pred.items(), key=lambda t: t[0])
+            for k, v in items:
+                if isinstance(v, float):
+                    st.markdown(f"**{k}** — `{v:.4f}`")
+                else:
+                    st.markdown(f"**{k}** — `{v}`")
 
 
 def _commit_review_label(
