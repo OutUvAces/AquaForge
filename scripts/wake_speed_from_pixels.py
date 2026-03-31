@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.kelvin import speed_knots_from_crests, wavelength_from_crests
-from vessel_detection.pixels import distance_meters
+from aquaforge.kelvin import speed_knots_from_crests, wavelength_from_crests
+from aquaforge.pixels import distance_meters
 
 
 def main() -> None:
@@ -84,7 +84,7 @@ def main() -> None:
         if args.image is None:
             print("--diagram requires --image", file=sys.stderr)
             raise SystemExit(1)
-        from vessel_detection.diagram import save_wake_diagram
+        from aquaforge.diagram import save_wake_diagram
 
         view_orig = None
         if args.diagram_view:

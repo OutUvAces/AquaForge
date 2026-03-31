@@ -1,4 +1,4 @@
-"""Tests for :mod:`vessel_detection.evaluation` helpers and empty JSONL eval."""
+"""Tests for :mod:`aquaforge.evaluation` helpers and empty JSONL eval (AquaForge app)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vessel_detection.detection_config import DetectionSettings
-from vessel_detection.evaluation import (
+from aquaforge.detection_config import DetectionSettings
+from aquaforge.evaluation import (
     EvalRunResult,
     HeadingErrorBucket,
     angular_error_deg,
@@ -179,7 +179,7 @@ class TestSummaryMarkdown(unittest.TestCase):
             self.assertIn("#### Scope", md)
             self.assertIn("≥5°", md)
             self.assertIn("| JSONL |", md)
-            self.assertIn("Vessel Detector", md)
+            self.assertIn("AquaForge", md)
             self.assertIn("| Legacy |", md)
         finally:
             jp.unlink(missing_ok=True)

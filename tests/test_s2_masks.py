@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from vessel_detection.s2_masks import (
+from aquaforge.s2_masks import (
     SCL_CLOUD_HIGH,
     SCL_CLOUD_MEDIUM,
     SCL_WATER,

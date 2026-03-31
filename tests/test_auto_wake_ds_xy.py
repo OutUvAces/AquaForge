@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.auto_wake import ds_xy_from_fullres, fullres_xy_from_ds
+from aquaforge.auto_wake import ds_xy_from_fullres, fullres_xy_from_ds
 
 
 class TestDsXyRoundTrip(unittest.TestCase):

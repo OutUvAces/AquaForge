@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.review_card_export import (
+from aquaforge.review_card_export import (
     LABEL_CONFIDENCE_EXTRA_KEY,
     label_confidence_is_set,
 )

@@ -28,8 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.cdse import get_access_token, load_env
-from vessel_detection.s2_download import (
+from aquaforge.cdse import get_access_token, load_env
+from aquaforge.s2_download import (
     download_item_asset,
     download_item_tci_scl,
     pick_first_item_with_ocean_thumbnail,

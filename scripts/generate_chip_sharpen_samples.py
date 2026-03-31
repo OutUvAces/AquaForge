@@ -155,7 +155,7 @@ METHODS: list[tuple[str, Callable[[np.ndarray], np.ndarray]]] = [
 
 
 def _load_chip_from_jsonl(jsonl_path: Path, record_id: str, project_root: Path) -> Image.Image:
-    from vessel_detection.review_card_export import build_review_card_png
+    from aquaforge.review_card_export import build_review_card_png
 
     raw = record_id.strip()
     rec = None

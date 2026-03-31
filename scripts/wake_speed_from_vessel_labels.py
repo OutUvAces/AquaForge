@@ -7,7 +7,7 @@ Estimate ship speed (knots) from Kelvin wake analysis for each **vessel** label 
 For every review with ``review_category == "vessel"``, runs wake detection **at the labeled
 pixel** (same pipeline as the web app’s auto wake, but anchored on your click), measures
 segment length in meters along the inferred wake axis, counts crests from the luminance
-profile FFT, and applies the deep-water Kelvin relation (see ``vessel_detection.kelvin``).
+profile FFT, and applies the deep-water Kelvin relation (see ``aquaforge.kelvin``).
 
 Heuristic limitations: sun glitter, clouds, or ambiguous texture can skew angle and crest
 count — treat outputs as indicative.
@@ -28,11 +28,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.auto_wake import AutoWakeError, detect_wake_segment_at_ship
-from vessel_detection.diagram import save_wake_diagram
-from vessel_detection.kelvin import wake_analysis
-from vessel_detection.labels import default_labels_path, iter_reviews
-from vessel_detection.pixels import distance_meters
+from aquaforge.auto_wake import AutoWakeError, detect_wake_segment_at_ship
+from aquaforge.diagram import save_wake_diagram
+from aquaforge.kelvin import wake_analysis
+from aquaforge.labels import default_labels_path, iter_reviews
+from aquaforge.pixels import distance_meters
 
 
 def main() -> None:

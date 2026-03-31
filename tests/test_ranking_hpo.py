@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.ranking_hpo import _best_fusion_threshold
+from aquaforge.ranking_hpo import _best_fusion_threshold
 
 
 class TestBestFusionThreshold(unittest.TestCase):

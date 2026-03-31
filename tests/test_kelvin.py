@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import unittest
 
-from vessel_detection.kelvin import (
+from aquaforge.kelvin import (
     KNOTS_PER_MS,
     speed_knots_from_crests,
     speed_knots_from_wavelength,
@@ -28,7 +28,7 @@ class TestKelvin(unittest.TestCase):
         v_ms = speed_ms_from_wavelength(lam)
         self.assertGreater(v_ms, 0)
         # λ = 2π V² / g
-        import vessel_detection.kelvin as kv
+        import aquaforge.kelvin as kv
 
         lam_back = 2 * math.pi * v_ms * v_ms / kv.G
         self.assertAlmostEqual(lam_back, lam, places=6)

@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.labels import default_labels_path, iter_reviews
-from vessel_detection.ship_model import default_model_path, train_ship_baseline_joblib
+from aquaforge.labels import default_labels_path, iter_reviews
+from aquaforge.ship_model import default_model_path, train_ship_baseline_joblib
 
 
 def main() -> None:

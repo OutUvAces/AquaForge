@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.kelvin import (
+from aquaforge.kelvin import (
     speed_knots_from_crests,
     wavelength_from_crests,
 )

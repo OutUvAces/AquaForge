@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vessel_detection.training_data import (
+from aquaforge.training_data import (
     _binary_training_label,
     jsonl_to_numpy,
     marker_role_bits_from_extra,
@@ -67,7 +67,7 @@ class TestBinaryLabel(unittest.TestCase):
 
 
 class TestJsonlToNumpy(unittest.TestCase):
-    @patch("vessel_detection.training_data.extract_crop_features")
+    @patch("aquaforge.training_data.extract_crop_features")
     def test_mix_categories(self, mock_ex: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         with tempfile.TemporaryDirectory() as td:
@@ -107,7 +107,7 @@ class TestJsonlToNumpy(unittest.TestCase):
             self.assertEqual(int(y[0]), 1)
             self.assertEqual(int(y[1]), 0)
 
-    @patch("vessel_detection.training_data.extract_crop_features")
+    @patch("aquaforge.training_data.extract_crop_features")
     def test_skips_unresolvable_tci(self, mock_ex: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         with tempfile.TemporaryDirectory() as td:

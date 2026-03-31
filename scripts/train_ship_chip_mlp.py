@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.labels import default_labels_path, iter_reviews
-from vessel_detection.ship_chip_mlp import default_chip_mlp_path, train_chip_mlp_joblib
+from aquaforge.labels import default_labels_path, iter_reviews
+from aquaforge.ship_chip_mlp import default_chip_mlp_path, train_chip_mlp_joblib
 
 
 def main() -> None:

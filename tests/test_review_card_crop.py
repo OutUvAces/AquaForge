@@ -6,7 +6,7 @@ import unittest
 
 from PIL import Image, ImageDraw, ImageFont
 
-from vessel_detection.review_card_export import (
+from aquaforge.review_card_export import (
     _draw_graduated_l_scale,
     _longest_convex_hull_edge_angle_deg,
     _north_arrow_glyph_rgba,

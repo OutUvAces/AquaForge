@@ -17,7 +17,7 @@ class TestRasterRgb(unittest.TestCase):
         except ImportError:
             self.skipTest("rasterio not installed")
 
-        from vessel_detection.raster_rgb import read_rgba_window, raster_dimensions
+        from aquaforge.raster_rgb import read_rgba_window, raster_dimensions
 
         transform = from_origin(500_000.0, 4_500_000.0, 10.0, 10.0)
         with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:

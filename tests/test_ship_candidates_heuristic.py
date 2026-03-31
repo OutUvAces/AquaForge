@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.auto_wake import (
+from aquaforge.auto_wake import (
     _bright_threshold_topk,
     _dedupe_candidates_ds,
     ship_candidates_ranked,

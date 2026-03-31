@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from vessel_detection.detection_config import (
+from aquaforge.detection_config import (
     DetectionSettings,
     KeypointsSection,
     aquaforge_requested,
@@ -57,7 +58,7 @@ class TestDetectionConfig(unittest.TestCase):
             self.assertEqual(s.backend, "legacy_hybrid")
 
     def test_ensemble_wake_requests_sota_without_yolo_weights(self) -> None:
-        from vessel_detection.detection_config import DetectionSettings, WakeFusionSection
+        from aquaforge.detection_config import DetectionSettings, WakeFusionSection
 
         s = DetectionSettings(
             backend="ensemble",
@@ -148,6 +149,72 @@ class TestDetectionConfig(unittest.TestCase):
             self.assertFalse(yolo_requested(s))
             self.assertEqual(s.aquaforge.imgsz, 384)
             self.assertAlmostEqual(s.aquaforge.min_direct_heading_confidence, 0.4)
+
+    def test_af_detection_config_env_overrides_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            alt = Path(td) / "custom.yaml"
+            alt.write_text("backend: yolo_only\n", encoding="utf-8")
+            old_af = os.environ.pop("AF_DETECTION_CONFIG", None)
+            old_vd = os.environ.pop("VD_DETECTION_CONFIG", None)
+            try:
+                os.environ["AF_DETECTION_CONFIG"] = str(alt)
+                s = load_detection_settings(root)
+                self.assertEqual(s.backend, "yolo_only")
+            finally:
+                if old_af is not None:
+                    os.environ["AF_DETECTION_CONFIG"] = old_af
+                else:
+                    os.environ.pop("AF_DETECTION_CONFIG", None)
+                if old_vd is not None:
+                    os.environ["VD_DETECTION_CONFIG"] = old_vd
+                else:
+                    os.environ.pop("VD_DETECTION_CONFIG", None)
+
+    def test_vd_detection_config_env_still_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            alt = Path(td) / "legacy.yaml"
+            alt.write_text("backend: yolo_only\n", encoding="utf-8")
+            old_af = os.environ.pop("AF_DETECTION_CONFIG", None)
+            old_vd = os.environ.pop("VD_DETECTION_CONFIG", None)
+            try:
+                os.environ["VD_DETECTION_CONFIG"] = str(alt)
+                s = load_detection_settings(root)
+                self.assertEqual(s.backend, "yolo_only")
+            finally:
+                if old_af is not None:
+                    os.environ["AF_DETECTION_CONFIG"] = old_af
+                else:
+                    os.environ.pop("AF_DETECTION_CONFIG", None)
+                if old_vd is not None:
+                    os.environ["VD_DETECTION_CONFIG"] = old_vd
+                else:
+                    os.environ.pop("VD_DETECTION_CONFIG", None)
+
+    def test_af_detection_config_wins_over_vd_when_both_set(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p_af = Path(td) / "af.yaml"
+            p_vd = Path(td) / "vd.yaml"
+            p_af.write_text("backend: aquaforge\n", encoding="utf-8")
+            p_vd.write_text("backend: yolo_only\n", encoding="utf-8")
+            old_af = os.environ.pop("AF_DETECTION_CONFIG", None)
+            old_vd = os.environ.pop("VD_DETECTION_CONFIG", None)
+            try:
+                os.environ["AF_DETECTION_CONFIG"] = str(p_af)
+                os.environ["VD_DETECTION_CONFIG"] = str(p_vd)
+                s = load_detection_settings(root)
+                self.assertEqual(s.backend, "aquaforge")
+            finally:
+                if old_af is not None:
+                    os.environ["AF_DETECTION_CONFIG"] = old_af
+                else:
+                    os.environ.pop("AF_DETECTION_CONFIG", None)
+                if old_vd is not None:
+                    os.environ["VD_DETECTION_CONFIG"] = old_vd
+                else:
+                    os.environ.pop("VD_DETECTION_CONFIG", None)
 
     def test_merged_onnx_providers_global_wins(self) -> None:
         s = DetectionSettings(

@@ -24,8 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.labels import default_labels_path
-from vessel_detection.recompute_label_outline_centers import (
+from aquaforge.labels import default_labels_path
+from aquaforge.recompute_label_outline_centers import (
     patch_record_outline_center,
     record_eligible_for_outline_center_patch,
     rewrite_jsonl_with_patched_records,

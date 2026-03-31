@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.cdse import (
+from aquaforge.cdse import (
     asset_href,
     get_access_token,
     load_env,

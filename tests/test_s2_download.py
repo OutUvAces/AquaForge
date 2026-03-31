@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.cdse import local_asset_filename
-from vessel_detection.s2_download import (
+from aquaforge.cdse import local_asset_filename
+from aquaforge.s2_download import (
     format_item_label,
     item_geometry_centroid,
     parse_bbox_csv,

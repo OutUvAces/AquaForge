@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.s2_download import score_rgb_ocean_likelihood
+from aquaforge.s2_download import score_rgb_ocean_likelihood
 
 
 class TestOceanLikelihood(unittest.TestCase):

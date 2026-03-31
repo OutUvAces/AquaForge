@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vessel_detection.labels import (
+from aquaforge.labels import (
     LOCATOR_MANUAL_SCORE,
     append_locator_pick_to_pending,
     append_review,
@@ -18,7 +18,7 @@ from vessel_detection.labels import (
     remove_pending_near,
     resolve_stored_asset_path,
 )
-from vessel_detection.review_schema import LABEL_SCHEMA_VERSION
+from aquaforge.review_schema import LABEL_SCHEMA_VERSION
 
 
 class TestFilterUnlabeled(unittest.TestCase):

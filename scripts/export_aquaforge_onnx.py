@@ -4,7 +4,7 @@ Export AquaForge ``.pt`` checkpoint to ONNX (multi-output: cls, seg, kp, hdg, wa
 CPU inference: set ``aquaforge.use_onnx_inference: true`` and ``onnx_path`` in detection.yaml,
 or place ``aquaforge.onnx`` under ``data/models/aquaforge/``.
 
-Quantization: use ``vessel_detection.onnx_session_cache`` dynamic quant (``onnx_quantize: true``).
+Quantization: use ``aquaforge.onnx_session_cache`` dynamic quant (``onnx_quantize: true``).
 
 Example:
   py -3 scripts/export_aquaforge_onnx.py --checkpoint data/models/aquaforge/aquaforge.pt
@@ -45,7 +45,7 @@ def main() -> None:
         raise SystemExit(1)
 
     out = args.output or ck.with_name("aquaforge.onnx")
-    from vessel_detection.aquaforge.model import load_checkpoint
+    from aquaforge.unified.model import load_checkpoint
 
     model, meta = load_checkpoint(ck, torch.device("cpu"))
     model.eval()

@@ -20,10 +20,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.auto_wake import AutoWakeError, detect_wake_segment
-from vessel_detection.diagram import save_wake_diagram
-from vessel_detection.pixels import distance_meters
-from vessel_detection.wake_suggest import (
+from aquaforge.auto_wake import AutoWakeError, detect_wake_segment
+from aquaforge.diagram import save_wake_diagram
+from aquaforge.pixels import distance_meters
+from aquaforge.wake_suggest import (
     default_demo_crests,
     suggest_horizontal_segment,
 )

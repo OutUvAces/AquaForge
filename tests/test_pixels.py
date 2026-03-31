@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vessel_detection.pixels import distance_meters_fixed_scale, distance_meters_raster
+from aquaforge.pixels import distance_meters_fixed_scale, distance_meters_raster
 
 
 class TestPixelsFixed(unittest.TestCase):

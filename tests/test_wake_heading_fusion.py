@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from vessel_detection.wake_heading_fusion import (
+from aquaforge.wake_heading_fusion import (
     combine_two_wake_headings,
     fuse_heading_keypoint_wake,
     fuse_heading_keypoint_wake_adaptive,
@@ -31,10 +31,10 @@ class TestWakeHeadingFusion(unittest.TestCase):
         self.assertAlmostEqual(float(d), 120.0)
         self.assertEqual(src, "wake_only")
 
-    @patch("vessel_detection.geodesy_bearing.geodesic_bearing_deg")
+    @patch("aquaforge.geodesy_bearing.geodesic_bearing_deg")
     def test_wake_axis_bearing(self, mock_bear: MagicMock) -> None:
         mock_bear.side_effect = [90.0, 270.0]
-        from vessel_detection.wake_heading_fusion import wake_axis_bearing_candidates_deg
+        from aquaforge.wake_heading_fusion import wake_axis_bearing_candidates_deg
 
         a, b = wake_axis_bearing_candidates_deg("x.jp2", 0, 0, 1, 0)
         self.assertEqual(mock_bear.call_count, 2)

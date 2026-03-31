@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.review_overlay import parse_manual_quad_crop_from_extra
+from aquaforge.review_overlay import parse_manual_quad_crop_from_extra
 
 
 class TestParseManualQuad(unittest.TestCase):

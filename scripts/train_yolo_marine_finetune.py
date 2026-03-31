@@ -5,7 +5,7 @@ Prerequisites:
   pip install -r requirements-ml.txt
 
 Prepare a YOLO ``data.yaml`` (paths to train/val images and labels). For marine vessels you can
-start from weights downloaded via :func:`vessel_detection.yolo_marine_backend.ensure_marine_yolo_weights`
+start from weights downloaded via :func:`aquaforge.yolo_marine_backend.ensure_marine_yolo_weights`
 or any ``yolo11*-seg.pt`` checkpoint.
 
 Example:
@@ -55,8 +55,8 @@ def main() -> None:
 
     weights = args.weights
     if weights is None:
-        from vessel_detection.detection_config import YoloSection
-        from vessel_detection.yolo_marine_backend import ensure_marine_yolo_weights
+        from aquaforge.detection_config import YoloSection
+        from aquaforge.yolo_marine_backend import ensure_marine_yolo_weights
 
         weights = ensure_marine_yolo_weights(ROOT, YoloSection())
         if weights is None:

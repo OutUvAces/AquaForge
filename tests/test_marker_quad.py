@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.vessel_markers import quad_crop_from_dimension_markers
+from aquaforge.vessel_markers import quad_crop_from_dimension_markers
 
 
 class TestQuadFromMarkers(unittest.TestCase):

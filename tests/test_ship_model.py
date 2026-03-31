@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vessel_detection.ship_model import rank_candidates_by_vessel_proba
+from aquaforge.ship_model import rank_candidates_by_vessel_proba
 
 
 class MockClassifier:
@@ -24,7 +24,7 @@ class MockClassifier:
 
 
 class TestRank(unittest.TestCase):
-    @patch("vessel_detection.training_data.extract_crop_features")
+    @patch("aquaforge.training_data.extract_crop_features")
     def test_sorts_by_proba(self, mock_ex):
         mock_ex.side_effect = lambda _p, cx, _cy: np.array(
             [float(cx), 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64

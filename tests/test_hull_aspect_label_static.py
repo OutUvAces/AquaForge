@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.hull_aspect import enrich_extra_hull_aspect_ratio, hull_aspect_ratio
-from vessel_detection.label_identity import label_spatial_fingerprint
-from vessel_detection.raster_geo import format_lat_dms, format_lon_dms
-from vessel_detection.static_sea_witness import cell_key_from_lonlat
-from vessel_detection.training_data import _binary_training_label
+from aquaforge.hull_aspect import enrich_extra_hull_aspect_ratio, hull_aspect_ratio
+from aquaforge.label_identity import label_spatial_fingerprint
+from aquaforge.raster_geo import format_lat_dms, format_lon_dms
+from aquaforge.static_sea_witness import cell_key_from_lonlat
+from aquaforge.training_data import _binary_training_label
 
 
 class TestHullAspect(unittest.TestCase):

@@ -6,13 +6,13 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.scene_overview_100 import (
+from aquaforge.scene_overview_100 import (
     grid_edges_px,
     grid_water_fraction_and_detection_counts,
     overview_click_to_grid_cell,
     overview_display_click_to_fullres,
 )
-from vessel_detection.overview_grid_feedback import (
+from aquaforge.overview_grid_feedback import (
     detections_in_grid_cell,
     fullres_xy_to_grid_cell,
 )

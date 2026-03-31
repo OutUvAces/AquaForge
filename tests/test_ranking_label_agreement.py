@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from vessel_detection.ranking_label_agreement import (
+from aquaforge.ranking_label_agreement import (
     _aggregate_metrics,
     _choose_stratified_k,
     collect_ranking_labeled_points,
@@ -50,8 +50,8 @@ class TestChooseStratifiedK(unittest.TestCase):
 
 
 class TestCollectPoints(unittest.TestCase):
-    @patch("vessel_detection.ranking_label_agreement.read_chip_square_rgb")
-    @patch("vessel_detection.ranking_label_agreement.extract_crop_features")
+    @patch("aquaforge.ranking_label_agreement.read_chip_square_rgb")
+    @patch("aquaforge.ranking_label_agreement.extract_crop_features")
     def test_two_rows(self, mock_ex: object, mock_rgb: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         mock_rgb.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
@@ -79,15 +79,15 @@ class TestCollectPoints(unittest.TestCase):
             with p.open("w", encoding="utf-8") as f:
                 for r in rows:
                     f.write(json.dumps(r) + "\n")
-            (Path(td) / "vessel_detection").mkdir(exist_ok=True)
+            (Path(td) / "aquaforge").mkdir(exist_ok=True)
             pts, sk = collect_ranking_labeled_points(p, Path(td))
             self.assertEqual(sk, 0)
             self.assertEqual(len(pts), 2)
             self.assertEqual(pts[0].y, 1)
             self.assertEqual(pts[1].y, 0)
 
-    @patch("vessel_detection.ranking_label_agreement.read_chip_square_rgb")
-    @patch("vessel_detection.ranking_label_agreement.extract_crop_features")
+    @patch("aquaforge.ranking_label_agreement.read_chip_square_rgb")
+    @patch("aquaforge.ranking_label_agreement.extract_crop_features")
     def test_rows_keep_extra(self, mock_ex: object, mock_rgb: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         mock_rgb.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
@@ -106,7 +106,7 @@ class TestCollectPoints(unittest.TestCase):
             }
             with p.open("w", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
-            (Path(td) / "vessel_detection").mkdir(exist_ok=True)
+            (Path(td) / "aquaforge").mkdir(exist_ok=True)
             rows, sk = collect_ranking_labeled_rows(p, Path(td))
             self.assertEqual(sk, 0)
             self.assertEqual(len(rows), 1)
@@ -115,11 +115,11 @@ class TestCollectPoints(unittest.TestCase):
 
 
 class TestEvaluateInSample(unittest.TestCase):
-    @patch("vessel_detection.ranking_label_agreement.proba_pair_at")
-    @patch("vessel_detection.ranking_label_agreement.load_chip_mlp_bundle")
-    @patch("vessel_detection.ranking_label_agreement.load_ship_classifier")
-    @patch("vessel_detection.ranking_label_agreement.read_chip_square_rgb")
-    @patch("vessel_detection.ranking_label_agreement.extract_crop_features")
+    @patch("aquaforge.ranking_label_agreement.proba_pair_at")
+    @patch("aquaforge.ranking_label_agreement.load_chip_mlp_bundle")
+    @patch("aquaforge.ranking_label_agreement.load_ship_classifier")
+    @patch("aquaforge.ranking_label_agreement.read_chip_square_rgb")
+    @patch("aquaforge.ranking_label_agreement.extract_crop_features")
     def test_high_proba_matches_vessel(
         self,
         mock_ex: object,
@@ -139,7 +139,7 @@ class TestEvaluateInSample(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            (root / "vessel_detection").mkdir()
+            (root / "aquaforge").mkdir()
             jp = root / "tci.jp2"
             jp.write_bytes(b"x")
             tci_s = str(jp.resolve())

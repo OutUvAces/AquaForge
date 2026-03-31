@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.labels import default_labels_path, iter_reviews
-from vessel_detection.vessel_footprint_export import save_vessel_footprint_png
+from aquaforge.labels import default_labels_path, iter_reviews
+from aquaforge.vessel_footprint_export import save_vessel_footprint_png
 
 
 def main() -> None:

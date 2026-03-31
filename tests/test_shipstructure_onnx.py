@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.shipstructure_adapter import parse_pose_onnx_output
+from aquaforge.shipstructure_adapter import parse_pose_onnx_output
 
 
 class TestParsePoseOnnxOutput(unittest.TestCase):

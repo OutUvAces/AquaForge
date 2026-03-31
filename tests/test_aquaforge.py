@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.aquaforge.constants import LANDMARK_NAMES, NUM_LANDMARKS
+from aquaforge.unified.constants import LANDMARK_NAMES, NUM_LANDMARKS
 
 
 class TestAquaForgeConstants(unittest.TestCase):
@@ -19,7 +19,7 @@ class TestAquaForgeLosses(unittest.TestCase):
             import torch
         except ImportError:
             self.skipTest("torch not installed")
-        from vessel_detection.aquaforge.losses import heading_sin_cos_loss
+        from aquaforge.unified.losses import heading_sin_cos_loss
 
         pred = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
         gt = torch.tensor([0.0], dtype=torch.float32)

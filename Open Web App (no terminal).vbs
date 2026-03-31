@@ -1,4 +1,4 @@
-' Starts the Vessel detection web UI in the background (no console window)
+' Starts the AquaForge web UI in the background (no console window)
 ' and opens your default browser. Bookmark: http://127.0.0.1:8501
 '
 ' First time only: install deps in a terminal once:

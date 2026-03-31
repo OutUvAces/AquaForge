@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.review_overlay import (
+from aquaforge.review_overlay import (
     fullres_xy_from_spot_red_outline_aabb_center,
     overlay_sota_on_spot_rgb,
     spot_footprint_in_locator_pixels,

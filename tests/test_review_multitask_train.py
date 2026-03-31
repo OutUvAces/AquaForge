@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vessel_detection.ranking_label_agreement import RankingLabeledRow
-from vessel_detection.review_multitask_train import (
+from aquaforge.ranking_label_agreement import RankingLabeledRow
+from aquaforge.review_multitask_train import (
     _binary_value,
     _float_value,
     train_review_multitask_joblib,
@@ -29,8 +29,8 @@ class TestTargetParsing(unittest.TestCase):
 
 
 class TestTrainSmoke(unittest.TestCase):
-    @patch("vessel_detection.review_multitask_train._stack_features")
-    @patch("vessel_detection.review_multitask_train.collect_ranking_labeled_rows")
+    @patch("aquaforge.review_multitask_train._stack_features")
+    @patch("aquaforge.review_multitask_train.collect_ranking_labeled_rows")
     def test_saves_bundle(
         self,
         mock_collect: object,
@@ -57,7 +57,7 @@ class TestTrainSmoke(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "mt.joblib"
             root = Path(td)
-            (root / "vessel_detection").mkdir()
+            (root / "aquaforge").mkdir()
             r = train_review_multitask_joblib(
                 Path(td) / "missing.jsonl",
                 out,

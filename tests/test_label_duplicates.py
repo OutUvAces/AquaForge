@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vessel_detection.label_duplicates import find_spatial_duplicate_groups
-from vessel_detection.labels import delete_jsonl_records_by_ids, iter_reviews
+from aquaforge.label_duplicates import find_spatial_duplicate_groups
+from aquaforge.labels import delete_jsonl_records_by_ids, iter_reviews
 
 
 class TestDeleteJsonlRecordsByIds(unittest.TestCase):

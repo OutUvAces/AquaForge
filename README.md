@@ -1,11 +1,11 @@
-# Vessel Detector
+# AquaForge
 
 **Sentinel-2–based vessel candidate detection** with a **human-in-the-loop** Streamlit review UI: operators confirm vessels, mark bow/stern, adjust footprints, and export labeled training data. Optional **config-driven SOTA backends** add marine **YOLO** instance segmentation, **ShipStructure / SLAD-style keypoints** (ONNX), and **wake–keypoint heading fusion** (heuristic wake and/or ONNX wake), without changing the default offline-first path.
 
 - **Default backend:** `legacy_hybrid` — logistic regression + chip MLP ranking only (no extra ML weights required).
-- **Config file:** `data/config/detection.yaml` (copy from [`vessel_detection/config/detection.example.yaml`](vessel_detection/config/detection.example.yaml)). Override path with env `VD_DETECTION_CONFIG`.
+- **Config file:** `data/config/detection.yaml` (copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml)). Override path with env `AF_DETECTION_CONFIG` (preferred) or legacy `VD_DETECTION_CONFIG`.
 
-Repository layout (core package): [`vessel_detection/`](vessel_detection/) — `detection_config.py`, `detection_backend.py`, `evaluation.py`, `yolo_marine_backend.py`, `shipstructure_adapter.py`, `onnx_session_cache.py`, `wake_heading_fusion.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `web_ui.py`, and packaged YAML under `vessel_detection/config/`.
+Repository layout (core package): [`aquaforge/`](aquaforge/) — `detection_config.py`, `detection_backend.py`, `evaluation.py`, `yolo_marine_backend.py`, `shipstructure_adapter.py`, `onnx_session_cache.py`, `wake_heading_fusion.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `web_ui.py`, and packaged YAML under `aquaforge/config/`.
 
 ---
 
@@ -30,7 +30,7 @@ Repository layout (core package): [`vessel_detection/`](vessel_detection/) — `
 
 3. Open the URL shown in the terminal (typically [http://localhost:8501](http://localhost:8501)).
 
-Entry point: [`app.py`](app.py) imports `vessel_detection.web_ui.main`.
+Entry point: [`app.py`](app.py) imports `aquaforge.web_ui.main`.
 
 ---
 
@@ -50,7 +50,7 @@ Entry point: [`app.py`](app.py) imports `vessel_detection.web_ui.main`.
 
 ## `data/config/detection.yaml` — detailed guide
 
-Create `data/config/` and copy [`vessel_detection/config/detection.example.yaml`](vessel_detection/config/detection.example.yaml) to `data/config/detection.yaml`.
+Create `data/config/` and copy [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml) to `data/config/detection.yaml`.
 
 ### `backend`
 
@@ -113,7 +113,7 @@ wake_fusion:
 
 ### Example: full ensemble (keypoints + heuristic wake + optional ONNX wake)
 
-Copy **[`vessel_detection/config/detection.ensemble.example.yaml`](vessel_detection/config/detection.ensemble.example.yaml)** into `data/config/detection.yaml` (or merge sections). That file is the **canonical commented ensemble** reference. Minimal sketch:
+Copy **[`aquaforge/config/detection.ensemble.example.yaml`](aquaforge/config/detection.ensemble.example.yaml)** into `data/config/detection.yaml` (or merge sections). That file is the **canonical commented ensemble** reference. Minimal sketch:
 
 ```yaml
 backend: ensemble
@@ -149,11 +149,11 @@ wake_fusion:
    py -3 scripts/export_shipstructure_to_onnx.py validate-chip --onnx path/to/pose.onnx --tci path/to/scene*TCI*.jp2 --cx ... --cy ... --bow-index 0 --stern-index 1
    ```
 
-See the script docstring for ONNX I/O alignment with [`vessel_detection.shipstructure_adapter`](vessel_detection/shipstructure_adapter.py).
+See the script docstring for ONNX I/O alignment with [`aquaforge.shipstructure_adapter`](aquaforge/shipstructure_adapter.py).
 
 ### Fine-tuning keypoints from review labels
 
-1. **Clean geometry in-app** — Use [`vessel_detection/training_label_review_ui.py`](vessel_detection/training_label_review_ui.py) (Streamlit **Training label review** in the app) to fix bow/stern and markers on saved JSONL rows before export.
+1. **Clean geometry in-app** — Use [`aquaforge/training_label_review_ui.py`](aquaforge/training_label_review_ui.py) (Streamlit **Training label review** in the app) to fix bow/stern and markers on saved JSONL rows before export.
 2. **MMPose / COCO outline** — Run:
 
    ```bash
@@ -166,7 +166,7 @@ See the script docstring for ONNX I/O alignment with [`vessel_detection.shipstru
 
 ## Benchmarking (legacy vs SOTA)
 
-[`vessel_detection/evaluation.py`](vessel_detection/evaluation.py) builds **comparison tables** for three ranking backends — **`legacy_hybrid`**, **`yolo_fusion`**, **`ensemble`** — (Pearson **r** vs the human binary label on all training-filtered point rows).
+[`aquaforge/evaluation.py`](aquaforge/evaluation.py) builds **comparison tables** for three ranking backends — **`legacy_hybrid`**, **`yolo_fusion`**, **`ensemble`** — (Pearson **r** vs the human binary label on all training-filtered point rows).
 
 **Geometry ground truth** (from `vessel_size_feedback`):
 
@@ -204,7 +204,7 @@ If the JSONL is empty or labels are missing, the demo still runs and reports zer
 **`--demo`** prints a short **plain-text** block (no markdown). Example shape:
 
 ```
-=== Vessel Detector quick eval demo ===
+=== AquaForge quick eval demo ===
 JSONL: .../data/labels/ship_reviews.jsonl
 Reference backend: legacy_hybrid
 Cap: 8 geometry spot(s)
@@ -223,9 +223,9 @@ py -3 scripts/run_detection_eval.py --demo --max-spots 8 --jsonl data/labels/shi
 py -3 scripts/run_detection_eval.py --summary-markdown -o eval_github.md
 ```
 
-Or: `py -3 -m vessel_detection.evaluation --help`.
+Or: `py -3 -m aquaforge.evaluation --help`.
 
-Use `--detection-config path/to/detection.yaml` or set `VD_DETECTION_CONFIG`. The evaluation run always computes all three ranking columns; `settings_backend` in JSON records your YAML reference backend.
+Use `--detection-config path/to/detection.yaml` or set `AF_DETECTION_CONFIG` / `VD_DETECTION_CONFIG`. The evaluation run always computes all three ranking columns; `settings_backend` in JSON records your YAML reference backend.
 
 ---
 
@@ -238,7 +238,7 @@ Use `--detection-config path/to/detection.yaml` or set `VD_DETECTION_CONFIG`. Th
 - **Bow–stern** — green segment; line weight and color scale with bow/stern confidence when available.
 - **Wake** — amber axis segment (heuristic and/or fused result geometry where exposed).
 
-**JSONL / export extras** (see [`vessel_detection/review_schema.py`](vessel_detection/review_schema.py)): predicted headings (`pred_heading_keypoint_deg`, `pred_heading_wake_deg`, `pred_heading_fused_deg`, heuristic vs ONNX wake variants), fusion source strings, keypoint bow/stern confidences, heading trust, and `sota_backend_snapshot`.
+**JSONL / export extras** (see [`aquaforge/review_schema.py`](aquaforge/review_schema.py)): predicted headings (`pred_heading_keypoint_deg`, `pred_heading_wake_deg`, `pred_heading_fused_deg`, heuristic vs ONNX wake variants), fusion source strings, keypoint bow/stern confidences, heading trust, and `sota_backend_snapshot`.
 
 The **SOTA overlays & heading hints** expander also shows a short **Legacy vs SOTA** caption when models are loaded, and a **Benchmark insight** line when a nearby `vessel_size_feedback` row supplies heading ground truth (circular error vs fused / keypoint predictions).
 
@@ -246,7 +246,7 @@ The **SOTA overlays & heading hints** expander also shows a short **Legacy vs SO
 
 ## Contributing
 
-- **New backends** — Add a mode in [`detection_config.py`](vessel_detection/detection_config.py) (`VALID_BACKENDS`), extend [`detection_backend.py`](vessel_detection/detection_backend.py) (`rank_candidates_from_config`, `run_sota_spot_inference` as needed), and document keys in [`vessel_detection/config/detection.example.yaml`](vessel_detection/config/detection.example.yaml). Keep `legacy_hybrid` as the default when YAML is missing or invalid.
+- **New backends** — Add a mode in [`detection_config.py`](aquaforge/detection_config.py) (`VALID_BACKENDS`), extend [`detection_backend.py`](aquaforge/detection_backend.py) (`rank_candidates_from_config`, `run_sota_spot_inference` as needed), and document keys in [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Keep `legacy_hybrid` as the default when YAML is missing or invalid.
 - **Fine-tuned ONNX models** — ShipStructure / wake ONNX files are **not** committed; document opset, input size, and `output_layout` in your PR or issue. Run `validate-chip` before opening a PR that changes adapter expectations.
 - **Tests** — `py -3 -m pytest` and `py -3 -m py_compile` on touched modules.
 
@@ -264,8 +264,8 @@ The **SOTA overlays & heading hints** expander also shows a short **Legacy vs SO
 Training-oriented image (mount host `data/` with labels and JP2s):
 
 ```bash
-docker build -f docker/training/Dockerfile -t vessel-detection-train .
-docker run --rm -v "%cd%/data:/app/data" vessel-detection-train
+docker build -f docker/training/Dockerfile -t aquaforge-train .
+docker run --rm -v "%cd%/data:/app/data" aquaforge-train
 ```
 
 Default command runs [`scripts/train_all_models.py`](scripts/train_all_models.py). The Streamlit app is not the image entrypoint; run the UI on the host or add a separate service Dockerfile if needed.
@@ -279,13 +279,13 @@ Default command runs [`scripts/train_all_models.py`](scripts/train_all_models.py
 
 ### Interactive UI and ensemble speed (CPU)
 
-- **Model cache** — Marine YOLO loads **once per process** (`vessel_detection/model_manager.py`). When YOLO or SOTA may run, the review UI schedules **`schedule_background_warm`** (daemon thread) so weights and ORT sessions load without blocking the first paint.
+- **Model cache** — Marine YOLO loads **once per process** (`aquaforge/model_manager.py`). When YOLO or SOTA may run, the review UI schedules **`schedule_background_warm`** (daemon thread) so weights and ORT sessions load without blocking the first paint.
 - **Batched YOLO** — `yolo.chip_batch_size` (default **6**) batches chip inference when ranking **many candidates on the same TCI** and during **sliding-window merge** grid passes. Set **`chip_batch_size: 1`** for strictly sequential behavior (e.g. debugging).
 - **ONNX Runtime tuning** — Top-level YAML **`onnx_runtime`**: `intra_op_num_threads`, `inter_op_num_threads` (**≤0** → `intra` defaults to about half of CPU cores; see `onnx_session_cache.py`), `execution_mode` (`parallel` \| `sequential`), `graph_optimization_level` (`all` \| `extended` \| `basic` \| `disable`). Optional root **`onnx_providers`**: list of ORT provider names (wins over per-section lists; for future GPU EPs). Options + providers are part of the session cache key.
 - **Streamlit UX / CPU** — Root **`ui_require_checkbox_for_sota`**: user must opt in before YOLO/keypoints/wake run for the current spot. **`ui_lazy_sota_overlays`**: metrics/expander still use SOTA dict, but the spot RGB mask/keypoint/wake drawing runs only if the user checks the overlay box.
 - **Lazy pose / wake** — **`keypoints.min_yolo_confidence`** and **`wake_fusion.min_yolo_confidence`** skip keypoint ONNX and wake fusion when marine YOLO confidence is below the threshold (**0** = no gate, backward compatible). **`sota_min_hybrid_proba_for_expensive`** skips keypoints + wake after YOLO when hybrid P(vessel) is below the threshold; the Streamlit UI passes hybrid **automatically** when this is set.
 - **Geodesy / GSD** — Repeated bearings and meters-per-pixel lookups reuse small **LRU caches** (`geodesy_bearing.py`, `raster_gsd.py`).
-- **Profiling** — After a benchmark run, **`--profile`** prints a **file-level tottime %** roll-up plus cumulative top functions (`vessel_detection/evaluation.py`):
+- **Profiling** — After a benchmark run, **`--profile`** prints a **file-level tottime %** roll-up plus cumulative top functions (`aquaforge/evaluation.py`):
 
 ```bash
 py -3 scripts/run_detection_eval.py --profile --max-spots 30 --jsonl data/labels/ship_reviews.jsonl
@@ -308,7 +308,7 @@ Default is `false` (full-precision weights). On typical pose MLP-heavy graphs, *
 
 **When to enable**
 
-- **Interactive web UI (Streamlit):** reasonable default **off** until you have validated your ONNX; then turn on for lower per-spot latency on CPU-only machines. Logs on first load show cache build and session creation (see `vessel_detection/onnx_session_cache.py`).
+- **Interactive web UI (Streamlit):** reasonable default **off** until you have validated your ONNX; then turn on for lower per-spot latency on CPU-only machines. Logs on first load show cache build and session creation (see `aquaforge/onnx_session_cache.py`).
 - **Batch / eval / CI:** keep **off** for the reference metrics run; run a second pass with `quantize: true` or use the script below to compare speed and heading delta on a few chips before enabling in production YAML.
 
 **Validate before/after**
@@ -327,7 +327,7 @@ py -3 scripts/validate_quantization.py ^
 
 The script reports **mean inference time** (float32 vs dynamically quantized INT8) and **circular heading delta** when bow/stern keypoints yield a geodesic heading. It does **not** replace full labeled eval: for IoU and dataset-level heading MAE, use `run_detection_eval.py` (or **`--demo`** for a quick slice).
 
-Quantized ONNX files are written under **`<system temp>/vessel_detector_ort_quant/`** (see `tempfile.gettempdir()`). The **first** quantized load pays a one-time compile/write; subsequent Streamlit reruns reuse the in-process session cache.
+Quantized ONNX files are written under **`<system temp>/aquaforge_ort_quant/`** (see `tempfile.gettempdir()`). The **first** quantized load pays a one-time compile/write; subsequent Streamlit reruns reuse the in-process session cache.
 
 ---
 
@@ -350,3 +350,9 @@ Quantized ONNX files are written under **`<system temp>/vessel_detector_ort_quan
 ## License / upstream
 
 Marine YOLO weights and ShipStructure are third-party; follow their licenses when redistributing models. This app’s code is provided as-is for research and operational labeling workflows.
+
+---
+
+## Repository naming (GitHub)
+
+The product and Python package are **AquaForge** (`aquaforge/` on disk). Your local folder or GitHub remote may still use an older name (for example `Vessel Detector` / `vessel-detector`); that is fine. After a GitHub repo rename, update `git remote set-url origin …` and any badges or clone URLs you maintain outside this tree.

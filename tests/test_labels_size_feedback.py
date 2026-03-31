@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vessel_detection.labels import (
+from aquaforge.labels import (
     TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY,
     append_vessel_size_feedback,
     iter_vessel_size_feedback,

@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.review_overlay import rotated_vessel_quad_in_crop
+from aquaforge.review_overlay import rotated_vessel_quad_in_crop
 
 
 class TestRotatedQuad(unittest.TestCase):

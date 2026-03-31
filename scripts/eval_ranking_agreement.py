@@ -17,10 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.labels import default_labels_path
-from vessel_detection.ranking_label_agreement import evaluate_ranking_binary_agreement
-from vessel_detection.ship_chip_mlp import default_chip_mlp_path
-from vessel_detection.ship_model import default_model_path
+from aquaforge.labels import default_labels_path
+from aquaforge.ranking_label_agreement import evaluate_ranking_binary_agreement
+from aquaforge.ship_chip_mlp import default_chip_mlp_path
+from aquaforge.ship_model import default_model_path
 
 
 def main() -> None:

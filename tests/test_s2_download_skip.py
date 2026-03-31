@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vessel_detection.s2_download import (
+from aquaforge.s2_download import (
     TciSclDownloadOutcome,
     download_item_asset,
     tci_scl_download_summary,
@@ -24,7 +24,7 @@ class TestSkipExisting(unittest.TestCase):
             d = Path(td)
             dest = d / "S2A_TEST_TCI.jp2"
             dest.write_bytes(b"x")
-            with patch("vessel_detection.s2_download.download_s3_asset") as mock_s3:
+            with patch("aquaforge.s2_download.download_s3_asset") as mock_s3:
                 p, skipped = download_item_asset(item, "TCI_10m", d, "token")
                 self.assertTrue(skipped)
                 self.assertEqual(p, dest)
@@ -35,7 +35,7 @@ class TestSkipExisting(unittest.TestCase):
         {"COPERNICUS_S3_ACCESS_KEY": "a", "COPERNICUS_S3_SECRET_KEY": "b"},
         clear=False,
     )
-    @patch("vessel_detection.s2_download.download_s3_asset")
+    @patch("aquaforge.s2_download.download_s3_asset")
     def test_downloads_when_missing(self, mock_s3: object) -> None:
         item = {
             "id": "S2A_TEST",

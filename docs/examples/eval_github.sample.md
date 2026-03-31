@@ -32,6 +32,6 @@ _Wide tables scroll horizontally on narrow GitHub / mobile views._
 
 ---
 
-## Vessel Detector - detection / SOTA evaluation
+## AquaForge — detection / SOTA evaluation
 
 *(Full ranking, heading, fusion-benefit, measurement, and IoU tables follow in actual output.)*

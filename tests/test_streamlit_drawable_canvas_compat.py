@@ -9,7 +9,7 @@ class TestDrawableCanvasCompat(unittest.TestCase):
     def test_apply_adds_image_to_url(self) -> None:
         import streamlit.elements.image as st_image
 
-        from vessel_detection.streamlit_drawable_canvas_compat import (
+        from aquaforge.streamlit_drawable_canvas_compat import (
             apply_streamlit_drawable_canvas_compat,
         )
 

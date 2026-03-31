@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.pixels import distance_meters
+from aquaforge.pixels import distance_meters
 
 
 def main() -> None:

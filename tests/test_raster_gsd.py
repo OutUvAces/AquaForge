@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from affine import Affine
 from rasterio.crs import CRS
 
-from vessel_detection.raster_gsd import (
+from aquaforge.raster_gsd import (
     chip_pixels_for_ground_side_meters,
     ground_meters_per_pixel_from_dataset,
 )
@@ -47,7 +47,7 @@ class TestGroundMetersPerPixel(unittest.TestCase):
 
 
 class TestChipPixels(unittest.TestCase):
-    @patch("vessel_detection.raster_gsd.rasterio.open")
+    @patch("aquaforge.raster_gsd.rasterio.open")
     def test_ten_m_gsd_yields_hundred_px_for_1km(self, mock_open: MagicMock) -> None:
         ds = MagicMock()
         ds.transform = Affine(10.0, 0.0, 0.0, 0.0, -10.0, 0.0)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from vessel_detection.onnx_session_cache import clear_ort_session_cache, get_ort_session
+from aquaforge.onnx_session_cache import clear_ort_session_cache, get_ort_session
 
 
 class TestOrtSessionCache(unittest.TestCase):
@@ -19,7 +19,7 @@ class TestOrtSessionCache(unittest.TestCase):
         )
 
     def test_invalid_file_quantize_fails_gracefully(self) -> None:
-        from vessel_detection.onnx_session_cache import _quantized_model_path
+        from aquaforge.onnx_session_cache import _quantized_model_path
 
         p = Path(__file__).resolve().parent / ".tmp_not_onnx.onnx"
         try:

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.locator_coords import (
+from aquaforge.locator_coords import (
     click_square_letterbox_to_original_xy,
     display_click_to_full_res_xy,
     letterbox_rgb_to_square,

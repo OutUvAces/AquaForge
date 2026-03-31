@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from vessel_detection.chip_cache import load_chip_npz, save_chip_npz
+from aquaforge.chip_cache import load_chip_npz, save_chip_npz
 
 
 class TestChipCache(unittest.TestCase):

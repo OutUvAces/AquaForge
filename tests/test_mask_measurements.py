@@ -5,11 +5,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from vessel_detection.mask_measurements import mask_oriented_dimensions_m
+from aquaforge.mask_measurements import mask_oriented_dimensions_m
 
 
 class TestMaskOrientedDimensions(unittest.TestCase):
-    @patch("vessel_detection.mask_measurements.ground_meters_per_pixel_at_cr")
+    @patch("aquaforge.mask_measurements.ground_meters_per_pixel_at_cr")
     def test_rectangle_100px_ten_m_gsd(self, mock_gsd: MagicMock) -> None:
         mock_gsd.return_value = (10.0, 10.0)
         poly = [(0.0, 0.0), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)]

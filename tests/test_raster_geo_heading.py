@@ -5,8 +5,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from vessel_detection.raster_geo import heading_to_pixel_direction_col_row
-from vessel_detection.review_card_export import _chip_rotation_deg_ccw_heading_north_up
+from aquaforge.raster_geo import heading_to_pixel_direction_col_row
+from aquaforge.review_card_export import _chip_rotation_deg_ccw_heading_north_up
 
 
 class TestHeadingPixelDirection(unittest.TestCase):

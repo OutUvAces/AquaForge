@@ -1,7 +1,7 @@
 # Training image: mount host ``data/`` with labels + JP2s, or copy JSONL + scenes into the image.
 # Example:
-#   docker build -f docker/training/Dockerfile -t vessel-detection-train .
-#   docker run --rm -v %cd%/data:/app/data vessel-detection-train
+#   docker build -f docker/training/Dockerfile -t aquaforge-train .
+#   docker run --rm -v %cd%/data:/app/data aquaforge-train
 
 FROM python:3.12-slim
 
@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY requirements-ml.txt .
 RUN pip install --no-cache-dir -r requirements-ml.txt
 
-COPY vessel_detection ./vessel_detection
+COPY aquaforge ./aquaforge
 COPY scripts ./scripts
 
 ENV PYTHONPATH=/app

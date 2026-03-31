@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from vessel_detection.cdse import get_access_token, load_env
-from vessel_detection.s2_download import download_scl_for_local_tci
+from aquaforge.cdse import get_access_token, load_env
+from aquaforge.s2_download import download_scl_for_local_tci
 
 
 def main() -> None:

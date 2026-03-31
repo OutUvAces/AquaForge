@@ -64,12 +64,12 @@ def main() -> None:
         "--teacher-max-samples",
         type=int,
         default=0,
-        help="Reserved: ensemble distillation hooks in vessel_detection.aquaforge.distill (0 = off).",
+        help="Reserved: ensemble distillation hooks in aquaforge.unified.distill (0 = off).",
     )
     args = ap.parse_args()
     if int(args.teacher_max_samples) > 0:
         print(
-            "Note: --teacher-max-samples > 0 reserved; use aquaforge.distill in a notebook or "
+            "Note: --teacher-max-samples > 0 reserved; use aquaforge.unified.distill in a notebook or "
             "extend this script to align batch indices with JSONL rows.",
             flush=True,
         )
@@ -81,19 +81,19 @@ def main() -> None:
         print("Install requirements-ml.txt (torch).", file=sys.stderr)
         raise SystemExit(1) from e
 
-    from vessel_detection.aquaforge.constants import AQUAFORGE_FORMAT_VERSION, NUM_LANDMARKS
-    from vessel_detection.aquaforge.dataset import (
+    from aquaforge.unified.constants import AQUAFORGE_FORMAT_VERSION, NUM_LANDMARKS
+    from aquaforge.unified.dataset import (
         AquaForgeSample,
         build_training_row,
         collate_batch,
         iter_aquaforge_samples,
     )
-    from vessel_detection.aquaforge.losses import aquaforge_joint_loss
-    from vessel_detection.aquaforge.model import (
+    from aquaforge.unified.losses import aquaforge_joint_loss
+    from aquaforge.unified.model import (
         AquaForgeMultiTask,
         load_partial_yolo_encoder,
     )
-    from vessel_detection.labels import default_labels_path
+    from aquaforge.labels import default_labels_path
 
     project_root = Path(args.project_root).resolve()
     jp = args.jsonl or default_labels_path(project_root)

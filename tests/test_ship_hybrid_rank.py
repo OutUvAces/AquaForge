@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vessel_detection.ship_chip_mlp import rank_candidates_hybrid
+from aquaforge.ship_chip_mlp import rank_candidates_hybrid
 
 
 class MockLR:
@@ -26,8 +26,8 @@ class MockBundle:
 
 
 class TestHybridRank(unittest.TestCase):
-    @patch("vessel_detection.ship_chip_mlp.vessel_proba_chip_mlp")
-    @patch("vessel_detection.training_data.extract_crop_features")
+    @patch("aquaforge.ship_chip_mlp.vessel_proba_chip_mlp")
+    @patch("aquaforge.training_data.extract_crop_features")
     def test_fused_prefers_high_both(self, mock_ex, mock_mlp):
         mock_ex.side_effect = lambda _p, cx, _cy: np.array(
             [float(cx), 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64

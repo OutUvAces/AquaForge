@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.s2_download import image_acquisition_display_utc_from_tci_filename
+from aquaforge.s2_download import image_acquisition_display_utc_from_tci_filename
 
 
 class TestImageAcquisitionFromFilename(unittest.TestCase):

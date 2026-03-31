@@ -2,7 +2,7 @@
 """
 Compare pose ONNX inference **with vs without** dynamic INT8 quantization (CPU).
 
-Runs :func:`vessel_detection.shipstructure_adapter.try_predict_keypoints_chip` in each mode
+Runs :func:`aquaforge.shipstructure_adapter.try_predict_keypoints_chip` in each mode
 (clears ORT session cache between). Reports mean timing and max absolute heading delta when
 bow/stern indices yield a geodesic heading.
 
@@ -52,9 +52,9 @@ def main() -> int:
         print(f"Missing TCI: {tci_p}", file=sys.stderr)
         return 1
 
-    from vessel_detection.detection_config import KeypointsSection
-    from vessel_detection.onnx_session_cache import clear_ort_session_cache
-    from vessel_detection.shipstructure_adapter import (
+    from aquaforge.detection_config import KeypointsSection
+    from aquaforge.onnx_session_cache import clear_ort_session_cache
+    from aquaforge.shipstructure_adapter import (
         heading_deg_bow_to_stern,
         try_predict_keypoints_chip,
     )
@@ -125,7 +125,7 @@ def main() -> int:
     print(f"Mean inference ms (quant): {m_q:.2f}", flush=True)
     print(f"Speedup (float ms / quant ms): {speedup:.2f}x", flush=True)
     if h_f32 is not None and h_q is not None:
-        from vessel_detection.evaluation import angular_error_deg
+        from aquaforge.evaluation import angular_error_deg
 
         d = angular_error_deg(h_f32, h_q)
         print(f"Heading (bow-stern geodesic) float: {h_f32:.2f} deg", flush=True)

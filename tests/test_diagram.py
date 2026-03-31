@@ -17,7 +17,7 @@ class TestDiagram(unittest.TestCase):
             self.skipTest("PIL not installed")
 
         try:
-            from vessel_detection.diagram import save_wake_diagram
+            from aquaforge.diagram import save_wake_diagram
         except ImportError:
             self.skipTest("diagram imports failed")
 

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vessel_detection.vessel_heading import (
+from aquaforge.vessel_heading import (
     heading_degrees_from_keel_midpoints,
     keel_midpoints_fullres_from_quad,
 )
@@ -29,7 +29,7 @@ class TestKeelMidpoints(unittest.TestCase):
             _ = raster_path
             return float(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
 
-        with patch("vessel_detection.pixels.distance_meters", side_effect=_dm):
+        with patch("aquaforge.pixels.distance_meters", side_effect=_dm):
             ma, mb = keel_midpoints_fullres_from_quad(
                 quad, col_off=10, row_off=5, raster_path=fake_path
             )
@@ -45,7 +45,7 @@ class TestHeadingDisambiguation(unittest.TestCase):
     def test_bow_stern_flips_when_dot_negative(self) -> None:
         fake_path = Path("/nonexistent/fake.jp2")
         with patch(
-            "vessel_detection.vessel_heading.geodesic_bearing_deg",
+            "aquaforge.vessel_heading.geodesic_bearing_deg",
             return_value=90.0,
         ) as mock_bear:
             h, alt, src = heading_degrees_from_keel_midpoints(

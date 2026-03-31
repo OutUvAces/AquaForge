@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from vessel_detection.recompute_label_outline_centers import (
+from aquaforge.recompute_label_outline_centers import (
     record_eligible_for_outline_center_patch,
 )
 

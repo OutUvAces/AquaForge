@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from vessel_detection.review_schema import (
+from aquaforge.review_schema import (
     BUNDLE_FUSED_DECISION_THRESHOLD,
     BUNDLE_FUSED_W_LR,
     BUNDLE_FUSED_W_MLP,

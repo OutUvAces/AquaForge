@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from vessel_detection.canvas_quad import (
+from aquaforge.canvas_quad import (
     canvas_dimensions_for_image,
     canvas_json_has_shapes,
     map_canvas_quad_to_crop,

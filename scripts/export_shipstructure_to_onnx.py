@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ShipStructure / MMPose → ONNX helpers for Vessel-Detector keypoint inference.
+ShipStructure / MMPose → ONNX helpers for AquaForge keypoint inference.
 
 This script does **not** vendor the ShipStructure repo. It provides:
-  * ``instructions`` — how to export and wire ONNX for :mod:`vessel_detection.shipstructure_adapter`
+  * ``instructions`` — how to export and wire ONNX for :mod:`aquaforge.shipstructure_adapter`
   * ``print-snippet`` — a **template** ``torch.onnx.export`` block you paste into your training env
   * ``validate-chip`` — run ONNX on one TCI chip and print joints + bow/stern heading (needs onnxruntime)
 
@@ -15,7 +15,7 @@ output order (0-based).
 
 References:
   * https://github.com/vsislab/ShipStructure
-  * ONNX I/O contract: :func:`vessel_detection.shipstructure_adapter.parse_pose_onnx_output`
+  * ONNX I/O contract: :func:`aquaforge.shipstructure_adapter.parse_pose_onnx_output`
 
 Examples:
   py -3 scripts/export_shipstructure_to_onnx.py instructions
@@ -40,9 +40,9 @@ def cmd_instructions() -> None:
     # ASCII-only so ``instructions`` works on Windows consoles (cp1252).
     print(
         """
-=== ShipStructure / MMPose -> ONNX for Vessel-Detector ===
+=== ShipStructure / MMPose -> ONNX for AquaForge ===
 
-1) Environment (separate from minimal vessel-detector venv is OK)
+1) Environment (separate from minimal AquaForge venv is OK)
    - Install MMPose / mmcv matching the ShipStructure README.
    - Train or obtain a checkpoint (.pth) for top-down pose on ship chips.
 
@@ -65,7 +65,7 @@ def cmd_instructions() -> None:
      print joint indices from validate-chip and compare to labeled bow/stern on screen.
 
 4) Wire into the app
-   - Copy vessel_detection/config/detection.example.yaml -> data/config/detection.yaml
+   - Copy aquaforge/config/detection.example.yaml -> data/config/detection.yaml
    - Set keypoints.enabled: true, external_onnx_path, num_keypoints, onnx_input_size,
      bow_index, stern_index, output_layout.
 
@@ -97,7 +97,7 @@ torch.onnx.export(
     input_names=["input"],
     output_names=["pose_out"],  # rename to match your forward; adapter uses outputs[0]
     opset_version={opset},
-    dynamic_axes=None,  # fixed input size recommended for vessel_detection adapter
+    dynamic_axes=None,  # fixed input size recommended for aquaforge adapter
     do_constant_folding=True,
 )
 # Then inspect ONNX output shape in Netron and set detection.yaml output_layout (nk3/nk2/flat_xyc).
@@ -119,8 +119,8 @@ def cmd_validate_chip(args: argparse.Namespace) -> int:
         print(f"Missing TCI: {tci_p}", file=sys.stderr)
         return 1
 
-    from vessel_detection.detection_config import KeypointsSection
-    from vessel_detection.shipstructure_adapter import (
+    from aquaforge.detection_config import KeypointsSection
+    from aquaforge.shipstructure_adapter import (
         heading_deg_bow_to_stern,
         try_predict_keypoints_chip,
     )
@@ -172,7 +172,7 @@ def cmd_labels_mmpose_guide() -> None:
 === JSONL review labels -> MMPose / ShipStructure (SLAD-style K=20) ===
 
 Your app stores bow/stern and optional dimension markers on vessel_size_feedback rows and
-point classes on standard review rows (see vessel_detection.labels and review_schema).
+point classes on standard review rows (see aquaforge.labels and review_schema).
 
 This repo does NOT write COCO/MMPose JSON for you. Use this outline in a small script or
 notebook (run next to your JSONL + JP2s):
@@ -206,7 +206,7 @@ notebook (run next to your JSONL + JP2s):
    py -3 scripts/export_shipstructure_to_onnx.py validate-chip --onnx ... --tci ... --cx ... --cy ...
 
 6) Training label QA in-app
-   - vessel_detection.training_label_review_ui: open saved JSONL rows, edit markers, re-save.
+   - aquaforge.training_label_review_ui: open saved JSONL rows, edit markers, re-save.
    Use that loop to fix bow/stern swaps before exporting a training manifest.
 
 See README "Fine-tuning keypoints from review labels" for the end-to-end loop.
