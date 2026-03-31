@@ -156,8 +156,9 @@ def main() -> None:
         print(
             "PyTorch is not installed for this Python executable.\n"
             f"  Interpreter: {sys.executable}\n"
-            "  Fix: run (same command you use to start Streamlit):\n"
-            f"    \"{sys.executable}\" -m pip install -r requirements-ml.txt\n",
+            f"  Python: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\n"
+            "  Fix: pip install -r requirements-ml.txt (same Python as Streamlit).\n"
+            "  If pip finds no torch wheel: use Python 3.12 (64-bit) in a venv — see requirements-ml.txt header.\n",
             file=sys.stderr,
         )
         raise SystemExit(11) from e

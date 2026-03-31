@@ -1,5 +1,9 @@
 # Optional: marine YOLO + HF weights (torch). Core labeling/review works without this file.
-# Install: pip install -r requirements-ml.txt
+# Install (from project root):  py -3 -m pip install -r requirements-ml.txt
+#
+# Supported: Python 3.10–3.12 (recommended). 3.13+ may work when PyTorch publishes wheels.
+# If pip cannot find "torch" for your Python, install Python 3.12 (64-bit), create a venv,
+# then pip install -r requirements.txt and -r requirements-ml.txt, and run Streamlit with that venv.
 
 torch>=2.1.0
 torchvision>=0.16.0

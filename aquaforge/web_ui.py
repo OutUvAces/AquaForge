@@ -855,6 +855,44 @@ def _streamlit_torch_installed() -> bool:
     return True
 
 
+def _torch_install_help_markdown() -> str:
+    """
+    Shown when PyTorch is missing. Warns on very new CPython: wheels often lag (e.g. 3.14).
+    """
+    v = sys.version_info
+    lines = [
+        f"**Install** (project folder in terminal):",
+        f"`{sys.executable} -m pip install -r requirements-ml.txt`",
+        "",
+        "Then **restart Streamlit** with the same Python.",
+    ]
+    if v.major == 3 and v.minor >= 14:
+        lines.extend(
+            [
+                "",
+                "**If `pip` cannot install `torch`:** PyTorch usually does not ship wheels for the newest "
+                "Python yet. Use **Python 3.12 (64-bit)** from https://www.python.org/downloads/ , then:",
+                "",
+                "1. `cd` to this project",
+                "2. `py -3.12 -m venv .venv`",
+                "3. `.venv\\Scripts\\activate`",
+                "4. `python -m pip install -r requirements.txt`",
+                "5. `python -m pip install -r requirements-ml.txt`",
+                "6. `python -m streamlit run app.py`",
+                "",
+                f"_Your current interpreter is Python {v.major}.{v.minor}._",
+            ]
+        )
+    elif v.major == 3 and v.minor >= 13:
+        lines.extend(
+            [
+                "",
+                "**If `torch` fails to install**, try **Python 3.12** in a fresh venv (wheels are most reliable there).",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def _count_aquaforge_training_rows(labels_path: Path, project_root: Path) -> int:
     """Rows :func:`iter_aquaforge_samples` would use (vessel + markers / vessel_size_feedback)."""
     if not labels_path.is_file():
@@ -870,9 +908,7 @@ def _explain_aquaforge_train_failure(code: int, stderr_txt: str, stdout_txt: str
     if code == 11 or "AQUAFORGE_EXIT:missing_torch" in blob:
         return (
             "**PyTorch is not installed** for the Python that runs training.\n\n"
-            f"This Streamlit server uses:\n`{sys.executable}`\n\n"
-            "Install into the **same** environment, then restart the app:\n\n"
-            f"`{sys.executable} -m pip install -r requirements-ml.txt`"
+            + _torch_install_help_markdown()
         )
     if code == 12 or "AQUAFORGE_EXIT:insufficient_rows" in blob:
         return (
@@ -936,8 +972,8 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
     _n_af = _count_aquaforge_training_rows(labels_path, project_root)
     if not _torch_ok:
         st.warning(
-            f"**PyTorch missing** in this app (`{sys.executable}`). Install: "
-            f"`{sys.executable} -m pip install -r requirements-ml.txt` then restart Streamlit."
+            f"**PyTorch missing** — Streamlit is using:\n`{sys.executable}`\n\n"
+            + _torch_install_help_markdown()
         )
     elif labels_path.is_file() and _n_af < 2:
         st.warning(
@@ -1004,9 +1040,9 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
     _n_af = _count_aquaforge_training_rows(labels_path, project_root)
     if not _torch_ok:
         st.warning(
-            f"**Install PyTorch first** — this app runs as:\n`{sys.executable}`\n\n"
-            f"Run in a terminal:\n`{sys.executable} -m pip install -r requirements-ml.txt`\n\n"
-            "Then **restart Streamlit** so training uses the same interpreter."
+            "**Install PyTorch first** — this app runs as:\n"
+            f"`{sys.executable}`\n\n"
+            + _torch_install_help_markdown()
         )
     elif not labels_path.is_file():
         st.info("No labels file yet — save reviews to create it.")
