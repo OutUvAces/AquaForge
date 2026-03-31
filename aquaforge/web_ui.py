@@ -163,7 +163,11 @@ DEFAULT_DATETIME = "2024-06-01T00:00:00Z/2024-06-15T23:59:59Z"
 MIN_OPEN_WATER_FRACTION = 0.01
 REVIEW_CHIP_TARGET_SIDE_M = 1000.0
 REVIEW_LOCATOR_TARGET_SIDE_M = 10000.0
-CHIP_DISPLAY_PX = 540
+# Close-up (main focus) vs smaller hull preview / map column.
+CHIP_DISPLAY_MAIN = 656
+CHIP_DISPLAY_SIDE = 288
+# Back-compat: some helpers still reference one name for letterboxing.
+CHIP_DISPLAY_PX = CHIP_DISPLAY_MAIN
 OVERVIEW_MOSAIC_DISPLAY_W = 1040
 DETECTION_POOL_MIN = 32
 DETECTION_POOL_MULT = 6
@@ -282,7 +286,7 @@ def _render_hero() -> None:
         unsafe_allow_html=True,
     )
     st.caption(
-        "← Open the **sidebar** only when you need downloads, exports, re-sort training, or duplicate search."
+        "← Sidebar: downloads, exports, how spots are found, re-sort training, duplicate search."
     )
     # Embedded training UI (session state): ``st.switch_page("pages/...")`` is unreliable
     # when ``PagesManager.get_pages()`` only lists the main script (Streamlit v2-style).
@@ -827,6 +831,64 @@ def _session_init() -> None:
         st.session_state.catalog_items = []
 
 
+def _sidebar_spot_finding_settings() -> None:
+    """
+    Detector queue limits and mask path — lives in the sidebar so the main column stays calm.
+    Widget keys must stay stable for ``Refresh`` / overview logic.
+    """
+    with st.expander("How spots are found", expanded=False):
+        st.caption(
+            "Looks for bright patches on **open water** using your land/water mask. "
+            "You usually do not need to change this."
+        )
+        st.slider(
+            "Scan: faster ↔ more detail (higher = faster)",
+            4,
+            12,
+            4,
+            key="webui_ds_factor",
+            help="Lower number = slower, may catch fainter spots.",
+        )
+        st.slider(
+            "How many spots to list at once",
+            8,
+            DEFAULT_OVERVIEW_MAX_CANDIDATES,
+            64,
+            key="webui_max_k",
+            help="After **Refresh**, at most this many spots stay in the list.",
+        )
+        st.text_input(
+            "Use a different mask file (optional)",
+            value="",
+            key="webui_scl_path",
+            placeholder="path to …SCL…jp2",
+        )
+        with st.expander("Where detection settings live", expanded=False):
+            _det_ui = load_detection_settings(ROOT)
+            ex_p = example_detection_yaml_path()
+            st.caption(
+                f"Current file mode: **`{_det_ui.backend}`**. Example copy: **`{ex_p}`** → **`data/config/detection.yaml`**. "
+                "Richer drawings need **`pip install -r requirements-ml.txt`**."
+            )
+        st.markdown("---")
+        st.caption(
+            "You can hide repeat **empty-sea** locations using an old helper file; "
+            "newer workflow: **Exports** → repeated-vessel clusters."
+        )
+        st.checkbox(
+            "Hide spots in sea cells that are usually empty",
+            value=True,
+            key="webui_static_sea_suppress",
+        )
+        st.number_input(
+            "How many past saves count as “usually empty”",
+            min_value=1,
+            max_value=25,
+            value=3,
+            key="webui_static_sea_min",
+        )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="AquaForge",
@@ -852,8 +914,9 @@ def main() -> None:
         return
 
     with st.sidebar:
-        st.markdown("##### Extra tools")
-        st.caption("Everything here is optional.")
+        st.markdown("##### Sidebar")
+        st.caption("Everything here is optional. The main page is for reviewing spots.")
+        _sidebar_spot_finding_settings()
         with st.expander("Satellite download", expanded=False):
             _render_catalog_panel()
         _ranking_models_expander(labels_path)
@@ -870,8 +933,8 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    st.markdown("## This scene")
-    st.caption("Choose the file below, then **Refresh** to fill the list of spots.")
+    st.markdown("## Your image")
+    st.caption("Pick the satellite file, then **Refresh** to load spots to review.")
 
     file_help = "Which scene to work on."
     col_scene, col_ref = st.columns([5, 1])
@@ -927,58 +990,11 @@ def main() -> None:
         else:
             st.caption("Add `.env` credentials or copy an SCL JP2 next to the TCI.")
 
-    with st.expander("Finding spots (optional)", expanded=False):
-        st.caption(
-            "Uses water + land mask. Lower **Speed ↔ detail** = slower, may catch smaller glints."
-        )
-        ds_factor = st.slider(
-            "Speed ↔ detail (higher = faster)",
-            4,
-            12,
-            4,
-            key="webui_ds_factor",
-            help="Divides image size for scanning. Try **4** for best detail.",
-        )
-        max_k = st.slider(
-            "Max spots in the queue",
-            8,
-            DEFAULT_OVERVIEW_MAX_CANDIDATES,
-            64,
-            key="webui_max_k",
-            help="How many unlabeled spots to keep after **Refresh**.",
-        )
-        scl_str = st.text_input(
-            "Custom mask file (optional)",
-            value="",
-            key="webui_scl_path",
-            placeholder="*_SCL_20m.jp2 path",
-        )
-        with st.expander("Detection settings file", expanded=False):
-            _det_ui = load_detection_settings(ROOT)
-            ex_p = example_detection_yaml_path()
-            st.caption(
-                f"Mode: **`{_det_ui.backend}`**. Copy **`{ex_p}`** → **`data/config/detection.yaml`**. "
-                "Extra overlays: **`pip install -r requirements-ml.txt`**."
-            )
-        st.markdown("---")
-        st.caption(
-            "**Static sea:** old witness file can hide repeat locations. Prefer **Sidebar → Exports** → **Likely static vessels**."
-        )
-        st.checkbox(
-            "Hide picks in “always empty” sea cells",
-            value=True,
-            key="webui_static_sea_suppress",
-        )
-        st.number_input(
-            "Min witness rows per cell to suppress",
-            min_value=1,
-            max_value=25,
-            value=3,
-            key="webui_static_sea_min",
-        )
-
     tci_path = Path(choice)
-    scl_opt = Path(scl_str.strip()) if scl_str.strip() else None
+    ds_factor = int(st.session_state.get("webui_ds_factor", 4))
+    max_k = int(st.session_state.get("webui_max_k", 64))
+    _scl_raw = str(st.session_state.get("webui_scl_path", "") or "").strip()
+    scl_opt = Path(_scl_raw) if _scl_raw else None
     scene_key = f"{tci_path.resolve()}|{scl_opt or ''}"
     if st.session_state.get("_pending_scene_key") != scene_key:
         st.session_state.pending_locator_candidates = []
@@ -1432,7 +1448,7 @@ def _render_review_deck(
             if _sc_prev == LOCATOR_MANUAL_SCORE
             else ""
         )
-        st.caption(f"**Spot {idx + 1}** of **{n}**{_hint} — then pick a label at the bottom.")
+        st.caption(f"**Spot {idx + 1}** of **{n}**{_hint}. Scroll down to **save**.")
     with nc:
         if st.button(
             "Next →",
@@ -1484,7 +1500,7 @@ def _render_review_deck(
     )
     p_lr, p_mlp = proba_pair_at(clf_disp, bundle_disp, Path(tci_loaded), cx, cy)
     p_comb = combined_vessel_proba_with_bundle(p_lr, p_mlp, bundle_disp)
-    with st.expander("Is this probably a ship? (numbers)", expanded=False):
+    with st.expander("Scores from your sort models (optional)", expanded=False):
         if p_comb is not None:
             cols_p = st.columns(
                 min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0))
@@ -1527,7 +1543,7 @@ def _render_review_deck(
     _sota_allow = True
     if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
         _sota_allow = st.checkbox(
-            "Run extra overlays (uses your detection settings)",
+            "Allow automatic drawings on this spot",
             key=f"{spot_k}_sota_neural_allow",
         )
 
@@ -1594,7 +1610,7 @@ def _render_review_deck(
             st.session_state[sota_k + "_sig"] = sota_sig
         sota = st.session_state.get(sota_k, {}) or {}
     if sota_inference_requested(det_settings) and sota:
-        with st.expander("Mask, size & directions", expanded=False):
+        with st.expander("Sizes and directions (optional)", expanded=False):
             if clf_disp is not None or bundle_disp is not None:
                 _rs = rank_score_at_point(
                     ROOT,
@@ -1840,17 +1856,28 @@ def _render_review_deck(
     if sel_mk not in st.session_state:
         st.session_state[sel_mk] = MARKER_ROLES[0]
 
-    # Performance: defer heavy polygon/keypoint/wake drawing until the user opts in (YAML-gated).
-    _draw_full_sota_vis = True
-    if (
-        det_settings.ui_lazy_sota_overlays
-        and sota_inference_requested(det_settings)
-        and sota
-    ):
-        _draw_full_sota_vis = st.checkbox(
-            "Draw mask, keypoints & wake on close-up",
-            key=f"{spot_k}_sota_overlay_lazy",
-        )
+    # Plain-language overlay toggles (defaults on; YAML “lazy” starts all off until you turn them on).
+    _lazy_ov = bool(getattr(det_settings, "ui_lazy_sota_overlays", False))
+    if sota_inference_requested(det_settings):
+        _ov0 = not _lazy_ov
+        for _xk in ("vd_ov_hull", "vd_ov_mark", "vd_ov_dir", "vd_ov_wake"):
+            if _xk not in st.session_state:
+                st.session_state[_xk] = _ov0
+        st.caption("On the big picture below:")
+        _tc1, _tc2, _tc3, _tc4 = st.columns(4)
+        with _tc1:
+            st.toggle("Ship outline", key="vd_ov_hull")
+        with _tc2:
+            st.toggle("Point markers", key="vd_ov_mark")
+        with _tc3:
+            st.toggle("Direction arrow", key="vd_ov_dir")
+        with _tc4:
+            st.toggle("Wake line", key="vd_ov_wake")
+
+    _show_hull = bool(st.session_state.get("vd_ov_hull", True))
+    _show_mark = bool(st.session_state.get("vd_ov_mark", True))
+    _show_dir = bool(st.session_state.get("vd_ov_dir", True))
+    _show_wake = bool(st.session_state.get("vd_ov_wake", True))
 
     spot_vis = annotate_spot_detection_center(
         spot_rgb,
@@ -1861,7 +1888,9 @@ def _render_review_deck(
         meters_per_pixel=gavg,
         draw_footprint_outline=False,
     )
-    if _draw_full_sota_vis and sota_inference_requested(det_settings) and sota:
+    if sota_inference_requested(det_settings) and sota and (
+        _show_hull or _show_mark or _show_wake
+    ):
         _poly = None
         raw_poly = sota.get("yolo_polygon_crop")
         if isinstance(raw_poly, list) and len(raw_poly) >= 3:
@@ -1900,13 +1929,17 @@ def _render_review_deck(
                 bow_stern_segment_crop=_bs,
                 bow_stern_min_confidence=_bs_conf,
                 wake_segment_crop=_wk,
+                draw_hull_outline=_show_hull,
+                draw_keypoints=_show_mark,
+                draw_bow_stern=_show_mark,
+                draw_wake=_show_wake,
             )
     mk_draw2 = st.session_state.get(dim_key, [])
     if not isinstance(mk_draw2, list):
         mk_draw2 = []
     spot_ui = draw_markers_on_rgb(spot_vis, mk_draw2) if mk_draw2 else spot_vis
     if (
-        _draw_full_sota_vis
+        _show_dir
         and sota_inference_requested(det_settings)
         and isinstance(sota, dict)
         and sota
@@ -1930,41 +1963,41 @@ def _render_review_deck(
         if _arrow_h is not None:
             spot_ui = overlay_heading_arrow_north(spot_ui, _arrow_h)
 
-    chip_side = CHIP_DISPLAY_PX
+    side_px = CHIP_DISPLAY_SIDE
+    main_px = CHIP_DISPLAY_MAIN
     if extent_preview1 is not None:
-        extent_sq1, _ = letterbox_rgb_to_square(extent_preview1, chip_side)
+        extent_sq1, _ = letterbox_rgb_to_square(extent_preview1, side_px)
     else:
-        extent_sq1 = np.full((chip_side, chip_side, 3), 36, dtype=np.uint8)
+        extent_sq1 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
     if extent_preview2 is not None:
-        extent_sq2, _ = letterbox_rgb_to_square(extent_preview2, chip_side)
+        extent_sq2, _ = letterbox_rgb_to_square(extent_preview2, side_px)
     else:
-        extent_sq2 = np.full((chip_side, chip_side, 3), 36, dtype=np.uint8)
-    spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, chip_side)
-    loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, chip_side)
+        extent_sq2 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
+    spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
+    loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, side_px)
 
-    st.caption(
-        "Smaller hull preview · **Large close-up** (click to mark) · Map (click to add a spot)"
-    )
-    st.markdown("##### Hull · Close-up · Map")
-    col_extent, col_spot, col_loc = st.columns([2, 3.15, 2])
+    st.markdown("##### Hull shape (small preview)")
+    if is_twin:
+        _exr1, _exr2 = st.columns(2)
+        with _exr1:
+            st.image(extent_sq1, width=side_px)
+        with _exr2:
+            st.image(extent_sq2, width=side_px)
+    else:
+        st.image(extent_sq1, width=side_px)
+
+    st.markdown("##### Close-up — click to place markers")
+    st.caption("Wide map is on the right — click there to queue another location.")
+    col_spot, col_loc = st.columns([2.45, 1])
     click_spot_dim = None
     click_loc = None
-    with col_extent:
-        if is_twin:
-            ex_a, ex_b = st.columns(2)
-            with ex_a:
-                st.image(extent_sq1, width=chip_side)
-            with ex_b:
-                st.image(extent_sq2, width=chip_side)
-        else:
-            st.image(extent_sq1, width=chip_side)
     with col_spot:
         click_spot_dim = streamlit_image_coordinates(
             spot_sq,
             key=f"spot_dim_{spot_k}",
-            width=chip_side,
-            height=chip_side,
-            use_column_width=False,
+            width=main_px,
+            height=main_px,
+            use_container_width=False,
             cursor="crosshair",
         )
     with col_loc:
@@ -1977,9 +2010,9 @@ def _render_review_deck(
         click_loc = streamlit_image_coordinates(
             loc_sq,
             key=f"loc_vessel_{loc_comp_key}",
-            width=chip_side,
-            height=chip_side,
-            use_column_width=False,
+            width=side_px,
+            height=side_px,
+            use_container_width=False,
             cursor="crosshair",
         )
 
@@ -2315,8 +2348,7 @@ def _render_review_deck(
                             break
                     st.session_state.idx = new_idx
                     st.session_state["_vd_locator_queued_flash"] = (
-                        f"Queued ({cx_m:.0f}, {cy_m:.0f}) px — green ring on locator; "
-                        "still on this detection; choose a category when ready."
+                        f"Added to the list — green ring on the small map. Pick a **Save** option when ready."
                     )
                     st.rerun()
                 elif skip_loc == "labeled":
@@ -2329,7 +2361,7 @@ def _render_review_deck(
                         "**Already in the pending queue** — green ring on locator (same click tolerance)."
                     )
 
-    st.markdown("##### How sure? (skip if you chose Unsure)")
+    st.markdown("##### How sure are you? (skip if you tapped **Unsure** above)")
     conf_k = f"label_conf_{spot_k}"
     if conf_k not in st.session_state:
         st.session_state[conf_k] = "high"
@@ -2360,7 +2392,8 @@ def _render_review_deck(
             st.session_state[conf_k] = "low"
             st.rerun()
 
-    st.markdown("##### Save")
+    st.divider()
+    st.markdown("##### Save your answer")
 
     all_lbl = [
         "vessel",
@@ -2374,7 +2407,11 @@ def _render_review_deck(
     for i, ckey in enumerate(all_lbl):
         with row_l[i]:
             if ckey == "_skip":
-                if st.button("Skip ▷", key="skip", use_container_width=True):
+                if st.button(
+                    "Skip ▷",
+                    key=f"vd_skip_{spot_k}_{idx}",
+                    use_container_width=True,
+                ):
                     st.session_state.pending_locator_candidates = remove_pending_near(
                         st.session_state.pending_locator_candidates, cx, cy
                     )

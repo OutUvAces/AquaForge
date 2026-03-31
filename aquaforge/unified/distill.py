@@ -80,8 +80,9 @@ def self_training_trust_from_outputs(
 
 def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     """
-    Scalar **epistemic-style** uncertainty from AquaForge’s own logits (0 ≈ confident, ~1 ≈ unsure).
-    We blend vessel margin, heading angular margin proxy, and seg entropy — our heuristic, not MC dropout.
+    Single **uncertainty** score from AquaForge’s own tensors (0 ≈ sure, ~1 ≈ unsure).
+    Blends vessel confidence, heading direction, hull pixel “busy-ness”, optional dot-map busy-ness,
+    and heading confidence — tuned for self-training filters, not MC dropout.
     """
     import torch
     import torch.nn.functional as F

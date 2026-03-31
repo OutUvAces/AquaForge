@@ -64,14 +64,20 @@ def build_kp_heat_targets(
 
 def geometry_scene_cohesion_multiplier(seg_gt: torch.Tensor) -> float:
     """
-    Up-weight geometry tasks when the GT hull covers a **small** fraction of the chip (small S2 vessels).
-    Classification stays unscaled.
+    Up-weight geometry when the hull is **small vs this batch** (median + mean coverage set the
+    reference). Classification stays unscaled — AquaForge batch-relative “small ship” cue.
     """
     with torch.no_grad():
-        cov = float(seg_gt.clamp(0, 1).mean().item())
-    ref = 0.062
-    x = min(1.0, cov / max(ref, 1e-5))
-    return float(1.0 + 0.24 * max(0.0, 1.0 - x))
+        t = seg_gt.clamp(0, 1)
+        b = int(t.shape[0])
+        if b < 1:
+            return 1.0
+        covs = t.view(b, -1).mean(dim=-1)
+        med = float(covs.median().item())
+        mean_cov = float(t.mean().item())
+    ref = max(0.022, min(0.095, 0.52 * med + 0.48 * mean_cov))
+    x = min(1.0, mean_cov / max(ref, 1e-5))
+    return float(1.0 + 0.27 * max(0.0, 1.0 - x))
 
 
 def heading_confidence_ambiguity_multiplier(hdg: torch.Tensor) -> float:

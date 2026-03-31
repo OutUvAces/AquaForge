@@ -96,6 +96,16 @@ class TestOverlaySota(unittest.TestCase):
         )
         self.assertFalse(np.array_equal(out, rgb))
 
+    def test_draw_flags_skip_hull(self) -> None:
+        rgb = np.zeros((40, 40, 3), dtype=np.uint8) + 30
+        poly = [(5.0, 5.0), (35.0, 5.0), (35.0, 35.0), (5.0, 35.0)]
+        on = overlay_sota_on_spot_rgb(rgb.copy(), yolo_polygon_crop=poly)
+        off = overlay_sota_on_spot_rgb(
+            rgb.copy(), yolo_polygon_crop=poly, draw_hull_outline=False
+        )
+        self.assertFalse(np.array_equal(on, rgb))
+        self.assertTrue(np.array_equal(off, rgb))
+
 
 if __name__ == "__main__":
     unittest.main()

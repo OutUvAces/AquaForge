@@ -287,6 +287,7 @@ def main() -> None:
 
         total_loss = 0.0
         n_batches = 0
+        ru_epoch = 0.0
         for batch_list in dl:
             batch_dict = collate_batch(batch_list, device)
             imgs = batch_dict["imgs"]
@@ -305,6 +306,7 @@ def main() -> None:
             opt.step()
             total_loss += float(logs.get("loss_total", 0.0))
             n_batches += 1
+            ru_epoch += float(batch_dict["review_uncertainty"].mean().item())
             if balancer is not None:
                 balancer.update_from_logs(logs)
                 cov = float(batch_dict["seg"].mean().item())
@@ -351,9 +353,10 @@ def main() -> None:
 
         avg = total_loss / max(n_batches, 1)
         fr = "frozen" if arch == "yolo_unified" and epoch < freeze_n else "e2e"
+        ru_m = ru_epoch / max(n_batches, 1)
         print(
-            f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} curriculum={base_sw} backbone={fr} "
-            f"balance={'on' if use_balance else 'off'}",
+            f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} review_ui_u≈{ru_m:.3f} "
+            f"curriculum={base_sw} backbone={fr} balance={'on' if use_balance else 'off'}",
             flush=True,
         )
 

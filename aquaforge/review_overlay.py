@@ -778,6 +778,10 @@ def overlay_sota_on_spot_rgb(
     | None = None,
     bow_stern_min_confidence: float | None = None,
     wake_segment_crop: tuple[tuple[float, float], tuple[float, float]] | None = None,
+    draw_hull_outline: bool = True,
+    draw_keypoints: bool = True,
+    draw_bow_stern: bool = True,
+    draw_wake: bool = True,
 ) -> np.ndarray:
     """
     Draw ship chip overlays (crop pixels): hull outline, dots for hull points, bow-to-stern line,
@@ -792,7 +796,11 @@ def overlay_sota_on_spot_rgb(
     kp_base = (255, 0, 200)
     bow_stern_base = (120, 255, 80)
 
-    if yolo_polygon_crop and len(yolo_polygon_crop) >= 3:
+    if (
+        draw_hull_outline
+        and yolo_polygon_crop
+        and len(yolo_polygon_crop) >= 3
+    ):
         poly = [
             (float(np.clip(p[0], 0, w - 1)), float(np.clip(p[1], 0, h - 1)))
             for p in yolo_polygon_crop
@@ -800,7 +808,7 @@ def overlay_sota_on_spot_rgb(
         hull_w = max(lw, min(h, w) // 50)
         draw.polygon(poly, outline=(0, 255, 220), width=hull_w)
 
-    if keypoints_xy_conf:
+    if draw_keypoints and keypoints_xy_conf:
         # Semi-transparent disks: low-confidence joints fade (alpha + smaller radius).
         base_r = max(2, lw)
         im_rgba = im.convert("RGBA")
@@ -822,7 +830,7 @@ def overlay_sota_on_spot_rgb(
             )
         im = Image.alpha_composite(im_rgba, overlay).convert("RGB")
         draw = ImageDraw.Draw(im)
-    elif keypoints_crop:
+    elif draw_keypoints and keypoints_crop:
         r = max(2, lw)
         for x, y in keypoints_crop:
             xi = int(np.clip(round(float(x)), 0, w - 1))
@@ -831,7 +839,7 @@ def overlay_sota_on_spot_rgb(
                 [xi - r, yi - r, xi + r, yi + r], outline=kp_base, width=1
             )
 
-    if bow_stern_segment_crop is not None:
+    if draw_bow_stern and bow_stern_segment_crop is not None:
         p0, p1 = bow_stern_segment_crop
         a = (float(np.clip(p0[0], 0, w - 1)), float(np.clip(p0[1], 0, h - 1)))
         b = (float(np.clip(p1[0], 0, w - 1)), float(np.clip(p1[1], 0, h - 1)))
@@ -844,7 +852,7 @@ def overlay_sota_on_spot_rgb(
             line_col = bow_stern_base
         draw.line([a, b], fill=line_col, width=bs_lw)
 
-    if wake_segment_crop is not None:
+    if draw_wake and wake_segment_crop is not None:
         p0, p1 = wake_segment_crop
         a = (float(np.clip(p0[0], 0, w - 1)), float(np.clip(p0[1], 0, h - 1)))
         b = (float(np.clip(p1[0], 0, w - 1)), float(np.clip(p1[1], 0, h - 1)))

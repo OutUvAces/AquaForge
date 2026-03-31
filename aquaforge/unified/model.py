@@ -233,6 +233,8 @@ class AquaForgeUnifiedYOLO(nn.Module):
         )
         # Learned softmax weights over (fine, mid, coarse) for the context branch — starts near uniform.
         self.stride_harmonic_logits = nn.Parameter(torch.zeros(3))
+        # Temperature sharpens / softens the stride mixture (distinctive AquaForge knob).
+        self.harmonic_temperature = nn.Parameter(torch.tensor(1.0))
         # Mid-stride residual: adds coarse–mid structure without a second fusion path (AquaForge-only knob).
         self.mid_residual_scale = nn.Parameter(torch.tensor(0.22))
         self.fuse = _HarmonizerFuseDS(self.hidden * 2, self.hidden)
@@ -250,7 +252,8 @@ class AquaForgeUnifiedYOLO(nn.Module):
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
         up5 = F.interpolate(p5, size=target_hw, mode="nearest")
-        w = F.softmax(self.stride_harmonic_logits, dim=0)
+        tau = self.harmonic_temperature.clamp(0.38, 3.8)
+        w = F.softmax(self.stride_harmonic_logits / tau, dim=0)
         w3, w4, w5 = w[0].reshape(1, 1, 1, 1), w[1].reshape(1, 1, 1, 1), w[2].reshape(1, 1, 1, 1)
         context = w3 * p3 + w4 * up4 + w5 * up5
         base = self.fuse(torch.cat([context, p3], dim=1))
