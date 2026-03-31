@@ -27,13 +27,17 @@ Examples:
       --no-dynamic-balance
   py -3 scripts/train_aquaforge.py --pseudo-jsonl data/labels/pseudo_pool.jsonl \\
       --pseudo-per-epoch 8 --pseudo-scan-max 256
+  py -3 scripts/train_aquaforge.py --epochs 4 --batch-size 2   # quick first model (UI **Train first**)
   py -3 scripts/export_aquaforge_onnx.py --checkpoint data/models/aquaforge/aquaforge.pt
+
+By default, after saving ``aquaforge.pt``, runs ONNX export (CPU) unless ``--no-export-onnx``.
 """
 
 from __future__ import annotations
 
 import argparse
 import random
+import subprocess
 import sys
 from pathlib import Path
 
@@ -136,6 +140,11 @@ def main() -> None:
         default=192,
         help="Max pseudo chips to score per epoch; highest-trust subset is used (see take_top=pseudo-per-epoch).",
     )
+    ap.add_argument(
+        "--no-export-onnx",
+        action="store_true",
+        help="Skip automatic export_aquaforge_onnx.py after training (default: export when script exists).",
+    )
     args = ap.parse_args()
 
     try:
@@ -186,6 +195,15 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(1)
+
+    print(
+        "\n=== AquaForge training ===\n"
+        f"  labels: {jp}  (supervised chips: {len(rows)})\n"
+        f"  output: {out}\n"
+        f"  architecture: {str(args.architecture).strip().lower()}  "
+        f"imgsz={int(args.imgsz)}  epochs={int(args.epochs)}  batch={int(args.batch_size)}\n",
+        flush=True,
+    )
 
     class _DS(Dataset):  # noqa: N801
         def __init__(self, samples: list[AquaForgeSample]) -> None:
@@ -402,6 +420,7 @@ def main() -> None:
             "pseudo_per_epoch": pseudo_n,
             "pseudo_mix_weight": pseudo_w,
             "pseudo_scan_max": int(args.pseudo_scan_max),
+            "auto_export_onnx": not bool(args.no_export_onnx),
         },
     }
     if arch == "yolo_unified":
@@ -410,6 +429,28 @@ def main() -> None:
 
     torch.save({"meta": meta, "state_dict": model.state_dict()}, out)
     print(f"Wrote {out}", flush=True)
+
+    if not bool(args.no_export_onnx):
+        exp_script = project_root / "scripts" / "export_aquaforge_onnx.py"
+        if exp_script.is_file() and out.is_file():
+            print("Exporting ONNX (CPU, optional for ORT inference) …", flush=True)
+            er = subprocess.run(
+                [sys.executable, str(exp_script), "--checkpoint", str(out)],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if er.returncode == 0:
+                tail = (er.stdout or "").strip()
+                print(tail or "ONNX export finished.", flush=True)
+            else:
+                print(
+                    f"ONNX export failed (exit {er.returncode}); Streamlit can still load the .pt. "
+                    f"stderr tail:\n{(er.stderr or '')[-1800:]}",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":

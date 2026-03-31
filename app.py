@@ -6,7 +6,7 @@ then use the bookmark file ``AquaForge.url`` or http://127.0.0.1:8501
 
 **Terminal:** ``py -3 -m streamlit run app.py`` or ``run_web.bat``
 
-**Daily flow:** open a scene → review spots (outline, heading, landmarks on by default) → **Ship / Not / Unsure** saves labels → **Advanced → Retrain AquaForge** when you want a new model from those labels.
+**Daily flow:** open a scene → review spots → save labels → **Advanced → Train first AquaForge model** once if weights are missing, then **Retrain AquaForge** for longer training when you want a new model.
 
 **Main:** large close-up, **On image** toggles, **Back / Next** and save buttons. **Left:** scene + refresh; **Advanced** has retrain, downloads, exports, label fixer.
 

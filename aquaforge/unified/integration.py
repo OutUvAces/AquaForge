@@ -73,6 +73,8 @@ def run_aquaforge_spot_inference(
         "yolo_polygon_fullres": None,
         "aquaforge_heading_direct_deg": None,
         "aquaforge_wake_aux_deg": None,
+        # False until a predictor loads; UI uses this for friendly setup (not sota_warnings codes).
+        "aquaforge_model_ready": False,
     }
 
     warnings: list[str] = []
@@ -85,13 +87,15 @@ def run_aquaforge_spot_inference(
 
     pred = get_cached_aquaforge_predictor(project_root, settings)
     if pred is None:
-        warnings.append("aquaforge_weights_missing")
+        # Do not push machine codes into sota_warnings — the main UI shows a one-time friendly banner.
+        out["aquaforge_model_ready"] = False
         out["sota_warnings"] = warnings
         return out
 
     ar = pred.predict_at_candidate(tci_path, cx, cy)
     if ar is None:
         warnings.append("aquaforge_empty_chip")
+        out["aquaforge_model_ready"] = True
         out["sota_warnings"] = warnings
         return out
 
@@ -191,5 +195,6 @@ def run_aquaforge_spot_inference(
         out["heading_wake_combined_confidence"] = 0.35
         out["heading_wake_combine_source"] = "aquaforge_wake_aux"
 
+    out["aquaforge_model_ready"] = True
     out["sota_warnings"] = warnings
     return out

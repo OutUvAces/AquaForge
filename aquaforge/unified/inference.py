@@ -219,7 +219,12 @@ class AquaForgePredictor:
         )
 
 
-def _resolve_weights(project_root: Path, af: AquaForgeSection) -> Path | None:
+def resolve_aquaforge_checkpoint_path(project_root: Path, af: AquaForgeSection) -> Path | None:
+    """
+    Resolved ``.pt`` path for UI status and predictor build (YAML ``weights_path`` or default dir).
+
+    Default install layout: ``data/models/aquaforge/aquaforge.pt`` or ``best.pt``.
+    """
     if af.weights_path:
         p = Path(str(af.weights_path))
         if p.is_file():
@@ -232,7 +237,8 @@ def _resolve_weights(project_root: Path, af: AquaForgeSection) -> Path | None:
     return None
 
 
-def _resolve_onnx(project_root: Path, af: AquaForgeSection) -> Path | None:
+def resolve_aquaforge_onnx_path(project_root: Path, af: AquaForgeSection) -> Path | None:
+    """Optional ONNX next to checkpoint dir (for ORT inference when enabled in YAML)."""
     if af.onnx_path:
         p = Path(str(af.onnx_path))
         if p.is_file():
@@ -245,12 +251,17 @@ def _resolve_onnx(project_root: Path, af: AquaForgeSection) -> Path | None:
     return None
 
 
+def expected_aquaforge_checkpoint_path(project_root: Path) -> Path:
+    """Path where training writes by default (may not exist yet) — for user-facing hints."""
+    return project_root / "data" / "models" / "aquaforge" / "aquaforge.pt"
+
+
 def build_aquaforge_predictor(
     project_root: Path,
     settings: DetectionSettings,
 ) -> AquaForgePredictor | None:
     af = settings.aquaforge
-    onnx_p = _resolve_onnx(project_root, af)
+    onnx_p = resolve_aquaforge_onnx_path(project_root, af)
     if af.use_onnx_inference and onnx_p is not None:
         return AquaForgePredictor(
             torch_model=None,
@@ -258,7 +269,7 @@ def build_aquaforge_predictor(
             settings=settings,
             af=af,
         )
-    w = _resolve_weights(project_root, af)
+    w = resolve_aquaforge_checkpoint_path(project_root, af)
     if w is None:
         return None
     try:
@@ -276,7 +287,10 @@ def build_aquaforge_predictor(
             af=af,
             device=device,
         )
-    except Exception:
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("AquaForge checkpoint load failed: %s", e)
         return None
 
 

@@ -118,7 +118,9 @@ class AquaForgeSection:
     """
     Unified multi-task vessel model (segmentation + landmarks + heading + wake hint).
 
-    Weights default to ``data/models/aquaforge/aquaforge.pt``; ONNX optional for CPU EP tuning.
+    Default weight search: ``data/models/aquaforge/aquaforge.pt`` or ``best.pt`` (create via
+    Streamlit **Advanced → Train first AquaForge model** or ``scripts/train_aquaforge.py``).
+    ONNX optional for ORT inference when ``use_onnx_inference: true``.
     """
 
     weights_path: str | None = None

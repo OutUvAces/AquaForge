@@ -56,37 +56,17 @@ def get_cached_aquaforge_predictor(project_root: Path, settings: Any) -> Any | N
     Keyed by resolved weight/onnx path mtimes and ``use_onnx_inference`` flag.
     """
     from aquaforge.detection_config import aquaforge_requested
-    from aquaforge.unified.inference import build_aquaforge_predictor
+    from aquaforge.unified.inference import (
+        build_aquaforge_predictor,
+        resolve_aquaforge_checkpoint_path,
+        resolve_aquaforge_onnx_path,
+    )
 
     if not aquaforge_requested(settings):
         return None
     af = settings.aquaforge
-    from pathlib import Path as P
-
-    w_path = None
-    if af.weights_path:
-        wp = P(str(af.weights_path))
-        if wp.is_file():
-            w_path = wp
-    if w_path is None:
-        d = project_root / "data" / "models" / "aquaforge"
-        for name in ("aquaforge.pt", "best.pt"):
-            cand = d / name
-            if cand.is_file():
-                w_path = cand
-                break
-    onx_path = None
-    if af.onnx_path:
-        op = P(str(af.onnx_path))
-        if op.is_file():
-            onx_path = op
-    if onx_path is None:
-        d = project_root / "data" / "models" / "aquaforge"
-        for name in ("aquaforge.onnx", "aquaforge_quant.onnx"):
-            cand = d / name
-            if cand.is_file():
-                onx_path = cand
-                break
+    w_path = resolve_aquaforge_checkpoint_path(project_root, af)
+    onx_path = resolve_aquaforge_onnx_path(project_root, af)
     try:
         wm = int(w_path.stat().st_mtime_ns) if w_path is not None else 0
     except OSError:
@@ -103,6 +83,12 @@ def get_cached_aquaforge_predictor(project_root: Path, settings: Any) -> Any | N
             pred = build_aquaforge_predictor(project_root, settings)
             _aquaforge_predictors[key] = pred
         return _aquaforge_predictors[key]
+
+
+def clear_aquaforge_predictor_cache() -> None:
+    """Drop cached AquaForge predictors (e.g. after training writes a new ``.pt`` in Streamlit)."""
+    with _lock:
+        _aquaforge_predictors.clear()
 
 
 def warm_sota_models(project_root: Path, settings: Any) -> None:
@@ -168,7 +154,7 @@ def schedule_background_warm(project_root: Path, settings: Any) -> None:
 
 
 def clear_model_cache_for_tests() -> None:
-    """Test helper: drop cached YOLO predictors."""
+    """Test helper: drop cached YOLO and AquaForge predictors."""
     with _lock:
         _yolo_predictors.clear()
         _aquaforge_predictors.clear()

@@ -7,6 +7,37 @@ import unittest
 from aquaforge.unified.constants import LANDMARK_NAMES, NUM_LANDMARKS
 
 
+class TestAquaForgeIntegration(unittest.TestCase):
+    def test_missing_predictor_sets_ready_false_not_sota_code(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        from aquaforge.detection_config import DetectionSettings
+        from aquaforge.unified.integration import run_aquaforge_spot_inference
+
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            tci = root / "x.jp2"
+            tci.write_bytes(b"")
+            with patch(
+                "aquaforge.unified.integration.get_cached_aquaforge_predictor",
+                return_value=None,
+            ):
+                out = run_aquaforge_spot_inference(
+                    root,
+                    tci,
+                    10.0,
+                    20.0,
+                    DetectionSettings(),
+                    spot_col_off=0,
+                    spot_row_off=0,
+                )
+        self.assertFalse(out.get("aquaforge_model_ready", True))
+        sw = out.get("sota_warnings") or []
+        self.assertNotIn("aquaforge_weights_missing", sw)
+
+
 class TestReviewUIUncertaintySignal(unittest.TestCase):
     def test_coastal_and_small_vessel_hints(self) -> None:
         from aquaforge.unified.distill import coastal_scene_hint, small_vessel_length_hint

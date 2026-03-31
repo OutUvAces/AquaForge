@@ -32,8 +32,8 @@ You can be reviewing within a minute without touching YAML.
 ### Improve the model over time
 
 1. **Review regularly** — Saving labels writes JSONL (`data/labels/ship_reviews.jsonl` by default). Priority / uncertainty metadata in rows feeds the trainer.
-2. **Retrain** — Use **Advanced → Retrain AquaForge** in the UI, or `py -3 scripts/train_aquaforge.py` (same JSONL by default). Advanced CLI flags: `--teacher-per-epoch`, `--pseudo-jsonl`, etc. (see script docstring).
-3. **Deploy** — Checkpoint `data/models/aquaforge/aquaforge.pt` (or ONNX via YAML) is picked up automatically on the next app run.
+2. **First model** — If you see a banner about missing weights: save **two** vessel reviews, then **Advanced → Train first AquaForge model** (short run). Full quality: **Retrain AquaForge** or `py -3 scripts/train_aquaforge.py` (same JSONL). Training **auto-exports ONNX** unless `--no-export-onnx`.
+3. **Deploy** — Checkpoint `data/models/aquaforge/aquaforge.pt` (or ONNX via YAML) is picked up automatically; the UI clears its cache after training so overlays refresh without restarting.
 
 ---
 

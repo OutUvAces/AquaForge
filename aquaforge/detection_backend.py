@@ -4,6 +4,9 @@ Config-driven candidate ranking and per-spot detection post-processing.
 Normal installs use **AquaForge** (see :func:`aquaforge.detection_config.load_detection_settings`:
 ``force_legacy: false`` forces ``backend`` to ``aquaforge``). Legacy YOLO / ensemble paths run only
 when ``force_legacy: true`` or ``AF_FORCE_LEGACY`` is set in YAML/env.
+
+For **aquaforge**, missing weights yield empty spot overlays and ``aquaforge_model_ready: false`` in
+the SOTA dict; the Streamlit app shows how to run **Train first AquaForge model** (no legacy fallback).
 """
 
 from __future__ import annotations

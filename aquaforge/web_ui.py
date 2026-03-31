@@ -77,11 +77,18 @@ from aquaforge.detection_config import (
     sota_inference_requested,
     yolo_requested,
 )
-from aquaforge.model_manager import schedule_background_warm
+from aquaforge.model_manager import (
+    clear_aquaforge_predictor_cache,
+    schedule_background_warm,
+)
 from aquaforge.evaluation import (
     angular_error_deg,
     rank_score_at_point,
     spot_geometry_gt_from_labels,
+)
+from aquaforge.unified.inference import (
+    expected_aquaforge_checkpoint_path,
+    resolve_aquaforge_checkpoint_path,
 )
 from aquaforge.review_overlay import (
     annotate_locator_spot_outline,
@@ -839,6 +846,37 @@ def _session_init() -> None:
         st.session_state.vd_advanced_spot_hints = False
 
 
+def _subprocess_train_aquaforge(
+    project_root: Path,
+    labels_path: Path,
+    extra_args: list[str],
+) -> tuple[int, str, str]:
+    """Run ``scripts/train_aquaforge.py``; returns (exit_code, stdout_tail, stderr_tail)."""
+    script = project_root / "scripts" / "train_aquaforge.py"
+    if not script.is_file():
+        return -1, "", f"Missing {script}"
+    cmd = [
+        sys.executable,
+        str(script),
+        "--project-root",
+        str(project_root),
+        "--jsonl",
+        str(labels_path),
+        *extra_args,
+    ]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(project_root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    tail_o = (proc.stdout or "")[-12000:]
+    tail_e = (proc.stderr or "")[-12000:]
+    return int(proc.returncode), tail_o, tail_e
+
+
 def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> None:
     """
     Run scripts/train_aquaforge.py on the live review JSONL (same file append_review writes).
@@ -868,41 +906,86 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
         if not labels_path.is_file():
             st.warning("No labels file yet — save a few reviews first.")
             return
-        cmd = [
-            sys.executable,
-            str(script),
-            "--project-root",
-            str(project_root),
-            "--jsonl",
-            str(labels_path),
-        ]
         with st.status("Training AquaForge…", expanded=True) as status:
             try:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=str(project_root),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                code, out, err = _subprocess_train_aquaforge(project_root, labels_path, [])
+            except OSError as e:
+                status.update(label="Training failed to start", state="error")
+                st.error(str(e))
+                return
+            if code == 0:
+                status.update(label="Training finished", state="complete")
+                clear_aquaforge_predictor_cache()
+                if out.strip():
+                    st.code(out, language="text")
+                st.session_state["_vd_af_train_flash"] = (
+                    "AquaForge retrained — weights reloaded. ONNX export ran if dependencies allowed."
+                )
+                st.rerun()
+            else:
+                status.update(label="Training failed", state="error")
+                st.error(f"Exit code {code}")
+                if err.strip():
+                    st.code(err, language="text")
+                elif out.strip():
+                    st.code(out, language="text")
+
+
+def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path) -> None:
+    """
+    Shown when AquaForge is the active backend but no ``.pt`` is found — short first training job.
+    """
+    det = load_detection_settings(project_root)
+    if not aquaforge_requested(det):
+        return
+    if resolve_aquaforge_checkpoint_path(project_root, det.aquaforge) is not None:
+        return
+    st.markdown("##### Train first AquaForge model")
+    try:
+        rel_exp = expected_aquaforge_checkpoint_path(project_root).relative_to(project_root)
+    except ValueError:
+        rel_exp = expected_aquaforge_checkpoint_path(project_root)
+    st.caption(
+        f"No weights found yet. A short run creates **`{rel_exp}`** (and ONNX for optional CPU ORT). "
+        "You need **at least two** saved vessel reviews with markers or size feedback."
+    )
+    train_py = project_root / "scripts" / "train_aquaforge.py"
+    if not train_py.is_file():
+        return
+    if st.button(
+        "Run quick first training (≈4 epochs)",
+        type="secondary",
+        use_container_width=True,
+        key="vd_train_first_aquaforge_btn",
+        help="Faster than full retrain; still requires pip install -r requirements-ml.txt",
+    ):
+        if not labels_path.is_file():
+            st.warning("Save at least two vessel labels first (same JSONL the app uses).")
+            return
+        with st.status("First AquaForge training…", expanded=True) as status:
+            try:
+                code, out, err = _subprocess_train_aquaforge(
+                    project_root,
+                    labels_path,
+                    ["--epochs", "4", "--batch-size", "2"],
                 )
             except OSError as e:
                 status.update(label="Training failed to start", state="error")
                 st.error(str(e))
                 return
-            tail = 12000
-            out = (proc.stdout or "")[-tail:]
-            err = (proc.stderr or "")[-tail:]
-            if proc.returncode == 0:
+            if code == 0:
                 status.update(label="Training finished", state="complete")
-                st.success(
-                    "Training finished. Restart the Streamlit app (or reload) to pick up new weights."
-                )
+                clear_aquaforge_predictor_cache()
                 if out.strip():
                     st.code(out, language="text")
+                st.session_state["_vd_af_train_flash"] = (
+                    "First AquaForge model saved — open a spot to see masks and headings. "
+                    "Use **Retrain AquaForge** later for a longer run."
+                )
+                st.rerun()
             else:
                 status.update(label="Training failed", state="error")
-                st.error(f"Exit code {proc.returncode}")
+                st.error(f"Exit code {code} — need ≥2 training rows and ML dependencies.")
                 if err.strip():
                     st.code(err, language="text")
                 elif out.strip():
@@ -981,6 +1064,9 @@ def main() -> None:
 
     labels_path = default_labels_path(ROOT)
     _session_init()
+    _af_train_flash = st.session_state.pop("_vd_af_train_flash", None)
+    if _af_train_flash:
+        st.success(str(_af_train_flash))
 
     if st.session_state.get("vd_ui_mode") == "training_review":
         render_training_label_review_ui(
@@ -1033,6 +1119,7 @@ def main() -> None:
                 )
             _det_adv = load_detection_settings(ROOT)
             _render_retrain_aquaforge_section(ROOT, labels_path)
+            _render_train_first_aquaforge_section(ROOT, labels_path)
             st.markdown("---")
             if sota_inference_requested(_det_adv) and getattr(
                 _det_adv, "ui_require_checkbox_for_sota", False
@@ -1072,6 +1159,19 @@ def main() -> None:
         return
 
     assert choice is not None
+    _vd_af_cfg = load_detection_settings(ROOT)
+    if aquaforge_requested(_vd_af_cfg):
+        if resolve_aquaforge_checkpoint_path(ROOT, _vd_af_cfg.aquaforge) is None:
+            try:
+                _af_rel = expected_aquaforge_checkpoint_path(ROOT).relative_to(ROOT)
+            except ValueError:
+                _af_rel = expected_aquaforge_checkpoint_path(ROOT)
+            st.info(
+                "**AquaForge** will show masks, keypoints, and headings once a trained checkpoint "
+                "exists. Save **at least two** vessel reviews, then open **← Advanced** and run "
+                "**Train first AquaForge model** (short run). Default weights file: "
+                f"`{_af_rel}`."
+            )
     tci_path_sel = Path(choice)
     scl_found = find_scl_for_tci(tci_path_sel)
     ready_dl, _ = cdse_download_ready()
@@ -1657,6 +1757,8 @@ def _render_spot_measurements_expander(
                 f"({sota.get('heading_fusion_source', '')})"
             )
         sw = sota.get("sota_warnings") or []
+        if isinstance(sw, list):
+            sw = [x for x in sw if str(x) != "aquaforge_weights_missing"]
         if isinstance(sw, list) and sw:
             st.warning(
                 "Overlay notes: " + "; ".join(str(x) for x in sw if x)
