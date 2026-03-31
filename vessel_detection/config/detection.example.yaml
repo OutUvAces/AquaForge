@@ -29,6 +29,18 @@ yolo:
   sliding_window_max_windows: 120
   sliding_window_dedupe_px: 24
   sliding_window_min_conf: 0.35
+  # Performance: batch chip inference when ranking many candidates on the same scene (UI / yolo_fusion).
+  chip_batch_size: 6
+
+# Performance: ONNX Runtime session tuning (CPU). 0 = ORT default thread counts.
+onnx_runtime:
+  intra_op_num_threads: 0
+  inter_op_num_threads: 0
+  execution_mode: parallel   # parallel | sequential
+  graph_optimization_level: all   # all | extended | basic | disable
+
+# Optional: skip keypoints / wake when hybrid P(vessel) is below this (Streamlit passes hybrid per spot).
+# sota_min_hybrid_proba_for_expensive: 0.2
 
 keypoints:
   enabled: false
@@ -48,6 +60,8 @@ keypoints:
   # onnx_providers: ["CPUExecutionProvider"]
   # Dynamic INT8 weight quantization for faster CPU inference (cached under system temp).
   quantize: false
+  # Skip pose ONNX when marine YOLO confidence is below this (0 = no gate).
+  min_yolo_confidence: 0.0
 
 wake_fusion:
   enabled: false
@@ -65,3 +79,5 @@ wake_fusion:
   adaptive_fusion: true
   adaptive_fusion_min_quality: 0.15
   quantize: false
+  # Skip wake heuristic / ONNX when YOLO confidence is below this (0 = no gate).
+  min_yolo_confidence: 0.0

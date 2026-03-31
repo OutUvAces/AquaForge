@@ -22,6 +22,19 @@ VALID_BACKENDS = frozenset(
 
 
 @dataclass
+class OnnxRuntimeSection:
+    """CPU thread and graph options for ``onnxruntime.InferenceSession`` (additive YAML)."""
+
+    # 0 = ORT default (usually all physical cores).
+    intra_op_num_threads: int = 0
+    inter_op_num_threads: int = 0
+    # parallel | sequential
+    execution_mode: str = "parallel"
+    # all | extended | basic | disable
+    graph_optimization_level: str = "all"
+
+
+@dataclass
 class YoloSection:
     hf_repo: str = "mayrajeo/marine-vessel-yolo"
     weights_file: str = "yolo11s_tci.pt"
@@ -37,6 +50,8 @@ class YoloSection:
     sliding_window_max_windows: int = 120
     sliding_window_dedupe_px: float = 24.0
     sliding_window_min_conf: float = 0.35
+    # Batched chip inference when ranking many candidates on the same TCI (order preserved).
+    chip_batch_size: int = 6
 
 
 @dataclass
@@ -60,6 +75,8 @@ class KeypointsSection:
     onnx_providers: list[str] | None = None
     # If true, load a dynamically quantized (INT8 weights) copy for faster CPU inference.
     quantize: bool = False
+    # Skip keypoint ONNX if marine YOLO confidence is below this (0 = always run when enabled).
+    min_yolo_confidence: float = 0.0
 
 
 @dataclass
@@ -84,6 +101,8 @@ class WakeFusionSection:
     adaptive_fusion_min_quality: float = 0.15
     # Dynamic INT8 weight quantization for wake ONNX on CPU (see onnx_session_cache).
     quantize: bool = False
+    # Skip heuristic / ONNX wake if marine YOLO confidence is below this (0 = no gate).
+    min_yolo_confidence: float = 0.0
 
 
 @dataclass
@@ -92,6 +111,10 @@ class DetectionSettings:
     yolo: YoloSection = field(default_factory=YoloSection)
     keypoints: KeypointsSection = field(default_factory=KeypointsSection)
     wake_fusion: WakeFusionSection = field(default_factory=WakeFusionSection)
+    onnx_runtime: OnnxRuntimeSection = field(default_factory=OnnxRuntimeSection)
+    # If set and ``hybrid_proba`` is passed to :func:`run_sota_spot_inference`, skip keypoints + wake
+    # after YOLO when hybrid P(vessel) is below this (UI can pass hybrid to save CPU on weak spots).
+    sota_min_hybrid_proba_for_expensive: float | None = None
 
 
 def default_detection_yaml_path(project_root: Path) -> Path:
@@ -128,6 +151,10 @@ def _parse_yolo(d: dict[str, Any] | None) -> YoloSection:
         sliding_window_min_conf=float(
             d.get("sliding_window_min_conf", YoloSection.sliding_window_min_conf)
         ),
+        chip_batch_size=max(
+            1,
+            min(32, int(d.get("chip_batch_size", YoloSection.chip_batch_size))),
+        ),
     )
 
 
@@ -161,6 +188,9 @@ def _parse_keypoints(d: dict[str, Any] | None) -> KeypointsSection:
         ),
         onnx_providers=onnx_providers_list,
         quantize=bool(d.get("quantize", False)),
+        min_yolo_confidence=float(
+            d.get("min_yolo_confidence", KeypointsSection.min_yolo_confidence)
+        ),
     )
 
 
@@ -202,6 +232,32 @@ def _parse_wake(d: dict[str, Any] | None) -> WakeFusionSection:
             )
         ),
         quantize=bool(d.get("quantize", False)),
+        min_yolo_confidence=float(
+            d.get("min_yolo_confidence", WakeFusionSection.min_yolo_confidence)
+        ),
+    )
+
+
+def _parse_onnx_runtime(d: dict[str, Any] | None) -> OnnxRuntimeSection:
+    if not d:
+        return OnnxRuntimeSection()
+    em = str(d.get("execution_mode", OnnxRuntimeSection.execution_mode)).strip().lower()
+    if em not in {"parallel", "sequential"}:
+        em = OnnxRuntimeSection.execution_mode
+    gol = str(
+        d.get("graph_optimization_level", OnnxRuntimeSection.graph_optimization_level)
+    ).strip().lower()
+    if gol not in {"all", "extended", "basic", "disable"}:
+        gol = OnnxRuntimeSection.graph_optimization_level
+    return OnnxRuntimeSection(
+        intra_op_num_threads=int(
+            d.get("intra_op_num_threads", OnnxRuntimeSection.intra_op_num_threads)
+        ),
+        inter_op_num_threads=int(
+            d.get("inter_op_num_threads", OnnxRuntimeSection.inter_op_num_threads)
+        ),
+        execution_mode=em,
+        graph_optimization_level=gol,
     )
 
 
@@ -235,6 +291,16 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
     if backend not in VALID_BACKENDS:
         backend = DEFAULT_BACKEND
 
+    sh = data.get("sota_min_hybrid_proba_for_expensive")
+    sota_hybrid: float | None
+    if sh is None or sh == "":
+        sota_hybrid = None
+    else:
+        try:
+            sota_hybrid = float(sh)
+        except (TypeError, ValueError):
+            sota_hybrid = None
+
     return DetectionSettings(
         backend=backend,
         yolo=_parse_yolo(data.get("yolo") if isinstance(data.get("yolo"), dict) else None),
@@ -244,6 +310,12 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
         wake_fusion=_parse_wake(
             data.get("wake_fusion") if isinstance(data.get("wake_fusion"), dict) else None
         ),
+        onnx_runtime=_parse_onnx_runtime(
+            data.get("onnx_runtime")
+            if isinstance(data.get("onnx_runtime"), dict)
+            else None
+        ),
+        sota_min_hybrid_proba_for_expensive=sota_hybrid,
     )
 
 

@@ -22,11 +22,54 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from vessel_detection.detection_config import OnnxRuntimeSection
+
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
-# Key: (resolved path str, mtime_ns, mode) -> InferenceSession  mode: "f32" | "q8"
-_sessions: dict[tuple[str, int, str], Any] = {}
+# Key: (resolved path str, mtime_ns, mode, options_fingerprint) -> InferenceSession  mode: "f32" | "q8"
+_sessions: dict[tuple[str, int, str, str], Any] = {}
+
+
+def _ort_runtime_fingerprint(onnx_runtime: OnnxRuntimeSection | None) -> str:
+    """Performance: distinguish ORT SessionOptions in the process cache."""
+    if onnx_runtime is None:
+        return "d"
+    return (
+        f"i{int(onnx_runtime.intra_op_num_threads)}"
+        f"_o{int(onnx_runtime.inter_op_num_threads)}"
+        f"_{onnx_runtime.execution_mode}"
+        f"_{onnx_runtime.graph_optimization_level}"
+    )
+
+
+def _apply_ort_session_options(
+    sess_options: Any,
+    onnx_runtime: OnnxRuntimeSection | None,
+) -> None:
+    """Performance: CPU threads, execution mode, graph optimizations (additive YAML)."""
+    if onnx_runtime is None:
+        return
+    import onnxruntime as ort
+
+    if int(onnx_runtime.intra_op_num_threads) > 0:
+        sess_options.intra_op_num_threads = int(onnx_runtime.intra_op_num_threads)
+    if int(onnx_runtime.inter_op_num_threads) > 0:
+        sess_options.inter_op_num_threads = int(onnx_runtime.inter_op_num_threads)
+    if str(onnx_runtime.execution_mode).strip().lower() == "sequential":
+        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    else:
+        sess_options.execution_mode = ort.ExecutionMode.ORT_PARALLEL
+    lvl = str(onnx_runtime.graph_optimization_level).strip().lower()
+    gmap = {
+        "all": ort.GraphOptimizationLevel.ORT_ENABLE_ALL,
+        "extended": ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED,
+        "basic": ort.GraphOptimizationLevel.ORT_ENABLE_BASIC,
+        "disable": ort.GraphOptimizationLevel.ORT_DISABLE_ALL,
+    }
+    sess_options.graph_optimization_level = gmap.get(
+        lvl, ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    )
 
 
 def _quantized_model_path(src: Path) -> Path | None:
@@ -93,6 +136,7 @@ def get_ort_session(
     *,
     providers: list[str] | None = None,
     quantize_dynamic: bool = False,
+    onnx_runtime: OnnxRuntimeSection | None = None,
 ) -> Any | None:
     """
     Return a cached ``onnxruntime.InferenceSession`` or ``None`` if unavailable.
@@ -101,6 +145,8 @@ def get_ort_session(
 
     When ``quantize_dynamic`` is true, builds or reuses an INT8-weight quantized model on disk
     (CPU-oriented). If quantization fails, falls back to the original float ONNX.
+
+    ``onnx_runtime`` configures SessionOptions (threads, graph optimizations); included in cache key.
     """
     path = Path(onnx_path)
     if not path.is_file():
@@ -127,7 +173,8 @@ def get_ort_session(
 
     try:
         st2 = path_for_session.stat()
-        cache_key = (str(path_for_session.resolve()), int(st2.st_mtime_ns), mode)
+        fp = _ort_runtime_fingerprint(onnx_runtime)
+        cache_key = (str(path_for_session.resolve()), int(st2.st_mtime_ns), mode, fp)
     except OSError:
         return None
 
@@ -141,8 +188,15 @@ def get_ort_session(
         return None
 
     prov = providers if providers else ["CPUExecutionProvider"]
+    sess_options = ort.SessionOptions()
+    cfg: OnnxRuntimeSection | None = onnx_runtime
+    _apply_ort_session_options(sess_options, cfg)
     try:
-        sess = ort.InferenceSession(str(path_for_session.resolve()), providers=prov)
+        sess = ort.InferenceSession(
+            str(path_for_session.resolve()),
+            sess_options=sess_options,
+            providers=prov,
+        )
     except Exception:
         return None
 

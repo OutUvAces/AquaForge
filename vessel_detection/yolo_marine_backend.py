@@ -94,35 +94,24 @@ class MarineYOLOPredictor:
 
         self._model = YOLO(str(weights_path))
 
-    def predict_at_candidate(
+    def _spot_from_yolo_result(
         self,
-        tci_path: str | Path,
-        cx: float,
-        cy: float,
+        res: Any,
         *,
-        chip_half: int,
-        imgsz: int,
-        conf_threshold: float,
+        cx_full: float,
+        cy_full: float,
+        c0: int,
+        r0: int,
+        cw: int,
+        ch: int,
     ) -> YoloSpotResult | None:
-        bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, chip_half)
-        if bgr.size == 0 or cw < 4 or ch < 4:
-            return None
-
-        ccx = float(cx) - float(c0)
-        ccy = float(cy) - float(r0)
-
-        results = self._model.predict(
-            bgr,
-            imgsz=int(imgsz),
-            conf=float(conf_threshold),
-            verbose=False,
-        )
-        if not results:
-            return None
-        res = results[0]
+        """Pick best instance near chip-relative candidate center; map mask to full raster."""
         boxes = getattr(res, "boxes", None)
         if boxes is None or len(boxes) == 0:
             return None
+
+        ccx = float(cx_full) - float(c0)
+        ccy = float(cy_full) - float(r0)
 
         n = len(boxes)
         best_i = -1
@@ -172,15 +161,100 @@ class MarineYOLOPredictor:
             chip_h=int(ch),
         )
 
+    def predict_at_candidate(
+        self,
+        tci_path: str | Path,
+        cx: float,
+        cy: float,
+        *,
+        chip_half: int,
+        imgsz: int,
+        conf_threshold: float,
+    ) -> YoloSpotResult | None:
+        bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, chip_half)
+        if bgr.size == 0 or cw < 4 or ch < 4:
+            return None
+
+        results = self._model.predict(
+            bgr,
+            imgsz=int(imgsz),
+            conf=float(conf_threshold),
+            verbose=False,
+        )
+        if not results:
+            return None
+        return self._spot_from_yolo_result(
+            results[0],
+            cx_full=float(cx),
+            cy_full=float(cy),
+            c0=c0,
+            r0=r0,
+            cw=cw,
+            ch=ch,
+        )
+
+    def predict_batch_at_candidates(
+        self,
+        tci_path: str | Path,
+        centers: list[tuple[float, float]],
+        *,
+        chip_half: int,
+        imgsz: int,
+        conf_threshold: float,
+        batch_size: int = 4,
+    ) -> list[YoloSpotResult | None]:
+        """
+        Performance: batched chip inference for many (cx, cy) on the same TCI; order matches ``centers``.
+
+        Empty or tiny chips yield ``None`` at that index without calling the model for that slot.
+        """
+        n = len(centers)
+        out: list[YoloSpotResult | None] = [None] * n
+        if n == 0:
+            return out
+
+        bs = max(1, min(32, int(batch_size)))
+        valid: list[tuple[int, Any, int, int, int, int]] = []
+        for i, (cx, cy) in enumerate(centers):
+            bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, chip_half)
+            if bgr.size == 0 or cw < 4 or ch < 4:
+                continue
+            valid.append((i, bgr, c0, r0, cw, ch))
+
+        for start in range(0, len(valid), bs):
+            chunk = valid[start : start + bs]
+            images = [t[1] for t in chunk]
+            results = self._model.predict(
+                images,
+                imgsz=int(imgsz),
+                conf=float(conf_threshold),
+                verbose=False,
+            )
+            if not results:
+                continue
+            for j, res in enumerate(results):
+                if j >= len(chunk):
+                    break
+                idx, _bgr, c0, r0, cw, ch = chunk[j]
+                cx, cy = centers[idx]
+                spot = self._spot_from_yolo_result(
+                    res,
+                    cx_full=float(cx),
+                    cy_full=float(cy),
+                    c0=c0,
+                    r0=r0,
+                    cw=cw,
+                    ch=ch,
+                )
+                out[idx] = spot
+        return out
+
 
 def try_load_marine_predictor(project_root: Path, yolo: YoloSection) -> MarineYOLOPredictor | None:
-    w = ensure_marine_yolo_weights(project_root, yolo)
-    if w is None:
-        return None
-    try:
-        return MarineYOLOPredictor(w)
-    except Exception:
-        return None
+    """Performance: returns process-cached predictor when available."""
+    from vessel_detection.model_manager import get_cached_marine_predictor
+
+    return get_cached_marine_predictor(project_root, yolo)
 
 
 def yolo_confidence_only(
@@ -274,18 +348,21 @@ def merge_candidates_with_sliding_window_yolo(
         int(yolo.sliding_window_max_windows),
     )
     yolo_hits: list[tuple[float, float, float]] = []
-    for cx, cy in centers:
-        r = predictor.predict_at_candidate(
+    bs = max(1, int(yolo.chip_batch_size))
+    for start in range(0, len(centers), bs):
+        chunk = centers[start : start + bs]
+        batch_out = predictor.predict_batch_at_candidates(
             tci_path,
-            cx,
-            cy,
+            chunk,
             chip_half=int(yolo.chip_half),
             imgsz=int(yolo.imgsz),
             conf_threshold=float(yolo.conf_threshold),
+            batch_size=bs,
         )
-        if r is None or float(r.confidence) < float(yolo.sliding_window_min_conf):
-            continue
-        yolo_hits.append((cx, cy, float(r.confidence)))
+        for (cx, cy), r in zip(chunk, batch_out):
+            if r is None or float(r.confidence) < float(yolo.sliding_window_min_conf):
+                continue
+            yolo_hits.append((cx, cy, float(r.confidence)))
 
     dedupe = float(max(4.0, yolo.sliding_window_dedupe_px))
     out = list(base)

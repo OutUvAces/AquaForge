@@ -1166,6 +1166,11 @@ def main_cli(argv: list[str] | None = None) -> int:
         action="store_true",
         help="GitHub-ready markdown (Key Takeaways + Summary + tables; best values bolded)",
     )
+    ap.add_argument(
+        "--profile",
+        action="store_true",
+        help="Run cProfile during evaluation and print top 40 functions by cumulative time (stdout)",
+    )
     args = ap.parse_args(argv)
 
     root = args.project_root.resolve()
@@ -1201,42 +1206,59 @@ def main_cli(argv: list[str] | None = None) -> int:
     else:
         spot_cap = args.max_spots
 
-    text_reports: list[str] = []
-    json_payload: list[dict[str, Any]] = []
-    for jp in jsonl_paths:
-        if not jp.is_file():
-            print(f"Skip missing: {jp}", flush=True)
-            continue
-        print(f"Evaluating {jp} ...", flush=True)
-        res = run_detection_evaluation(
-            root,
-            jp,
-            settings_sota=settings_sota,
-            max_spots=spot_cap,
-        )
-        if args.demo:
-            text_reports.append(
-                format_demo_console_summary(
-                    res,
-                    settings_sota=settings_sota,
-                    jsonl_path=str(jp),
-                    max_spots=int(spot_cap),
-                )
+    def collect_reports() -> tuple[list[str], list[dict[str, Any]]]:
+        tr: list[str] = []
+        jp_out: list[dict[str, Any]] = []
+        for jp in jsonl_paths:
+            if not jp.is_file():
+                print(f"Skip missing: {jp}", flush=True)
+                continue
+            print(f"Evaluating {jp} ...", flush=True)
+            res = run_detection_evaluation(
+                root,
+                jp,
+                settings_sota=settings_sota,
+                max_spots=spot_cap,
             )
-        elif args.summary_markdown:
-            text_reports.append(
-                format_eval_summary_markdown(
-                    res,
-                    settings_sota=settings_sota,
-                    jsonl_path=str(jp),
+            if args.demo:
+                tr.append(
+                    format_demo_console_summary(
+                        res,
+                        settings_sota=settings_sota,
+                        jsonl_path=str(jp),
+                        max_spots=int(spot_cap) if spot_cap is not None else 0,
+                    )
                 )
-            )
-        else:
-            text_reports.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
-        jd = eval_result_to_jsonable(res)
-        jd["jsonl"] = str(jp)
-        jd["settings_backend"] = settings_sota.backend
-        json_payload.append(jd)
+            elif args.summary_markdown:
+                tr.append(
+                    format_eval_summary_markdown(
+                        res,
+                        settings_sota=settings_sota,
+                        jsonl_path=str(jp),
+                    )
+                )
+            else:
+                tr.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
+            jd = eval_result_to_jsonable(res)
+            jd["jsonl"] = str(jp)
+            jd["settings_backend"] = settings_sota.backend
+            jp_out.append(jd)
+        return tr, jp_out
+
+    if args.profile:
+        import cProfile
+        import io
+        import pstats
+
+        pr = cProfile.Profile()
+        pr.enable()
+        text_reports, json_payload = collect_reports()
+        pr.disable()
+        buf = io.StringIO()
+        pstats.Stats(pr, stream=buf).sort_stats("cumulative").print_stats(40)
+        print(buf.getvalue(), flush=True)
+    else:
+        text_reports, json_payload = collect_reports()
 
     sep = "\n\n---\n\n" if args.summary_markdown else "\n"
     if args.demo:

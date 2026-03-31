@@ -70,6 +70,7 @@ from vessel_detection.detection_config import (
     sota_inference_requested,
     yolo_requested,
 )
+from vessel_detection.model_manager import warm_sota_models
 from vessel_detection.evaluation import (
     angular_error_deg,
     rank_score_at_point,
@@ -1525,10 +1526,15 @@ def _render_review_deck(
     )
 
     det_settings = load_detection_settings(ROOT)
+    if sota_inference_requested(det_settings):
+        warm_sota_models(ROOT, det_settings)
     _mscl = (meta or {}).get("scl_path")
     _scl_sota = Path(str(_mscl)) if _mscl else None
     if _scl_sota is not None and not _scl_sota.is_file():
         _scl_sota = None
+    _hyb_sig: tuple[float | None, ...] = ()
+    if det_settings.sota_min_hybrid_proba_for_expensive is not None:
+        _hyb_sig = (round(float(p_comb), 6) if p_comb is not None else None,)
     sota_sig = (
         _detection_yaml_mtime(ROOT),
         mt,
@@ -1537,7 +1543,7 @@ def _render_review_deck(
         det_settings.backend,
         int(sc0),
         int(sr0),
-    )
+    ) + _hyb_sig
     sota_k = f"vd_sota_{spot_k}"
     sota: dict = {}
     if sota_inference_requested(det_settings):
@@ -1551,6 +1557,7 @@ def _render_review_deck(
                 spot_col_off=int(sc0),
                 spot_row_off=int(sr0),
                 scl_path=_scl_sota,
+                hybrid_proba=float(p_comb) if p_comb is not None else None,
             )
             st.session_state[sota_k + "_sig"] = sota_sig
         sota = st.session_state.get(sota_k, {}) or {}

@@ -26,7 +26,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-from vessel_detection.detection_config import KeypointsSection
+from vessel_detection.detection_config import KeypointsSection, OnnxRuntimeSection
 from vessel_detection.onnx_session_cache import get_ort_session
 from vessel_detection.yolo_marine_backend import read_yolo_chip_bgr
 
@@ -191,6 +191,7 @@ def try_predict_keypoints_chip(
     chip_half: int = 320,
     keypoints_cfg: KeypointsSection | None = None,
     onnx_path: str | None = None,
+    onnx_runtime: OnnxRuntimeSection | None = None,
 ) -> tuple[KeypointResult | None, list[str]]:
     """
     Like :func:`predict_keypoints_chip` but returns ``(result, warning_codes)``.
@@ -217,6 +218,7 @@ def try_predict_keypoints_chip(
         path,
         providers=cfg.onnx_providers,
         quantize_dynamic=bool(cfg.quantize),
+        onnx_runtime=onnx_runtime,
     )
     if sess is None:
         notes.append("keypoints_onnx_session_failed")

@@ -6,19 +6,17 @@ Used for UI crops and captions; projected CRS are assumed to use meter units (e.
 
 from __future__ import annotations
 
+import functools
 import math
 from pathlib import Path
 
 import rasterio
 
 
-def ground_meters_per_pixel_at_cr(path: str | Path, col: float, row: float) -> tuple[float, float]:
-    """
-    Approximate ``(gsd_x, gsd_y)`` in meters per pixel at raster column ``col``, row ``row``.
-
-    For geographic CRS, scales degree sizes by latitude at that pixel.
-    """
-    path = Path(path)
+def _ground_meters_per_pixel_at_cr_uncached(
+    path_resolved: str, col: float, row: float
+) -> tuple[float, float]:
+    path = Path(path_resolved)
     with rasterio.open(path) as ds:
         t = ds.transform
         rx = abs(t.a)
@@ -33,6 +31,26 @@ def ground_meters_per_pixel_at_cr(path: str | Path, col: float, row: float) -> t
         m_per_deg_lat = 111_320.0
         m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat))
         return (rx * m_per_deg_lon, ry * m_per_deg_lat)
+
+
+@functools.lru_cache(maxsize=512)
+def _ground_meters_per_pixel_cached(path_resolved: str, ci: int, ri: int) -> tuple[float, float]:
+    """Performance: mask metrics and captions hit the same raster + neighborhood often."""
+    return _ground_meters_per_pixel_at_cr_uncached(
+        path_resolved, float(ci), float(ri)
+    )
+
+
+def ground_meters_per_pixel_at_cr(path: str | Path, col: float, row: float) -> tuple[float, float]:
+    """
+    Approximate ``(gsd_x, gsd_y)`` in meters per pixel at raster column ``col``, row ``row``.
+
+    For geographic CRS, scales degree sizes by latitude at that pixel.
+    """
+    p = str(Path(path).resolve())
+    return _ground_meters_per_pixel_cached(
+        p, int(round(float(col))), int(round(float(row)))
+    )
 
 
 def ground_meters_per_pixel_from_dataset(ds) -> tuple[float, float]:

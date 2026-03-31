@@ -119,9 +119,27 @@ def rank_candidates_from_config(
     wy = float(max(0.0, min(1.0, settings.yolo.weight_vs_hybrid)))
     wh = 1.0 - wy
 
+    # Performance: batch marine YOLO chips on the same TCI (order preserved; bs=1 = one chip per ORT call).
+    yolo_batch_out: list[Any] | None = None
+    if pred is not None and len(base) > 0:
+        centers = [(float(cx), float(cy)) for cx, cy, _sc in base]
+        bs = max(1, int(settings.yolo.chip_batch_size))
+        yolo_batch_out = pred.predict_batch_at_candidates(
+            tci_path,
+            centers,
+            chip_half=int(settings.yolo.chip_half),
+            imgsz=int(settings.yolo.imgsz),
+            conf_threshold=float(settings.yolo.conf_threshold),
+            batch_size=bs,
+        )
+
     scored: list[tuple[float, float, float, float]] = []
-    for cx, cy, sc in base:
-        py = yolo_confidence_only(pred, tci_path, cx, cy, settings.yolo)
+    for i, (cx, cy, sc) in enumerate(base):
+        if yolo_batch_out is not None and i < len(yolo_batch_out):
+            yr = yolo_batch_out[i]
+            py = float(yr.confidence) if yr is not None else 0.0
+        else:
+            py = yolo_confidence_only(pred, tci_path, cx, cy, settings.yolo)
         ph = _hybrid_proba_at(tci_path, cx, cy, clf, chip_bundle)
 
         if settings.backend == "yolo_only":
@@ -148,6 +166,7 @@ def run_sota_spot_inference(
     spot_col_off: int,
     spot_row_off: int,
     scl_path: Path | None = None,
+    hybrid_proba: float | None = None,
 ) -> dict[str, Any]:
     """
     Rich diagnostics for the review UI: YOLO mask, mask metrics, optional keypoints + wake fusion.
@@ -239,8 +258,26 @@ def run_sota_spot_inference(
                 out["yolo_width_m"] = float(wm)
                 out["yolo_aspect"] = float(ar)
 
+    # Performance: optional gate from legacy hybrid P(vessel) before ONNX keypoints / wake.
+    skip_expensive = False
+    hp_thr = settings.sota_min_hybrid_proba_for_expensive
+    if hp_thr is not None and hybrid_proba is not None:
+        if float(hybrid_proba) < float(hp_thr):
+            skip_expensive = True
+            warnings.append("skipped_keypoints_wake_low_hybrid_proba")
+
+    kp_min_y = float(settings.keypoints.min_yolo_confidence)
+    run_keypoints = (
+        settings.keypoints.enabled
+        and not skip_expensive
+        and (
+            kp_min_y <= 0.0
+            or (yr is not None and float(yr.confidence) >= kp_min_y)
+        )
+    )
+
     kp: KeypointResult | None = None
-    if settings.keypoints.enabled:
+    if run_keypoints:
         if not settings.keypoints.external_onnx_path:
             warnings.append("keypoints_enabled_but_no_onnx_path")
         else:
@@ -250,6 +287,7 @@ def run_sota_spot_inference(
                 cy,
                 chip_half=int(settings.yolo.chip_half),
                 keypoints_cfg=settings.keypoints,
+                onnx_runtime=settings.onnx_runtime,
             )
             warnings.extend(kp_notes)
         out["keypoints_json"] = keypoints_to_jsonable(kp)
@@ -325,7 +363,17 @@ def run_sota_spot_inference(
     h_onnx: float | None = None
     meta_heur: dict[str, Any] = {"ok": False}
     meta_onnx: dict[str, Any] = {"ok": False}
-    if settings.backend == "ensemble" and settings.wake_fusion.enabled:
+    wake_min_y = float(settings.wake_fusion.min_yolo_confidence)
+    run_wake = (
+        settings.backend == "ensemble"
+        and settings.wake_fusion.enabled
+        and not skip_expensive
+        and (
+            wake_min_y <= 0.0
+            or (yr is not None and float(yr.confidence) >= wake_min_y)
+        )
+    )
+    if run_wake:
         kp_ref = h_kp
         if settings.wake_fusion.use_auto_wake_segment:
             h_heur, meta_heur = heading_from_wake_segment_at_ship(
@@ -363,6 +411,7 @@ def run_sota_spot_inference(
                     settings.wake_fusion.onnx_wake_confidence_prior
                 ),
                 quantize_dynamic=bool(settings.wake_fusion.quantize),
+                onnx_runtime=settings.onnx_runtime,
             )
             out["wake_segment_meta_onnx"] = meta_onnx
             if h_onnx is not None:

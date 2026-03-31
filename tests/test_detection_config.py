@@ -21,6 +21,8 @@ class TestDetectionConfig(unittest.TestCase):
             self.assertEqual(s.backend, "legacy_hybrid")
             self.assertFalse(yolo_requested(s))
             self.assertFalse(sota_inference_requested(s))
+            self.assertEqual(s.yolo.chip_batch_size, 6)
+            self.assertEqual(s.onnx_runtime.graph_optimization_level, "all")
 
     def test_yaml_backend(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -87,6 +89,26 @@ class TestDetectionConfig(unittest.TestCase):
             s = load_detection_settings(root)
             self.assertEqual(s.yolo.inference_mode, "sliding_window_merge")
             self.assertEqual(s.yolo.sliding_window_stride, 400)
+
+    def test_onnx_runtime_and_batch_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "backend: yolo_fusion\n"
+                "yolo:\n  chip_batch_size: 4\n"
+                "onnx_runtime:\n"
+                "  intra_op_num_threads: 2\n"
+                "  execution_mode: sequential\n"
+                "  graph_optimization_level: extended\n",
+                encoding="utf-8",
+            )
+            s = load_detection_settings(root)
+            self.assertEqual(s.yolo.chip_batch_size, 4)
+            self.assertEqual(s.onnx_runtime.intra_op_num_threads, 2)
+            self.assertEqual(s.onnx_runtime.execution_mode, "sequential")
+            self.assertEqual(s.onnx_runtime.graph_optimization_level, "extended")
 
 
 if __name__ == "__main__":

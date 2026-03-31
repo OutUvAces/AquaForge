@@ -275,6 +275,21 @@ Default command runs [`scripts/train_all_models.py`](scripts/train_all_models.py
 - **`chip_per_candidate`** — Scales with the number of heuristic candidates; keeps UI responsive.
 - **`sliding_window_merge`** — Extra full-scene YOLO work; use when you need more recall from dense traffic or missed centers, at the cost of latency and CPU/GPU time. Tune `sliding_window_stride`, `sliding_window_max_windows`, and `sliding_window_min_conf` to balance quality and runtime.
 
+### Interactive UI and ensemble speed (CPU)
+
+- **Model cache** — Marine YOLO loads **once per process** (`vessel_detection/model_manager.py`). When SOTA is enabled, the review UI calls **`warm_sota_models`** so weights and ORT sessions are touched early (less first-spot stall).
+- **Batched YOLO** — `yolo.chip_batch_size` (default **6**) batches chip inference when ranking **many candidates on the same TCI** and during **sliding-window merge** grid passes. Set **`chip_batch_size: 1`** for strictly sequential behavior (e.g. debugging).
+- **ONNX Runtime tuning** — Top-level YAML **`onnx_runtime`**: `intra_op_num_threads`, `inter_op_num_threads` (use **0** for ORT defaults), `execution_mode` (`parallel` \| `sequential`), `graph_optimization_level` (`all` \| `extended` \| `basic` \| `disable`). Options are part of the session cache key in `onnx_session_cache.py`.
+- **Lazy pose / wake** — **`keypoints.min_yolo_confidence`** and **`wake_fusion.min_yolo_confidence`** skip keypoint ONNX and wake fusion when marine YOLO confidence is below the threshold (**0** = no gate, backward compatible). **`sota_min_hybrid_proba_for_expensive`** skips keypoints + wake after YOLO when hybrid P(vessel) is below the threshold; the Streamlit UI passes hybrid **automatically** when this is set.
+- **Geodesy / GSD** — Repeated bearings and meters-per-pixel lookups reuse small **LRU caches** (`geodesy_bearing.py`, `raster_gsd.py`).
+- **Profiling** — After a benchmark run, print **cProfile** top callees:
+
+```bash
+py -3 scripts/run_detection_eval.py --profile --max-spots 30 --jsonl data/labels/ship_reviews.jsonl
+```
+
+For line-level work, combine with `snakeviz` or your IDE’s profiler on the same entrypoint.
+
 ### ONNX Runtime (CPU dynamic quantization)
 
 For **keypoint** and **wake** ONNX models on CPU, set in `data/config/detection.yaml`:
