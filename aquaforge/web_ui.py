@@ -1973,7 +1973,7 @@ def _render_review_deck(
         key=f"spot_dim_{spot_k}",
         width=main_px,
         height=main_px,
-        use_container_width=False,
+        use_column_width=False,
         cursor="crosshair",
     )
     loc_nat_w = int(loc_vis.shape[1])
@@ -1993,7 +1993,7 @@ def _render_review_deck(
             key=f"loc_vessel_{loc_comp_key}",
             width=side_px,
             height=side_px,
-            use_container_width=False,
+            use_column_width=False,
             cursor="crosshair",
         )
 
