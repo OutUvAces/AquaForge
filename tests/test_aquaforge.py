@@ -7,6 +7,20 @@ import unittest
 from aquaforge.unified.constants import LANDMARK_NAMES, NUM_LANDMARKS
 
 
+class TestReviewUIUncertaintySignal(unittest.TestCase):
+    def test_uncertainty_signal_range(self) -> None:
+        from aquaforge.unified.distill import review_ui_uncertainty_signal
+
+        self.assertEqual(review_ui_uncertainty_signal(None), 0.0)
+        self.assertGreater(
+            review_ui_uncertainty_signal(
+                {"pred_combined_proba": 0.5, "partial_cloud_obscuration": True}
+            ),
+            0.4,
+        )
+        self.assertLessEqual(review_ui_uncertainty_signal({"manual_locator": True}), 1.0)
+
+
 class TestAquaForgeConstants(unittest.TestCase):
     def test_landmark_count(self) -> None:
         self.assertEqual(NUM_LANDMARKS, len(LANDMARK_NAMES))
@@ -76,6 +90,8 @@ class TestAquaForgeLosses(unittest.TestCase):
         self.assertTrue(torch.isfinite(total))
         self.assertIn("loss_kp_hm", logs)
         self.assertIn("geom_cohesion_mult", logs)
+        self.assertIn("heading_amb_mult", logs)
+        self.assertIn("scene_calib_mult", logs)
 
     def test_cnn_forward_six_outputs(self) -> None:
         try:

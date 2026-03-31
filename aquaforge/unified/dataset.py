@@ -20,7 +20,10 @@ from typing import Any, Iterator
 import numpy as np
 
 from aquaforge.unified.constants import NUM_LANDMARKS
-from aquaforge.unified.distill import review_ui_active_learning_priority
+from aquaforge.unified.distill import (
+    review_ui_active_learning_priority,
+    review_ui_uncertainty_signal,
+)
 from aquaforge.unified.losses import build_kp_heat_targets_adaptive
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
 from aquaforge.vessel_markers import (
@@ -149,6 +152,8 @@ class AquaForgeSample:
     record_id: str
     # Active-learning / ensemble teacher (filled by :func:`hydrate_teacher_signals`).
     al_priority: float = 1.0
+    # Raw 0–1 from review JSONL ``extra`` (balancer + logging; priority already boosts via same signal).
+    review_uncertainty: float = 0.0
     teacher_heading_sc: np.ndarray | None = None
     teacher_valid: float = 0.0
 
@@ -196,11 +201,20 @@ def iter_aquaforge_samples(
                     heading = None
             cls = 1.0
             ex_fb = rec.get("extra") if isinstance(rec.get("extra"), dict) else {}
+            u_sig = review_ui_uncertainty_signal(ex_fb)
             pr = review_ui_active_learning_priority(
                 ex_fb, heading_labeled=heading is not None, review_category=None
             )
             yield AquaForgeSample(
-                Path(path), cx, cy, cls, heading, mlist, rid, al_priority=pr
+                Path(path),
+                cx,
+                cy,
+                cls,
+                heading,
+                mlist,
+                rid,
+                al_priority=pr,
+                review_uncertainty=u_sig,
             )
             continue
 
@@ -213,11 +227,20 @@ def iter_aquaforge_samples(
                 heading = float(h2) % 360.0
             except (TypeError, ValueError):
                 heading = None
+        u_sig = review_ui_uncertainty_signal(extra)
         pr = review_ui_active_learning_priority(
             extra, heading_labeled=heading is not None, review_category="vessel"
         )
         yield AquaForgeSample(
-            Path(path), cx, cy, cls, heading, mlist, rid, al_priority=pr
+            Path(path),
+            cx,
+            cy,
+            cls,
+            heading,
+            mlist,
+            rid,
+            al_priority=pr,
+            review_uncertainty=u_sig,
         )
 
 
@@ -269,6 +292,12 @@ def collate_batch(
         ls = torch.tensor([float(b[11]) for b in batch_items], device=device, dtype=torch.float32).mean()
     else:
         ls = torch.tensor(1.0, device=device, dtype=torch.float32)
+    if len(batch_items[0]) >= 13:
+        ru = torch.tensor(
+            [float(b[12]) for b in batch_items], device=device, dtype=torch.float32
+        )
+    else:
+        ru = torch.zeros(bsz, device=device, dtype=torch.float32)
     return {
         "imgs": imgs,
         "cls": cls,
@@ -284,6 +313,7 @@ def collate_batch(
         "teacher_hdg_sc": teacher_sc,
         "teacher_valid": teacher_v,
         "loss_scale": ls,
+        "review_uncertainty": ru,
     }
 
 
@@ -312,6 +342,7 @@ def build_training_row(
         float,
         float,
         np.ndarray | None,
+        float,
         float,
         float,
     ]
@@ -346,6 +377,7 @@ def build_training_row(
         sample.teacher_heading_sc,
         float(sample.teacher_valid),
         1.0,
+        float(getattr(sample, "review_uncertainty", 0.0)),
     )
 
 

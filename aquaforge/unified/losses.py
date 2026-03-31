@@ -64,16 +64,36 @@ def build_kp_heat_targets(
 
 def geometry_scene_cohesion_multiplier(seg_gt: torch.Tensor) -> float:
     """
-    **Cohesive joint loss**: up-weight segmentation / landmarks / heading / wake when the GT hull
-    covers a **small** fraction of the chip (typical Sentinel-2 small vessels). Classification stays
-    unscaled so presence signal stays stable. This ties “scene difficulty” to vessel footprint — our
-    coupling, not a generic uncertainty weight.
+    Up-weight geometry tasks when the GT hull covers a **small** fraction of the chip (small S2 vessels).
+    Classification stays unscaled.
     """
     with torch.no_grad():
         cov = float(seg_gt.clamp(0, 1).mean().item())
     ref = 0.062
     x = min(1.0, cov / max(ref, 1e-5))
     return float(1.0 + 0.24 * max(0.0, 1.0 - x))
+
+
+def heading_confidence_ambiguity_multiplier(hdg: torch.Tensor) -> float:
+    """
+    When the heading **confidence** logit is near 0 (sigmoid ~0.5), the model is ambiguous; nudge the
+    geometry block so hull / landmarks carry more of the learning signal — paired with trainer EMA.
+    Scalar is detached (does not backprop through the multiplier).
+    """
+    if hdg.dim() != 2 or hdg.shape[-1] < 3:
+        return 1.0
+    with torch.no_grad():
+        c = torch.sigmoid(hdg[:, 2:3])
+        amb = float((4.0 * c * (1.0 - c)).mean().item())
+    return float(1.0 + 0.2 * max(0.0, min(1.0, amb)))
+
+
+def scene_geometry_calibration(seg_gt: torch.Tensor, hdg: torch.Tensor | None) -> tuple[float, dict[str, float]]:
+    """Product of footprint-based and heading-ambiguity scales for the joint geometry block."""
+    g = geometry_scene_cohesion_multiplier(seg_gt)
+    h = heading_confidence_ambiguity_multiplier(hdg) if hdg is not None else 1.0
+    m = float(g * h)
+    return m, {"geom_cohesion_mult": float(g), "heading_amb_mult": float(h), "scene_calib_mult": m}
 
 
 def adaptive_heatmap_sigma_from_mask(seg_gt: torch.Tensor) -> float:
@@ -471,6 +491,11 @@ class DynamicLossBalancer:
         if pr is not None and pr > 1.65:
             out["cls"] = float(out.get("cls", 0.0) * 1.05)
             out["kp"] = float(out.get("kp", 0.0) * 1.04)
+        # Review-export ambiguity (0–1) — optional, from collate when present.
+        ru = bc.get("review_uncertainty_mean")
+        if ru is not None and ru > 0.42:
+            out["seg"] = float(out.get("seg", 0.0) * 1.06)
+            out["hdg"] = float(out.get("hdg", 0.0) * 1.05)
 
         return out
 
@@ -567,9 +592,9 @@ def aquaforge_joint_loss(
         total_geo = total_geo + w * ld
         logs["loss_distill"] = float(ld.detach())
 
-    g_mult = geometry_scene_cohesion_multiplier(batch["seg"])
-    total = total_cls + float(g_mult) * total_geo
-    logs["geom_cohesion_mult"] = float(g_mult)
+    calib, calib_logs = scene_geometry_calibration(batch["seg"], out.get("hdg"))
+    total = total_cls + float(calib) * total_geo
+    logs.update(calib_logs)
 
     ls = batch.get("loss_scale")
     if ls is not None:

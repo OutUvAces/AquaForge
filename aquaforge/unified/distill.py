@@ -23,6 +23,43 @@ import numpy as np
 from aquaforge.review_schema import EXTRA_AF_TRAINING_PRIORITY
 
 
+def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
+    """
+    0–1 score from **review-export** fields only (no forward pass): borderline hybrid score, clouds,
+    hand-placed locator, weak heading trust, tiny length proxy — aligns training weight with what the
+    operator already saw in the UI.
+    """
+    ex = extra or {}
+    u = 0.0
+    comb = ex.get("pred_combined_proba")
+    try:
+        if comb is not None:
+            c = float(comb)
+            if 0.36 <= c <= 0.64:
+                u += 0.34
+    except (TypeError, ValueError):
+        pass
+    if ex.get("partial_cloud_obscuration") is True:
+        u += 0.2
+    if ex.get("manual_locator") is True:
+        u += 0.12
+    tr = ex.get("pred_keypoint_heading_trust")
+    try:
+        if tr is not None and float(tr) < 0.38:
+            u += 0.16
+    except (TypeError, ValueError):
+        pass
+    ln = ex.get("pred_yolo_length_m")
+    try:
+        if ln is not None and float(ln) < 62.0:
+            u += 0.14
+    except (TypeError, ValueError):
+        pass
+    if ex.get("coastal_or_land_adjacent") is True or ex.get("near_coast_proxy") is True:
+        u += 0.08
+    return float(max(0.0, min(1.0, u)))
+
+
 def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     """
     Scalar **epistemic-style** uncertainty from AquaForge’s own logits (0 ≈ confident, ~1 ≈ unsure).
@@ -42,8 +79,28 @@ def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     seg = out["seg_logit"]
     ps = torch.sigmoid(seg).clamp(1e-5, 1 - 1e-5)
     ent = float((-(ps * ps.log() + (1 - ps) * (1 - ps).log()).mean()).item())
+    ent_n = ent / 0.69314718056
 
-    u = 0.38 * u_cls + 0.32 * u_h + 0.30 * (ent / 0.69314718056)
+    u_kp = 0.0
+    kph = out.get("kp_hm")
+    if kph is not None and isinstance(kph, torch.Tensor) and kph.numel() > 0:
+        ph = torch.sigmoid(kph).clamp(1e-5, 1 - 1e-5)
+        ent_k = float((-(ph * ph.log() + (1 - ph) * (1 - ph).log()).mean()).item())
+        u_kp = ent_k / 0.69314718056
+
+    c_conf = torch.sigmoid(out["hdg"][:, 2:3])
+    u_conf = float((4.0 * c_conf * (1.0 - c_conf)).mean().item())
+
+    if kph is not None:
+        u = (
+            0.28 * u_cls
+            + 0.22 * u_h
+            + 0.22 * ent_n
+            + 0.14 * u_kp
+            + 0.14 * u_conf
+        )
+    else:
+        u = 0.36 * u_cls + 0.30 * u_h + 0.22 * ent_n + 0.12 * u_conf
     return max(0.0, min(1.0, u))
 
 
@@ -115,6 +172,7 @@ def review_ui_active_learning_priority(
     if heading_labeled:
         p += 0.15
 
+    p *= 1.0 + 0.26 * review_ui_uncertainty_signal(ex)
     return float(max(0.45, min(p, 5.0)))
 
 

@@ -79,8 +79,8 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
 #   1) 1×1 ``neck_proj`` to a shared ``hidden`` (decouples vendor channel layouts from our heads).
 #   2) Nearest upsample coarser maps to the **finest** stride (preserves sharp edges for S2 hulls).
 #   3) **Harmonic blend**: softmax weights over the three aligned maps produce one *context* tensor;
-#      we concatenate that with the **fine** map (anchor) and run a single 3×3 ``fuse`` into ``hidden``.
-# This is not a lateral-sum pyramid: one global mixture plus an explicit high-res branch.
+#      concatenate with the **fine** map (anchor) → 3×3 ``fuse`` → add a **scaled mid-stride residual**
+#      (``tanh(mid_residual_scale) * up4``) for coarse–mid context without a second fusion stack.
 
 
 class _EncoderTower(nn.Module):
@@ -216,6 +216,8 @@ class AquaForgeUnifiedYOLO(nn.Module):
         )
         # Learned softmax weights over (fine, mid, coarse) for the context branch — starts near uniform.
         self.stride_harmonic_logits = nn.Parameter(torch.zeros(3))
+        # Mid-stride residual: adds coarse–mid structure without a second fusion path (AquaForge-only knob).
+        self.mid_residual_scale = nn.Parameter(torch.tensor(0.22))
         self.fuse = nn.Sequential(
             nn.Conv2d(self.hidden * 2, self.hidden, 3, 1, 1, bias=False),
             nn.BatchNorm2d(self.hidden),
@@ -238,7 +240,8 @@ class AquaForgeUnifiedYOLO(nn.Module):
         w = F.softmax(self.stride_harmonic_logits, dim=0)
         w3, w4, w5 = w[0].reshape(1, 1, 1, 1), w[1].reshape(1, 1, 1, 1), w[2].reshape(1, 1, 1, 1)
         context = w3 * p3 + w4 * up4 + w5 * up5
-        fused = self.fuse(torch.cat([context, p3], dim=1))
+        base = self.fuse(torch.cat([context, p3], dim=1))
+        fused = base + torch.tanh(self.mid_residual_scale) * up4
         seg_lr = self.seg_head(fused)
         seg = F.interpolate(seg_lr, size=(self.imgsz, self.imgsz), mode="bilinear", align_corners=False)
         kp_hm = self.kp_hm_head(fused)

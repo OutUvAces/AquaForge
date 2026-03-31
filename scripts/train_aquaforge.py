@@ -314,6 +314,9 @@ def main() -> None:
                     "seg_coverage_mean": cov,
                     "heading_ambiguity_mean": h_amb,
                     "al_priority_mean": float(batch_dict["al_priority"].mean().item()),
+                    "review_uncertainty_mean": float(
+                        batch_dict["review_uncertainty"].mean().item()
+                    ),
                 }
                 sw_eff = balancer.scale_weights(base_sw, batch_context=ctx)
             else:
