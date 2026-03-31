@@ -1,7 +1,5 @@
 # AquaForge
 
-**Repository:** [github.com/OutUvAces/AquaForge](https://github.com/OutUvAces/AquaForge) — clone with `git clone https://github.com/OutUvAces/AquaForge.git`.
-
 **Sentinel-2–based vessel candidate detection** with a **human-in-the-loop** Streamlit review UI: operators confirm vessels, mark bow/stern, adjust footprints, and export labeled training data. Optional **config-driven SOTA backends** add marine **YOLO** instance segmentation, **ShipStructure / SLAD-style keypoints** (ONNX), and **wake–keypoint heading fusion** (heuristic wake and/or ONNX wake), without changing the default offline-first path.
 
 - **Default backend:** `legacy_hybrid` — logistic regression + chip MLP ranking only (no extra ML weights required).
