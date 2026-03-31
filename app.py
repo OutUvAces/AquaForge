@@ -6,7 +6,7 @@ then use the bookmark file ``AquaForge.url`` or http://127.0.0.1:8501
 
 **Terminal:** ``py -3 -m streamlit run app.py`` or ``run_web.bat``
 
-Use the **sidebar** for downloads, exports, and optional sort-model training. Main screen is for daily review.
+**Main screen:** label spots (big close-up, simple buttons). **Sidebar:** downloads, exports, re-sort training, duplicate search — only when you need them.
 
 The app only answers at that URL while this computer is running the server.
 For a public URL with no local server, host the app (e.g. Streamlit Community Cloud).

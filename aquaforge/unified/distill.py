@@ -60,6 +60,24 @@ def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
     return float(max(0.0, min(1.0, u)))
 
 
+def self_training_trust_from_outputs(
+    vessel_prob: float,
+    model_uncertainty: float,
+    *,
+    export_uncertainty: float = 0.0,
+) -> float:
+    """
+    Trust scalar for pseudo / self-training chips: favors confident “is a ship” and low AquaForge
+    uncertainty. Optional ``export_uncertainty`` (0–1) in JSONL ``extra.af_export_uncertainty`` lets
+    the review UI / export tools mark curated chips that need gentler self-training.
+    """
+    u = max(0.0, min(1.0, float(model_uncertainty)))
+    pv = max(0.0, min(1.0, float(vessel_prob)))
+    base = max(0.04, min(1.0, (1.0 - u) * pv))
+    eu = max(0.0, min(1.0, float(export_uncertainty)))
+    return float(base * max(0.38, 1.0 - 0.28 * eu))
+
+
 def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     """
     Scalar **epistemic-style** uncertainty from AquaForge’s own logits (0 ≈ confident, ~1 ≈ unsure).

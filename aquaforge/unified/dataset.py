@@ -389,6 +389,8 @@ class PseudoChipCandidate:
     cx: float
     cy: float
     record_id: str
+    # Optional 0–1 from JSONL extra.af_export_uncertainty (how hard the chip looked when exported).
+    export_uncertainty: float = 0.0
 
 
 def iter_pseudo_chip_candidates(jsonl_path: Path, project_root: Path) -> Iterator[PseudoChipCandidate]:
@@ -419,7 +421,18 @@ def iter_pseudo_chip_candidates(jsonl_path: Path, project_root: Path) -> Iterato
             except (KeyError, TypeError, ValueError):
                 continue
             rid = str(rec.get("id", "")) or f"pseudo_{hash((path, cx, cy)) % (10**9)}"
-            yield PseudoChipCandidate(Path(path), cx, cy, rid)
+            ex = rec.get("extra") if isinstance(rec.get("extra"), dict) else {}
+            eu = 0.0
+            try:
+                raw_eu = ex.get("af_export_uncertainty")
+                if raw_eu is not None:
+                    eu = float(raw_eu)
+            except (TypeError, ValueError):
+                eu = 0.0
+            eu = max(0.0, min(1.0, eu))
+            yield PseudoChipCandidate(
+                Path(path), cx, cy, rid, export_uncertainty=eu
+            )
 
 
 def prepare_pseudo_self_training_batch(
@@ -440,7 +453,10 @@ def prepare_pseudo_self_training_batch(
     import torch
     import torch.nn.functional as Fn
 
-    from aquaforge.unified.distill import aquaforge_uncertainty_from_outputs
+    from aquaforge.unified.distill import (
+        aquaforge_uncertainty_from_outputs,
+        self_training_trust_from_outputs,
+    )
     from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
 
     if not candidates:
@@ -458,17 +474,20 @@ def prepare_pseudo_self_training_batch(
                 continue
             img = chip_bgr_to_tensor(bgr, imgsz)
             x = torch.from_numpy(img).float().unsqueeze(0).to(device)
-            cls_l, seg, _kp, hdg, _wake, _kp_hm = model(x)
+            cls_l, seg, _kp, hdg, _wake, kp_hm = model(x)
             out = {
                 "cls_logit": cls_l,
                 "seg_logit": seg,
                 "hdg": hdg,
+                "kp_hm": kp_hm,
             }
             u = float(aquaforge_uncertainty_from_outputs(out))
             pv = float(torch.sigmoid(cls_l.reshape(-1)[0]).item())
             if pv < min_vessel_conf or u > max_uncertainty:
                 continue
-            trust = max(0.05, min(1.0, (1.0 - u) * pv))
+            trust = self_training_trust_from_outputs(
+                pv, u, export_uncertainty=c.export_uncertainty
+            )
             imgs_list.append(img)
             trust_list.append(trust)
             soft_seg.append(torch.sigmoid(seg).detach())

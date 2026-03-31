@@ -79,8 +79,8 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
 #   1) 1×1 ``neck_proj`` to a shared ``hidden`` (decouples vendor channel layouts from our heads).
 #   2) Nearest upsample coarser maps to the **finest** stride (preserves sharp edges for S2 hulls).
 #   3) **Harmonic blend**: softmax weights over the three aligned maps produce one *context* tensor;
-#      concatenate with the **fine** map (anchor) → 3×3 ``fuse`` → add a **scaled mid-stride residual**
-#      (``tanh(mid_residual_scale) * up4``) for coarse–mid context without a second fusion stack.
+#      concatenate with the **fine** map (anchor) → :class:`_HarmonizerFuseDS` (depthwise 3×3 + pw 1×1)
+#      → add **scaled mid-stride residual** (``tanh(mid_residual_scale) * up4``).
 
 
 class _EncoderTower(nn.Module):
@@ -172,6 +172,23 @@ class AquaForgeMultiTask(nn.Module):
         return cls_logit, seg, kp, hdg, wake, kp_hm
 
 
+class _HarmonizerFuseDS(nn.Module):
+    """
+    Depthwise 3×3 then pointwise 1×1 on the stacked context+anchor map — fewer dense
+    cross-channel params than one full 3×3 on ``2*hidden`` channels (AquaForge harmonizer).
+    """
+
+    def __init__(self, c_in: int, c_out: int) -> None:
+        super().__init__()
+        self.dw = nn.Conv2d(c_in, c_in, 3, 1, 1, groups=c_in, bias=False)
+        self.pw = nn.Conv2d(c_in, c_out, 1, bias=False)
+        self.bn = nn.BatchNorm2d(c_out)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.bn(self.pw(self.dw(x))))
+
+
 class AquaForgeUnifiedYOLO(nn.Module):
     """
     YOLO backbone + neck → our fused feature map → seg (upsampled), KP heatmaps, global KP/heading/wake.
@@ -218,11 +235,7 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.stride_harmonic_logits = nn.Parameter(torch.zeros(3))
         # Mid-stride residual: adds coarse–mid structure without a second fusion path (AquaForge-only knob).
         self.mid_residual_scale = nn.Parameter(torch.tensor(0.22))
-        self.fuse = nn.Sequential(
-            nn.Conv2d(self.hidden * 2, self.hidden, 3, 1, 1, bias=False),
-            nn.BatchNorm2d(self.hidden),
-            nn.ReLU(inplace=True),
-        )
+        self.fuse = _HarmonizerFuseDS(self.hidden * 2, self.hidden)
         self.seg_head = nn.Conv2d(self.hidden, 1, 1, bias=False)
         self.kp_hm_head = nn.Conv2d(self.hidden, n_landmarks, 1, bias=False)
         self.pool = nn.AdaptiveAvgPool2d(1)

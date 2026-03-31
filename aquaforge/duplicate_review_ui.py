@@ -119,11 +119,10 @@ def _row_caption(rec: dict[str, Any]) -> str:
 
 def render_duplicate_review_expander(*, project_root: Path, labels_path: Path) -> None:
     cats_all = [c[0] for c in REVIEW_CATEGORIES]
-    with st.expander("Duplicate labels (same image, nearby position)", expanded=False):
+    with st.expander("Duplicate labels (optional)", expanded=False):
         st.caption(
-            "Finds **two or more** point rows on the **same TCI** whose centers fall within a pixel "
-            "radius (transitive groups). Compare hull previews, then **delete** extra rows by id. "
-            "**Back up** `ship_reviews.jsonl` first — deletion is permanent."
+            "Finds two or more saves on the **same image** very close together. Compare previews, "
+            "then remove extras by id. **Back up your labels file first** — deleting is permanent."
         )
         tol = st.number_input(
             "Distance threshold (px)",

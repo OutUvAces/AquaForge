@@ -1,8 +1,8 @@
 """
-Streamlit web UI: Sentinel-2 imagery and manual review of ship candidates.
+Streamlit UI: pick a satellite scene, refresh the spot queue, label each candidate.
 
-**Single scrollable page:** satellite download (expander), image setup, 100-cell overview, spot/locator review.
-Launched via ``app.py``, ``run_web.bat``, or ``Open Web App (no terminal).vbs``.
+Daily flow stays on the **main** column (big close-up, simple save buttons). Downloads, exports,
+retraining, and duplicate-finder live in the **sidebar** expanders.
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ from aquaforge.review_overlay import (
     extent_preview_image,
     footprint_width_length_m,
     fullres_xy_from_spot_red_outline_aabb_center,
+    overlay_heading_arrow_north,
     overlay_sota_on_spot_rgb,
     read_locator_and_spot_rgb_matching_stretch,
     vessel_quad_for_label,
@@ -162,7 +163,7 @@ DEFAULT_DATETIME = "2024-06-01T00:00:00Z/2024-06-15T23:59:59Z"
 MIN_OPEN_WATER_FRACTION = 0.01
 REVIEW_CHIP_TARGET_SIDE_M = 1000.0
 REVIEW_LOCATOR_TARGET_SIDE_M = 10000.0
-CHIP_DISPLAY_PX = 432
+CHIP_DISPLAY_PX = 540
 OVERVIEW_MOSAIC_DISPLAY_W = 1040
 DETECTION_POOL_MIN = 32
 DETECTION_POOL_MULT = 6
@@ -226,7 +227,12 @@ def _ui_styles() -> None:
     padding: 0.2rem 0.35rem !important;
     white-space: nowrap !important;
   }
-  button[kind="primary"] { font-size: 0.82rem !important; }
+  /* Larger primary actions for the save row (Ship / Not a ship / …) */
+  button[kind="primary"] {
+    font-size: 1.02rem !important;
+    padding: 0.5rem 0.65rem !important;
+    min-height: 2.6rem !important;
+  }
   .vd-hero {
     background: linear-gradient(125deg, #0c1220 0%, #152238 42%, #1e3a5f 100%);
     color: #e8eef7;
@@ -270,13 +276,13 @@ def _ui_styles() -> None:
 
 def _render_hero() -> None:
     st.markdown(
-        '<div class="vd-hero"><div class="vd-badge">Sentinel-2</div>'
+        '<div class="vd-hero"><div class="vd-badge">Ships on satellite</div>'
         "<h1>AquaForge</h1>"
-        "<p>Check bright spots on water, mark ships, save labels.</p></div>",
+        "<p>Work through bright spots on water — one scene at a time.</p></div>",
         unsafe_allow_html=True,
     )
     st.caption(
-        "← **Sidebar:** download scenes, export data, retrain how spots are sorted (optional)."
+        "← Open the **sidebar** only when you need downloads, exports, re-sort training, or duplicate search."
     )
     # Embedded training UI (session state): ``st.switch_page("pages/...")`` is unreliable
     # when ``PagesManager.get_pages()`` only lists the main script (Streamlit v2-style).
@@ -836,7 +842,6 @@ def main() -> None:
 
     labels_path = default_labels_path(ROOT)
     _session_init()
-    render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
 
     if st.session_state.get("vd_ui_mode") == "training_review":
         render_training_label_review_ui(
@@ -847,12 +852,13 @@ def main() -> None:
         return
 
     with st.sidebar:
-        st.markdown("##### Sidebar")
-        st.caption("Optional — open a section when you need it.")
+        st.markdown("##### Extra tools")
+        st.caption("Everything here is optional.")
         with st.expander("Satellite download", expanded=False):
             _render_catalog_panel()
         _ranking_models_expander(labels_path)
         _exports_and_analytics_expander(labels_path)
+        render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
 
     tci_list = discover_tci_jp2()
     if not tci_list:
@@ -864,8 +870,8 @@ def main() -> None:
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    st.markdown("### Review")
-    st.caption("Pick a scene, then **Refresh** to load the queue.")
+    st.markdown("## This scene")
+    st.caption("Choose the file below, then **Refresh** to fill the list of spots.")
 
     file_help = "Which scene to work on."
     col_scene, col_ref = st.columns([5, 1])
@@ -1402,11 +1408,40 @@ def _render_review_deck(
     labels_path: Path,
 ) -> None:
     idx = st.session_state.idx
-    if idx >= len(cands):
+    n = len(cands)
+    if idx >= n:
         st.success(
             "Done with this batch. Press **Refresh** for more spots (orange rings may already be saved or past your **Max spots** cap)."
         )
         return
+
+    na, nb, nc = st.columns([1, 2.8, 1])
+    with na:
+        if st.button(
+            "← Back",
+            disabled=idx <= 0,
+            use_container_width=True,
+            key="vd_review_spot_back",
+        ):
+            st.session_state.idx = idx - 1
+            st.rerun()
+    with nb:
+        _sc_prev = cands[idx][2]
+        _hint = (
+            " — you chose this on the map"
+            if _sc_prev == LOCATOR_MANUAL_SCORE
+            else ""
+        )
+        st.caption(f"**Spot {idx + 1}** of **{n}**{_hint} — then pick a label at the bottom.")
+    with nc:
+        if st.button(
+            "Next →",
+            disabled=idx >= n - 1,
+            use_container_width=True,
+            key="vd_review_spot_next",
+        ):
+            st.session_state.idx = idx + 1
+            st.rerun()
 
     cx, cy, score = cands[idx]
     spot_k = hashlib.sha256(
@@ -1431,16 +1466,9 @@ def _render_review_deck(
     if not isinstance(mk_draw, list):
         mk_draw = []
 
-    n = len(cands)
     flash_loc = st.session_state.pop("_vd_locator_queued_flash", None)
     if flash_loc:
         st.success(str(flash_loc))
-    spot_line = f"**{idx + 1} / {n}**"
-    if score == LOCATOR_MANUAL_SCORE:
-        spot_line += " · you picked this on the map"
-    else:
-        spot_line += f" · score {score:.2f}"
-    st.caption(spot_line)
 
     mp_disp = default_model_path(ROOT)
     mt_disp = mp_disp.stat().st_mtime if mp_disp.is_file() else 0.0
@@ -1456,19 +1484,23 @@ def _render_review_deck(
     )
     p_lr, p_mlp = proba_pair_at(clf_disp, bundle_disp, Path(tci_loaded), cx, cy)
     p_comb = combined_vessel_proba_with_bundle(p_lr, p_mlp, bundle_disp)
-    if p_comb is not None:
-        cols_p = st.columns(min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0)))
-        i_col = 0
-        if p_lr is not None:
-            cols_p[i_col].metric("Score A", f"{p_lr:.2f}")
-            i_col += 1
-        if p_mlp is not None:
-            cols_p[i_col].metric("Score B", f"{p_mlp:.2f}")
-            i_col += 1
-        if p_lr is not None and p_mlp is not None and i_col < len(cols_p):
-            cols_p[i_col].metric("Blend", f"{p_comb:.2f}")
-    elif clf_disp is not None or bundle_disp is not None:
-        st.caption("Scores unavailable — try **Refresh**.")
+    with st.expander("Is this probably a ship? (numbers)", expanded=False):
+        if p_comb is not None:
+            cols_p = st.columns(
+                min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0))
+            )
+            i_col = 0
+            if p_lr is not None:
+                cols_p[i_col].metric("Model A", f"{p_lr:.2f}")
+                i_col += 1
+            if p_mlp is not None:
+                cols_p[i_col].metric("Model B", f"{p_mlp:.2f}")
+                i_col += 1
+            if p_lr is not None and p_mlp is not None and i_col < len(cols_p):
+                cols_p[i_col].metric("Mixed", f"{p_comb:.2f}")
+            st.caption("Higher = more like past **Ship** saves (after you retrain sort models).")
+        elif clf_disp is not None or bundle_disp is not None:
+            st.caption("No score on this spot — try **Refresh**.")
 
     mt_path = default_multitask_path(ROOT)
     mt_bundle = load_review_multitask_bundle(mt_path)
@@ -1873,6 +1905,30 @@ def _render_review_deck(
     if not isinstance(mk_draw2, list):
         mk_draw2 = []
     spot_ui = draw_markers_on_rgb(spot_vis, mk_draw2) if mk_draw2 else spot_vis
+    if (
+        _draw_full_sota_vis
+        and sota_inference_requested(det_settings)
+        and isinstance(sota, dict)
+        and sota
+    ):
+        _arrow_h: float | None = None
+        for _hk in (
+            "heading_fused_deg",
+            "heading_keypoint_deg",
+            "heading_wake_heuristic_deg",
+        ):
+            _raw = sota.get(_hk)
+            if _raw is None:
+                continue
+            try:
+                _fv = float(_raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(_fv):
+                _arrow_h = _fv
+                break
+        if _arrow_h is not None:
+            spot_ui = overlay_heading_arrow_north(spot_ui, _arrow_h)
 
     chip_side = CHIP_DISPLAY_PX
     if extent_preview1 is not None:
@@ -1887,10 +1943,10 @@ def _render_review_deck(
     loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, chip_side)
 
     st.caption(
-        "Left: hull preview · Center: click markers · Right: wide map (click to queue a spot)"
+        "Smaller hull preview · **Large close-up** (click to mark) · Map (click to add a spot)"
     )
     st.markdown("##### Hull · Close-up · Map")
-    col_extent, col_spot, col_loc = st.columns([1, 1, 1])
+    col_extent, col_spot, col_loc = st.columns([2, 3.15, 2])
     click_spot_dim = None
     click_loc = None
     with col_extent:

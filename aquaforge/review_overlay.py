@@ -780,14 +780,8 @@ def overlay_sota_on_spot_rgb(
     wake_segment_crop: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> np.ndarray:
     """
-    Draw optional spot overlays on the chip (crop pixel coordinates):
-
-    - YOLO segmentation hull (cyan outline)
-    - Keypoints: use ``keypoints_xy_conf`` as ``(x, y, conf)`` for confidence-scaled
-      color and dot radius; else fall back to uniform ``keypoints_crop``.
-    - Bow→stern segment (green): line width scales with ``bow_stern_min_confidence``
-      when provided (min of bow/stern confidences).
-    - Heuristic wake axis segment (amber)
+    Draw ship chip overlays (crop pixels): hull outline, dots for hull points, bow-to-stern line,
+    wake line. Uses plain PIL drawing — no UI text here.
     """
     from PIL import Image, ImageDraw
 
@@ -803,7 +797,8 @@ def overlay_sota_on_spot_rgb(
             (float(np.clip(p[0], 0, w - 1)), float(np.clip(p[1], 0, h - 1)))
             for p in yolo_polygon_crop
         ]
-        draw.polygon(poly, outline=(0, 255, 220), width=lw)
+        hull_w = max(lw, min(h, w) // 50)
+        draw.polygon(poly, outline=(0, 255, 220), width=hull_w)
 
     if keypoints_xy_conf:
         # Semi-transparent disks: low-confidence joints fade (alpha + smaller radius).
@@ -855,4 +850,44 @@ def overlay_sota_on_spot_rgb(
         b = (float(np.clip(p1[0], 0, w - 1)), float(np.clip(p1[1], 0, h - 1)))
         draw.line([a, b], fill=(255, 200, 60), width=max(1, lw - 1))
 
+    return np.asarray(im)
+
+
+def overlay_heading_arrow_north(
+    rgb: np.ndarray,
+    heading_deg_from_north: float,
+    *,
+    cx: float | None = None,
+    cy: float | None = None,
+    length_frac: float = 0.24,
+    color: tuple[int, int, int] = (255, 230, 40),
+) -> np.ndarray:
+    """
+    Draw a **direction arrow** on the chip: degrees clockwise from north (up in the image).
+    Makes fused / keypoint heading visible at a glance on the close-up view.
+    """
+    from PIL import Image, ImageDraw
+
+    h, w = rgb.shape[0], rgb.shape[1]
+    if h < 8 or w < 8:
+        return rgb
+    rad = float(heading_deg_from_north) * (np.pi / 180.0)
+    # North = toward top of image (−y); east = +x
+    dx = float(np.sin(rad))
+    dy = float(-np.cos(rad))
+    cx_f = float(w * 0.5 if cx is None else np.clip(cx, 0, w - 1))
+    cy_f = float(h * 0.5 if cy is None else np.clip(cy, 0, h - 1))
+    L = float(min(h, w)) * float(np.clip(length_frac, 0.08, 0.45))
+    x1 = float(np.clip(cx_f + dx * L, 0, w - 1))
+    y1 = float(np.clip(cy_f + dy * L, 0, h - 1))
+    im = Image.fromarray(rgb.copy())
+    dr = ImageDraw.Draw(im)
+    lw = max(2, min(h, w) // 64)
+    dr.line([(cx_f, cy_f), (x1, y1)], fill=color, width=lw)
+    ah = max(5.0, L * 0.22)
+    bx, by = x1 - dx * ah, y1 - dy * ah
+    perp_x, perp_y = -dy, dx
+    p1 = (bx + perp_x * ah * 0.45, by + perp_y * ah * 0.45)
+    p2 = (bx - perp_x * ah * 0.45, by - perp_y * ah * 0.45)
+    dr.polygon([(x1, y1), p1, p2], fill=color)
     return np.asarray(im)

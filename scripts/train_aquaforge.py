@@ -112,7 +112,7 @@ def main() -> None:
         "--pseudo-jsonl",
         type=Path,
         default=None,
-        help="Optional JSONL of unlabeled chips (tci_path, cx_full, cy_full) — human-curated pool for self-training.",
+        help="JSONL of unlabeled chips (tci_path, cx_full, cy_full). Optional extra.af_export_uncertainty (0–1) lowers self-training trust when you mark hard chips.",
     )
     ap.add_argument(
         "--pseudo-per-epoch",

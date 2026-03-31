@@ -96,6 +96,16 @@ def scene_geometry_calibration(seg_gt: torch.Tensor, hdg: torch.Tensor | None) -
     return m, {"geom_cohesion_mult": float(g), "heading_amb_mult": float(h), "scene_calib_mult": m}
 
 
+def landmark_visibility_scene_boost(kp_vis: torch.Tensor) -> float:
+    """
+    When more hull joints are marked visible in the batch, slightly raise geometry weight —
+    ties shape supervision to how much the labeler actually marked (AquaForge coupling).
+    """
+    with torch.no_grad():
+        d = float(kp_vis.clamp(0, 1).mean().item())
+    return float(1.0 + 0.12 * d)
+
+
 def adaptive_heatmap_sigma_from_mask(seg_gt: torch.Tensor) -> float:
     """
     **Adaptive keypoint heatmaps**: shrink Gaussians when the supervised hull occupies a small
@@ -593,8 +603,12 @@ def aquaforge_joint_loss(
         logs["loss_distill"] = float(ld.detach())
 
     calib, calib_logs = scene_geometry_calibration(batch["seg"], out.get("hdg"))
-    total = total_cls + float(calib) * total_geo
+    lv_boost = landmark_visibility_scene_boost(batch["kp_vis"])
+    full_calib = float(calib) * lv_boost
     logs.update(calib_logs)
+    logs["landmark_vis_boost"] = float(lv_boost)
+    logs["scene_geo_full_mult"] = float(full_calib)
+    total = total_cls + full_calib * total_geo
 
     ls = batch.get("loss_scale")
     if ls is not None:
