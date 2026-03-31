@@ -7,12 +7,13 @@ logit first, then landmarks + heatmaps, heading, wake (smooth ramps vs ``total_e
 **Dynamic loss balancing** — :class:`aquaforge.unified.losses.DynamicLossBalancer`: EMA rescaling
 of curriculum weights from detached per-task losses (our stabiliser, not third-party MT code).
 
-**Active learning** — JSONL rows from the review UI carry ``al_priority`` (uncertainty, small-vessel
-proxies, etc.). Optional :class:`torch.utils.data.WeightedRandomSampler` oversamples hard chips.
-Optional **ensemble teacher** distillation (heading sin/cos only) with a per-epoch CPU budget via
-``hydrate_teacher_signals``. Optional **pseudo self-training** from a curated unlabeled JSONL
-(``--pseudo-jsonl``) with AquaForge-derived soft targets and trust. Balancer uses **batch context**
-(small hulls, heading ambiguity, AL priority).
+**Review → train loop** — Save labels in Streamlit; exported JSONL rows carry ``al_priority`` (uncertain
+scores, small-ship cues, clouds, manual map picks, optional ``af_training_priority`` in ``extra``).
+:class:`torch.utils.data.WeightedRandomSampler` (unless ``--no-priority-sampling``) oversamples those
+chips. Each epoch, ``hydrate_teacher_signals`` ranks the same priorities and runs the **ensemble**
+teacher on the top ``--teacher-per-epoch`` IDs for heading distillation. **Self-training**:
+``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
+want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).
 
 YOLO11/12 backbone path: ``--architecture yolo_unified``, ``--freeze-backbone-epochs``.
 
@@ -99,7 +100,7 @@ def main() -> None:
         "--teacher-per-epoch",
         type=int,
         default=0,
-        help="Run ensemble teacher on up to this many unique record_ids per epoch (0 = off). CPU-heavy.",
+        help="Ensemble heading teacher on up to this many record_ids per epoch, highest al_priority first (0=off). CPU-heavy.",
     )
     ap.add_argument(
         "--teacher-distill-weight",

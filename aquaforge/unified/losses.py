@@ -62,6 +62,20 @@ def build_kp_heat_targets(
     return out.clamp(0, 1)
 
 
+def geometry_scene_cohesion_multiplier(seg_gt: torch.Tensor) -> float:
+    """
+    **Cohesive joint loss**: up-weight segmentation / landmarks / heading / wake when the GT hull
+    covers a **small** fraction of the chip (typical Sentinel-2 small vessels). Classification stays
+    unscaled so presence signal stays stable. This ties “scene difficulty” to vessel footprint — our
+    coupling, not a generic uncertainty weight.
+    """
+    with torch.no_grad():
+        cov = float(seg_gt.clamp(0, 1).mean().item())
+    ref = 0.062
+    x = min(1.0, cov / max(ref, 1e-5))
+    return float(1.0 + 0.24 * max(0.0, 1.0 - x))
+
+
 def adaptive_heatmap_sigma_from_mask(seg_gt: torch.Tensor) -> float:
     """
     **Adaptive keypoint heatmaps**: shrink Gaussians when the supervised hull occupies a small
@@ -475,7 +489,10 @@ def aquaforge_joint_loss(
                 loss_scale optional scalar broadcast (self-training trust).
     """
     logs: dict[str, float] = {}
-    total = torch.zeros((), device=out["cls_logit"].device, dtype=out["cls_logit"].dtype)
+    dev = out["cls_logit"].device
+    dt = out["cls_logit"].dtype
+    total_cls = torch.zeros((), device=dev, dtype=dt)
+    total_geo = torch.zeros((), device=dev, dtype=dt)
 
     w = stage_weights.get("cls", 1.0)
     if w > 0:
@@ -483,7 +500,7 @@ def aquaforge_joint_loss(
             out["cls_logit"].squeeze(-1),
             batch["cls"].float(),
         )
-        total = total + w * lc
+        total_cls = total_cls + w * lc
         logs["loss_cls"] = float(lc.detach())
 
     w = stage_weights.get("seg", 1.0)
@@ -497,7 +514,7 @@ def aquaforge_joint_loss(
         d_tversk = tversky_loss_with_logits(sl, seg_tgt)
         d_bce = bce_logits_masked(sl, seg_tgt, torch.ones_like(seg_tgt))
         seg_loss = d_dice + 0.38 * d_iou + 0.22 * d_tversk + 0.42 * d_bce
-        total = total + w * seg_loss
+        total_geo = total_geo + w * seg_loss
         logs["loss_seg"] = float(seg_loss.detach())
 
     w = stage_weights.get("kp", 1.0)
@@ -508,7 +525,7 @@ def aquaforge_joint_loss(
         xy = torch.sigmoid(xy_logit)
         c, vb = keypoint_loss(xy, batch["kp_gt"], batch["kp_vis"], vis_logits=vis_logit)
         lk = c + 0.25 * vb
-        total = total + w * lk
+        total_geo = total_geo + w * lk
         logs["loss_kp"] = float(lk.detach())
 
     w = stage_weights.get("kp_hm", 0.0)
@@ -518,14 +535,14 @@ def aquaforge_joint_loss(
             batch["kp_heat"],
             batch["kp_vis"],
         )
-        total = total + w * lhm
+        total_geo = total_geo + w * lhm
         logs["loss_kp_hm"] = float(lhm.detach())
 
     w = stage_weights.get("hdg", 1.0)
     if w > 0:
         h = out["hdg"]
         lh = heading_combined_circular_loss(h[:, :2], batch["hdg_deg"], batch["hdg_valid"] > 0)
-        total = total + w * lh
+        total_geo = total_geo + w * lh
         logs["loss_hdg"] = float(lh.detach())
 
     w = stage_weights.get("wake", 1.0)
@@ -539,7 +556,7 @@ def aquaforge_joint_loss(
             lw = lw_gt + 0.34 * lw_coh
         else:
             lw = lw_gt
-        total = total + w * lw
+        total_geo = total_geo + w * lw
         logs["loss_wake"] = float(lw.detach())
 
     w = stage_weights.get("distill", 0.0)
@@ -547,8 +564,12 @@ def aquaforge_joint_loss(
         th = batch["teacher_hdg_sc"]
         val = batch["teacher_valid"] if batch.get("teacher_valid") is not None else batch["hdg_valid"]
         ld = distill_l2(F.normalize(out["hdg"][:, :2], dim=-1), th, val > 0)
-        total = total + w * ld
+        total_geo = total_geo + w * ld
         logs["loss_distill"] = float(ld.detach())
+
+    g_mult = geometry_scene_cohesion_multiplier(batch["seg"])
+    total = total_cls + float(g_mult) * total_geo
+    logs["geom_cohesion_mult"] = float(g_mult)
 
     ls = batch.get("loss_scale")
     if ls is not None:

@@ -780,7 +780,7 @@ def overlay_sota_on_spot_rgb(
     wake_segment_crop: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> np.ndarray:
     """
-    Draw optional SOTA overlays on the spot chip (crop pixel coordinates):
+    Draw optional spot overlays on the chip (crop pixel coordinates):
 
     - YOLO segmentation hull (cyan outline)
     - Keypoints: use ``keypoints_xy_conf`` as ``(x, y, conf)`` for confidence-scaled

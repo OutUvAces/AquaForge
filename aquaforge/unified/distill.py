@@ -6,8 +6,10 @@ keypoints + wake fusion). We only distill **heading** as normalised (sin, cos) t
 AquaForge's own heading head — we do not clone their internal losses or architectures.
 
 **Active learning**: priority scores come from review-UI ``extra`` fields (model uncertainty, small
-vessel proxies, low heading trust, cloud flags). The trainer can oversample high-priority rows and
-attach a limited teacher budget per epoch for repeatable incremental retraining.
+vessel proxies, low heading trust, cloud flags, optional manual training boost). The trainer
+oversamples high-priority rows; :func:`hydrate_teacher_signals` fills ensemble heading targets on the
+same ranked queue each epoch so **chips you struggled with in the UI** tend to get teacher signal
+first — a tight loop with Streamlit review exports, not a separate mining pipeline.
 """
 
 from __future__ import annotations
@@ -98,6 +100,10 @@ def review_ui_active_learning_priority(
 
     if ex.get("partial_cloud_obscuration") is True:
         p += 0.45
+
+    # Operator placed the crosshair by hand on the map (often ambiguous scenes).
+    if ex.get("manual_locator") is True:
+        p += 0.3
 
     # Coastal / land-adjacent queue (optional UI flag — not a third-party dataset label).
     if ex.get("coastal_or_land_adjacent") is True or ex.get("near_coast_proxy") is True:

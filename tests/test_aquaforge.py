@@ -75,6 +75,7 @@ class TestAquaForgeLosses(unittest.TestCase):
         total, logs = aquaforge_joint_loss(out, batch, sw)
         self.assertTrue(torch.isfinite(total))
         self.assertIn("loss_kp_hm", logs)
+        self.assertIn("geom_cohesion_mult", logs)
 
     def test_cnn_forward_six_outputs(self) -> None:
         try:

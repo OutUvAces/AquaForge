@@ -11,26 +11,33 @@ Repository layout (core package): [`aquaforge/`](aquaforge/) — `detection_conf
 
 ## Run the web UI
 
-1. **Python 3.10+** recommended. Create a venv and install dependencies:
+1. Install **Python 3.10+**, then:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-   For marine YOLO, Hugging Face weights, and ONNX Runtime (keypoints / optional wake ONNX):
+   Add **optional** ship-AI overlays (marine YOLO, keypoints, wake ONNX):
 
    ```bash
    pip install -r requirements-ml.txt
    ```
 
-2. **Start Streamlit**
+2. Start the app: **`py -3 -m streamlit run app.py`** (or `run_web.bat` on Windows).
 
-   - **Windows:** double-click `run_web.bat`, or run `py -3 -m streamlit run app.py` from the repo root.
-   - **General:** `python -m streamlit run app.py`
+3. Open the URL in the terminal (usually [http://localhost:8501](http://localhost:8501)).
 
-3. Open the URL shown in the terminal (typically [http://localhost:8501](http://localhost:8501)).
+Entry point: [`app.py`](app.py) → `aquaforge.web_ui.main`.
 
-Entry point: [`app.py`](app.py) imports `aquaforge.web_ui.main`.
+### Why it’s useful
+
+You work through **candidate chips** from Sentinel-2 scenes: confirm ships, mark bow/stern and hull points, set heading, and save. The UI stays **plain-language** on purpose—overlays show masks, keypoints, and hints without assuming ML background. **`legacy_hybrid`** stays the default (no extra weights). Turn on **`ensemble`** or **`aquaforge`** in `data/config/detection.yaml` when you want richer overlays and ranking.
+
+### Improve the model over time
+
+1. **Review regularly** — Save labels; tricky chips (uncertain scores, small ships, clouds, spots you placed on the map by hand) automatically get a **higher training priority** in the exported JSONL.
+2. **Train** — `py -3 scripts/train_aquaforge.py` uses that priority to **see hard examples more often**. Optional `--teacher-per-epoch` adds ensemble heading hints on the **same** high-priority rows each epoch. Optional `--pseudo-jsonl` self-trains on a **separate** JSONL of chips you curated without full labels.
+3. **Deploy** — Point YAML at `data/models/aquaforge/aquaforge.pt` (or ONNX) and keep using the same review flow.
 
 ---
 
@@ -50,11 +57,11 @@ Entry point: [`app.py`](app.py) imports `aquaforge.web_ui.main`.
 
 AquaForge is **not** a repackaged Ultralytics or public multi-task recipe. The design is ours end-to-end:
 
-- **Joint loss** (`aquaforge/unified/losses.py`) — Hull supervision combines soft Dice, **soft IoU**, **Tversky** (asymmetric FP/FN for thin S2 hulls), and masked BCE. Landmarks use **adaptive-width** Gaussian heatmaps (tighter when the GT mask footprint is small) plus global readout. Heading uses **cosine + geodesic (acos)** on (sin, cos) — proper circular geometry, not a raw angle regression. Wake matches supervised vectors and adds **coherence** with the model’s own heading. Optional **ensemble distillation** pulls only normalised heading from our **in-repo ensemble** into AquaForge’s heading head.
+- **Joint loss** (`aquaforge/unified/losses.py`) — Hull supervision combines soft Dice, **soft IoU**, **Tversky**, and masked BCE. **Geometry cohesion**: segmentation, landmarks, heatmaps, heading, wake, and distill losses are scaled up when the GT hull covers a **small** fraction of the chip (typical small Sentinel-2 vessels); classification stays unscaled. Landmarks use **adaptive-width** Gaussian heatmaps plus global readout. Heading uses **cosine + geodesic** on (sin, cos). Wake matches supervised vectors and **coheres** with the model heading. Optional **ensemble distillation** on heading (sin/cos) only.
 - **Curriculum** — `CurriculumSchedule` defines **explicit stage targets** in normalized time; `curriculum_base_weights` **interpolates** between them with smooth global easing. Tune the node table in code for your fleet — it is independent of any YOLO training recipe.
 - **Dynamic balancing** — `DynamicLossBalancer` mixes EMA-based magnitude rescaling with **batch context**: low mask coverage (small vessels), high **heading ambiguity** from the heading confidence logit, and high **AL priority** nudge task weights — our heuristic blend, not copied GradNorm/DWA code.
 - **Active learning** — UI audit fields drive `review_ui_active_learning_priority` (uncertainty, small length proxies, low keypoint trust, clouds, optional **coastal** flags). **`aquaforge_uncertainty_from_outputs`** adds **AquaForge-native** uncertainty (cls margin + heading proxy + seg entropy) for analysis and future tooling. **`hydrate_teacher_signals`** applies a capped **ensemble** teacher budget per epoch. **`--pseudo-jsonl`** enables **self-training** on a **human-curated unlabeled chip pool**: a frozen teacher pass produces soft seg + heading targets; the student step trains on the same weights with a trust scalar — quality is gated by which chips you export into that JSONL from the review workflow.
-- **YOLO backbone + our heads** (`aquaforge/unified/model.py`) — We stop before Ultralytics Detect/Segment, **project** neck tensors to a common width, **nearest-align** to the finest stride, **concatenate** and **3×3 fuse** — not a lateral-sum FPN clone. Seg decodes from the fused map then upsamples; heatmaps stay at stride ~8 for our targets.
+- **YOLO neck + stride harmonizer** (`aquaforge/unified/model.py`) — We stop before Ultralytics Detect/Segment, **project** each scale to a shared width, **nearest-align** to the finest stride, form a **learned softmax blend** of the three maps (context), **concatenate** with the fine map (anchor), then **3×3 fuse** into our heads. Seg upsamples to full resolution; heatmaps stay near stride /8.
 - **Bright spots + ocean mask** — Candidates still come from **bright-spot** detection and **ocean/water masking** (`detection_backend`, `ne_ocean_mask`, hybrid ranking). AquaForge trains on chips from that same human-review path, so the unified model stays tied to the product’s distinctive front end.
 
 **Training:** `py -3 scripts/train_aquaforge.py` — flags include `--no-dynamic-balance`, `--no-priority-sampling`, `--teacher-per-epoch`, `--teacher-distill-weight`, `--pseudo-jsonl`, `--pseudo-per-epoch`, `--pseudo-mix-weight`, `--pseudo-min-conf`, `--pseudo-max-u`.

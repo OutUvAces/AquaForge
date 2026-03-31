@@ -4,17 +4,12 @@ AquaForge unified multi-task models.
 We provide two architectures (checkpoint ``meta["model_arch"]`` selects at load time):
 
 1. **cnn** — ``AquaForgeMultiTask``: lightweight in-repo CNN (default for CPU-only dev, no Ultralytics).
-2. **yolo_unified** — ``AquaForgeUnifiedYOLO``: Ultralytics YOLO11/12 **backbone+neck** features taken
-   *just before* the detection head, fused with **our** segmentation / heatmap / global heads.
+2. **yolo_unified** — ``AquaForgeUnifiedYOLO``: YOLO11/12 **backbone+neck** tensors taken *just before*
+   the vendor detection head, passed through our **stride harmonizer** (learned blend of scales + fine
+   anchor) and **custom** heads: hull mask, landmark heatmaps, global keypoint readout, sin/cos
+   heading, wake — trained with ``aquaforge.unified.losses`` and ``scripts/train_aquaforge.py``.
 
-Design (distinct from vanilla YOLO): we do **not** reuse Ultralytics detect/segment losses. We stop the
-forward pass at the multi-scale tensors that feed ``Detect`` / ``Segment``, project them to a common
-width, fuse at the finest stride (typically /8), and attach **custom** heads for hull mask, landmark
-heatmaps + global coordinate readout, sin/cos heading, and wake auxiliary — trained with
-``aquaforge.unified.losses`` and a curriculum in ``scripts/train_aquaforge.py``.
-
-This is inspired by multi-task extensions of YOLO-style detectors but keeps **our** task heads and
-losses entirely under this repo.
+We do **not** reuse Ultralytics detect/segment losses; only early graph features feed AquaForge.
 """
 
 from __future__ import annotations
@@ -68,7 +63,7 @@ def forward_yolo_to_detect_inputs(
 
 
 def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]:
-    """Normalize to three tensors (fine→coarse) for PAN-style necks."""
+    """Take the last three 4D feature maps (fine → coarse) from the neck stack."""
     fs = [f for f in feats if isinstance(f, torch.Tensor) and f.dim() == 4]
     if len(fs) >= 3:
         return [fs[-3], fs[-2], fs[-1]]
@@ -79,16 +74,13 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
     raise RuntimeError("AquaForge YOLO backbone produced no 4D feature maps")
 
 
-# --- AquaForge YOLO fusion (our design, not a literal FPN head copy) ---
-# We take the *neck output tensors that would feed Ultralytics Detect/Segment* and:
-#   1) 1×1 ``neck_proj`` to a **shared width** ``hidden`` (decouples channel layouts from our heads).
-#   2) **Align to the finest stride** with *nearest* upsample (hard preserve, no learnable
-#      transposed-conv drift) — emphasises high-frequency hull cues for S2 small vessels.
-#   3) **Depth concatenation** + a single 3×3 ``fuse`` conv mixes scales in one shot; we do *not*
-#      reuse YOLO’s top-down additive fusion graph. Seg decodes from fused map at native stride
-#      then bilinear upsample to full ``imgsz``; heatmaps stay at /8 for our Gaussian targets.
-# This is intentionally simpler than cloning PAFPN internals while still exploiting multi-scale
-# context for heading / wake globals via GAP on the fused tensor.
+# --- AquaForge **stride harmonizer** (YOLO neck → our tensor) ---
+# We read the tensors that would feed Ultralytics Detect/Segment, then:
+#   1) 1×1 ``neck_proj`` to a shared ``hidden`` (decouples vendor channel layouts from our heads).
+#   2) Nearest upsample coarser maps to the **finest** stride (preserves sharp edges for S2 hulls).
+#   3) **Harmonic blend**: softmax weights over the three aligned maps produce one *context* tensor;
+#      we concatenate that with the **fine** map (anchor) and run a single 3×3 ``fuse`` into ``hidden``.
+# This is not a lateral-sum pyramid: one global mixture plus an explicit high-res branch.
 
 
 class _EncoderTower(nn.Module):
@@ -222,8 +214,10 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.neck_proj = nn.ModuleList(
             [nn.Conv2d(d, self.hidden, 1, bias=False) for d in dims]
         )
+        # Learned softmax weights over (fine, mid, coarse) for the context branch — starts near uniform.
+        self.stride_harmonic_logits = nn.Parameter(torch.zeros(3))
         self.fuse = nn.Sequential(
-            nn.Conv2d(self.hidden * 3, self.hidden, 3, 1, 1, bias=False),
+            nn.Conv2d(self.hidden * 2, self.hidden, 3, 1, 1, bias=False),
             nn.BatchNorm2d(self.hidden),
             nn.ReLU(inplace=True),
         )
@@ -236,13 +230,15 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.wake_head = nn.Linear(self.hidden, 2)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # See module-level note: concat-fuse on aligned scales, not YOLO’s detect head FPN.
         feats = _take_last_three_scales(forward_yolo_to_detect_inputs(self.ultra, x))
         p3, p4, p5 = [self.neck_proj[i](feats[i]) for i in range(3)]
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
         up5 = F.interpolate(p5, size=target_hw, mode="nearest")
-        fused = self.fuse(torch.cat([p3, up4, up5], dim=1))
+        w = F.softmax(self.stride_harmonic_logits, dim=0)
+        w3, w4, w5 = w[0].reshape(1, 1, 1, 1), w[1].reshape(1, 1, 1, 1), w[2].reshape(1, 1, 1, 1)
+        context = w3 * p3 + w4 * up4 + w5 * up5
+        fused = self.fuse(torch.cat([context, p3], dim=1))
         seg_lr = self.seg_head(fused)
         seg = F.interpolate(seg_lr, size=(self.imgsz, self.imgsz), mode="bilinear", align_corners=False)
         kp_hm = self.kp_hm_head(fused)

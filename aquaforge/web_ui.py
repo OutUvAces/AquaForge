@@ -162,7 +162,7 @@ DEFAULT_DATETIME = "2024-06-01T00:00:00Z/2024-06-15T23:59:59Z"
 MIN_OPEN_WATER_FRACTION = 0.01
 REVIEW_CHIP_TARGET_SIDE_M = 1000.0
 REVIEW_LOCATOR_TARGET_SIDE_M = 10000.0
-CHIP_DISPLAY_PX = 500
+CHIP_DISPLAY_PX = 460
 OVERVIEW_MOSAIC_DISPLAY_W = 1040
 DETECTION_POOL_MIN = 32
 DETECTION_POOL_MULT = 6
@@ -218,7 +218,7 @@ def _ui_styles() -> None:
         """
 <style>
   /* App shell — calm “ops desk” palette, works in light + Streamlit default */
-  div.block-container { padding-top: 1.25rem; max-width: 1400px; }
+  div.block-container { padding-top: 0.85rem; max-width: 1120px; }
   /* Review deck: fit full marker-role labels on one row */
   button[kind="secondary"] {
     font-size: 0.68rem !important;
@@ -230,14 +230,14 @@ def _ui_styles() -> None:
   .vd-hero {
     background: linear-gradient(125deg, #0c1220 0%, #152238 42%, #1e3a5f 100%);
     color: #e8eef7;
-    padding: 1.35rem 1.5rem 1.15rem 1.5rem;
-    border-radius: 14px;
-    margin: 0 0 1rem 0;
+    padding: 0.85rem 1.1rem 0.75rem 1.1rem;
+    border-radius: 12px;
+    margin: 0 0 0.65rem 0;
     box-shadow: 0 4px 24px rgba(15, 23, 42, 0.35);
   }
   .vd-hero h1 {
-    margin: 0 0 0.35rem 0;
-    font-size: 1.65rem;
+    margin: 0 0 0.25rem 0;
+    font-size: 1.38rem;
     font-weight: 700;
     letter-spacing: -0.03em;
     border: none;
@@ -270,16 +270,17 @@ def _ui_styles() -> None:
 
 def _render_hero() -> None:
     st.markdown(
-        '<div class="vd-hero"><div class="vd-badge">Sentinel-2 · vessel candidates</div>'
-        "<h1>AquaForge</h1></div>",
+        '<div class="vd-hero"><div class="vd-badge">Sentinel-2 ships</div>'
+        "<h1>AquaForge</h1>"
+        "<p>Review bright spots on water, label vessels, and save training data — all in one place.</p></div>",
         unsafe_allow_html=True,
     )
     # Embedded training UI (session state): ``st.switch_page("pages/...")`` is unreliable
     # when ``PagesManager.get_pages()`` only lists the main script (Streamlit v2-style).
     if st.button(
-        "🗂️ Review / edit saved labels (training data)",
+        "Edit saved labels",
         key="vd_nav_training_review",
-        help="Opens the training review in this app (no separate multipage route).",
+        help="Fix past labels and markers without leaving this app.",
     ):
         st.session_state["vd_ui_mode"] = "training_review"
         st.rerun()
@@ -456,17 +457,15 @@ def _render_catalog_panel() -> None:
 
 def _ranking_models_expander(labels_path: Path) -> None:
     """Optional LR + chip MLP used only to rank/sort candidates (not raw detection)."""
-    with st.expander("ML models", expanded=False):
+    with st.expander("Sort models (optional)", expanded=False):
         try:
             rel = str(labels_path.relative_to(ROOT))
         except ValueError:
             rel = str(labels_path)
         st.caption(f"Labels file: `{rel}`")
         st.caption(
-            "**Retrain** searches LR + chip MLP settings for **vessel vs not** (out-of-fold agreement), then fits "
-            "**multi-task** heads on your manual `extra` fields (wake, cloud, sizes, heading, aspect, marker roles, "
-            f"sources, …) into `{default_multitask_path(ROOT).name}`. Ranking only affects **sort order** and "
-            "fused P(vessel) — not where bright spots are found."
+            "**Retrain** improves how spots are **sorted** (not where they are found). "
+            "It also refreshes small helper models that guess extra fields from your past labels."
         )
         p_lr = default_model_path(ROOT)
         p_mlp = default_chip_mlp_path(ROOT)
@@ -688,7 +687,7 @@ def _ranking_models_expander(labels_path: Path) -> None:
 
 def _exports_and_analytics_expander(labels_path: Path) -> None:
     """Aspect-ratio stats, static-sea file summary, and downloadable PNG card ZIP for API preview."""
-    with st.expander("Exports & analytics (cards, aspect ratio, static sea)", expanded=False):
+    with st.expander("Exports & stats", expanded=False):
         s = summarize_vessel_aspect_ratios(labels_path)
         if s:
             st.markdown(
@@ -824,7 +823,7 @@ def main() -> None:
     st.set_page_config(
         page_title="AquaForge",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
         page_icon="🛰️",
     )
     _ui_styles()
@@ -848,30 +847,26 @@ def main() -> None:
     _ranking_models_expander(labels_path)
     _exports_and_analytics_expander(labels_path)
 
-    with st.expander("Satellite data — search & download (Copernicus)", expanded=False):
+    with st.expander("Get satellite images (Copernicus)", expanded=False):
         _render_catalog_panel()
 
     tci_list = discover_tci_jp2()
     if not tci_list:
         st.markdown('<div class="vd-card">', unsafe_allow_html=True)
         st.info(
-            "No true-color JP2 files found under `data/`. "
-            "Expand **Satellite data** above to download an image, then pick it below."
+            "No images found under **data/**. Use **Get satellite images** above, or add a `*TCI_10m*.jp2` file."
         )
         st.caption(f"Labels still append to: `{labels_path}`")
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    st.markdown("#### Image setup")
-    st.caption(
-        "Pick one image, confirm the land/water mask (SCL) is available, tune the detector if needed, "
-        "then load or refresh the **review queue**."
-    )
+    st.markdown("### Review")
+    st.caption("Choose an image, then **Refresh queue** to load spots to review.")
 
-    file_help = "Which file to review (not the label — use buttons below the images)."
+    file_help = "Image file to work on."
     if len(tci_list) <= 15:
         pick_i = st.radio(
-            "True-color image",
+            "Image",
             options=list(range(len(tci_list))),
             format_func=lambda i: tci_list[i].name,
             help=file_help,
@@ -881,7 +876,7 @@ def main() -> None:
         choice = tci_list[int(pick_i)]
     else:
         choice = st.selectbox(
-            "True-color image",
+            "Image",
             options=tci_list,
             format_func=lambda p: p.name,
             help=file_help,
@@ -894,7 +889,7 @@ def main() -> None:
 
     if scl_found is None:
         st.warning(
-            "No `*_SCL_20m.jp2` beside this TCI — detection is blocked until the mask exists."
+            "Missing land/water mask file (`*_SCL_20m.jp2` next to the image). Detection needs it."
         )
         if ready_dl:
             if st.button("Download SCL for this product", key="workbench_dl_scl"):
@@ -910,51 +905,38 @@ def main() -> None:
         else:
             st.caption("Add `.env` credentials or copy an SCL JP2 next to the TCI.")
 
-    with st.expander("Detector tuning", expanded=False):
+    with st.expander("Spot finder settings (advanced)", expanded=False):
         st.caption(
-            "SCL is **warped to the TCI footprint**, then intersected with **Natural Earth 10 m ocean** "
-            "(cached under ``data/.cache/naturalearth``) so static shoreline drops most land glints. "
-            "Peels **2 px** from the SCL edge, then **1× erosion**. "
-            "Disable NE with env ``AQUAFORGE_NO_NE_OCEAN=1`` (or legacy ``VESSEL_DETECTION_NO_NE_OCEAN``). "
-            "Bright spots: **top‑k ocean tail** + **10×10 regional pass**."
+            "Uses water-only pixels and a land mask. Lower **Speed vs detail** = slower but can catch smaller glints."
         )
         ds_factor = st.slider(
-            "Detector internal downsample factor",
+            "Speed vs detail (higher = faster)",
             4,
             12,
             4,
             key="webui_ds_factor",
-            help=(
-                "Detection scans a **shrunken RGB** of the image: width and height are divided by this "
-                "integer (e.g. 4 ⇒ ~1/4 resolution per axis). **Lower = finer search** and usually "
-                "more accurate candidate centers on the **same** full-res TCI grid; **higher = faster** "
-                "but easier to miss tiny glints or land-edge bleed. Leave at **4** for best accuracy unless refresh is too slow."
-            ),
+            help="Divides image size for scanning. Try **4** for best detail.",
         )
         max_k = st.slider(
-            "Max spots in review queue",
+            "Max spots in queue",
             8,
             DEFAULT_OVERVIEW_MAX_CANDIDATES,
             64,
             key="webui_max_k",
-            help=(
-                "After **Refresh queue**, up to this many unlabeled detector picks (ranked). "
-                f"The 100-cell image overview uses the same detector cap ({DEFAULT_OVERVIEW_MAX_CANDIDATES})."
-            ),
+            help="How many unlabeled spots to keep after **Refresh queue**.",
         )
         scl_str = st.text_input(
-            "Custom SCL path (optional)",
+            "Custom mask file (optional)",
             value="",
             key="webui_scl_path",
-            placeholder="Path to *_SCL_20m.jp2",
+            placeholder="*_SCL_20m.jp2 path",
         )
-        with st.expander("SOTA ranking (YOLO / detection.yaml)", expanded=False):
+        with st.expander("Detection config file (experts)", expanded=False):
             _det_ui = load_detection_settings(ROOT)
             ex_p = example_detection_yaml_path()
             st.caption(
-                f"Active backend: **`{_det_ui.backend}`**. Copy **`{ex_p}`** to **`data/config/detection.yaml`** "
-                "(create folders if needed). Install **`pip install -r requirements-ml.txt`** for Ultralytics + "
-                "HF weights (`mayrajeo/marine-vessel-yolo` → `yolo11s_tci.pt`)."
+                f"Current mode: **`{_det_ui.backend}`**. Copy **`{ex_p}`** → **`data/config/detection.yaml`**. "
+                "For optional ship-AI overlays: **`pip install -r requirements-ml.txt`**."
             )
         st.markdown("---")
         st.caption(
@@ -992,9 +974,7 @@ def main() -> None:
         )
     with c_hint:
         st.caption(
-            "Uses open-water pixels only; centers already in **labels** are skipped. "
-            f"The detector requests up to **{DEFAULT_OVERVIEW_MAX_CANDIDATES}** picks per image so the overview map "
-            "and this queue stay in sync (then your **Max spots** cap trims the list for review)."
+            "Skips spots you already labeled. The scene map and queue share the same candidate list."
         )
 
     should_load = refresh or (st.session_state.last_scene_key != scene_key)
@@ -1112,8 +1092,7 @@ def main() -> None:
     if not candidates_ready(cands, tci_loaded):
         if tci_loaded:
             st.info(
-                "Review queue is empty — **Refresh queue** after detector runs, or add picks from "
-                "the **100-cell image overview** above."
+                "Nothing to review — press **Refresh queue**, or tap the **scene map** above to add spots."
             )
         else:
             st.info("Pick an image above and press **Refresh queue**.")
@@ -1138,14 +1117,12 @@ def _render_hundred_cell_overview(
     meta: dict,
 ) -> None:
     exp = st.expander(
-        f"100-cell image overview ({N_CELLS} tiles) — detector map & tile QA",
+        "Scene map (10×10 grid)",
         expanded=False,
     )
     with exp:
         st.caption(
-            "The **full image** is downsampled then split into a **10×10 grid** (100 tiles). "
-            "With an SCL mask, **land is dimmed** so **open water** pops; the **gold** lines are the tile boundaries. "
-            "**Orange** (white halo) = detector picks on this mosaic."
+            "Full image in a grid. Land is dimmed when a mask is available. **Orange** = suggested spots."
         )
         ds_factor = int(st.session_state.get("webui_ds_factor", 6))
         scl_raw = st.session_state.get("webui_scl_path", "") or ""
@@ -1220,10 +1197,9 @@ def _render_hundred_cell_overview(
         dets_meta = ov_meta.get("detections_fullres") or []
         scl_save = str(scl_opt.resolve()) if scl_opt and scl_opt.is_file() else None
 
-        st.markdown("##### Per-tile training / QA (100-cell grid)")
+        st.markdown("##### Quick tile feedback")
         st.caption(
-            f"**Mostly land:** tile open-water ≤ **{100.0 * TILE_WATER_FRACTION_LAND_MAX:.0f}%** (SCL on the overview). "
-            f"**Mostly water:** ≥ **{100.0 * TILE_WATER_FRACTION_WATER_MIN:.0f}%**. Mixed tiles: use spot review."
+            "Mark whole tiles as OK land, bad land picks, or water worth another look."
         )
         bulk_land = st.checkbox(
             "For “false picks on land”, also add **Land** point labels at each detector center in that tile",
@@ -1485,14 +1461,14 @@ def _render_review_deck(
         cols_p = st.columns(min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0)))
         i_col = 0
         if p_lr is not None:
-            cols_p[i_col].metric("P(vessel) LR", f"{p_lr:.2f}")
+            cols_p[i_col].metric("Likely ship (A)", f"{p_lr:.2f}")
             i_col += 1
         if p_mlp is not None:
-            cols_p[i_col].metric("P(vessel) chip", f"{p_mlp:.2f}")
+            cols_p[i_col].metric("Likely ship (B)", f"{p_mlp:.2f}")
             i_col += 1
         if p_lr is not None and p_mlp is not None and i_col < len(cols_p):
-            cols_p[i_col].metric("Fused", f"{p_comb:.2f}")
-        st.caption("Higher ≈ closer to how you labeled **Vessel** vs negatives (after training).")
+            cols_p[i_col].metric("Combined", f"{p_comb:.2f}")
+        st.caption("Higher ≈ more like **Vessel** labels you saved before (after retrain).")
     elif clf_disp is not None or bundle_disp is not None:
         st.caption("Scores unavailable here — try **Refresh queue**.")
 
@@ -1504,10 +1480,8 @@ def _render_review_deck(
         except Exception:
             mt_pred = {}
         if mt_pred:
-            with st.expander("Multi-task field estimates (trained on your labels)", expanded=False):
-                st.caption(
-                    "Rough sklearn heads on LR+chip features — not shown if a head had too few training rows."
-                )
+            with st.expander("Guessed fields from your labels", expanded=False):
+                st.caption("Rough hints from past saves — hidden if not enough examples.")
                 items = sorted(mt_pred.items(), key=lambda t: t[0])
                 for k, v in items:
                     if isinstance(v, float):
@@ -1523,7 +1497,7 @@ def _render_review_deck(
     _sota_allow = True
     if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
         _sota_allow = st.checkbox(
-            "Enable SOTA neural inference for this spot (YOLO / keypoints / wake ONNX)",
+            "Run extra ship-AI overlays for this spot (uses your detection config)",
             key=f"{spot_k}_sota_neural_allow",
         )
 
@@ -1590,7 +1564,7 @@ def _render_review_deck(
             st.session_state[sota_k + "_sig"] = sota_sig
         sota = st.session_state.get(sota_k, {}) or {}
     if sota_inference_requested(det_settings) and sota:
-        with st.expander("SOTA overlays & heading hints", expanded=False):
+        with st.expander("Overlays & heading hints", expanded=False):
             if clf_disp is not None or bundle_disp is not None:
                 _rs = rank_score_at_point(
                     ROOT,
@@ -1612,11 +1586,8 @@ def _render_review_deck(
                 _rk_s = f"{float(_rk):.3f}" if _rk is not None else "n/a"
                 _yo_s = f"{float(_yo):.3f}" if _yo is not None else "n/a"
                 st.caption(
-                    f"**Legacy vs SOTA (this spot):** hybrid fused P(vessel) **{_leg_s}** "
-                    f"- rank score used for ordering **{_rk_s}** "
-                    f"(`{det_settings.backend}`) - marine YOLO conf **{_yo_s}**. "
-                    "With `legacy_hybrid`, queue order matches hybrid only; with "
-                    "`yolo_fusion` / `ensemble` / `aquaforge`, rank score blends or replaces hybrid per YAML."
+                    f"This spot — combined score **{_leg_s}**, sort score **{_rk_s}** "
+                    f"({det_settings.backend}), ship-mask confidence **{_yo_s}**."
                 )
             _gt_hint = spot_geometry_gt_from_labels(
                 labels_path,
@@ -1689,7 +1660,7 @@ def _render_review_deck(
                             "heading is available on this spot for a circular-error comparison."
                         )
             if sota.get("yolo_confidence") is not None:
-                st.metric("Marine YOLO confidence", f"{float(sota['yolo_confidence']):.3f}")
+                st.metric("Ship mask score", f"{float(sota['yolo_confidence']):.3f}")
             if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:
                 st.caption(
                     f"Mask L×W (YOLO seg. + GSD): **{sota['yolo_length_m']:.0f}** × "
@@ -1725,8 +1696,8 @@ def _render_review_deck(
             sw = sota.get("sota_warnings") or []
             if isinstance(sw, list) and sw:
                 st.warning(
-                    "SOTA diagnostics: " + "; ".join(str(x) for x in sw if x)
-                    + " — keypoints/wake ONNX may be skipped; heuristic wake can still run."
+                    "Overlay notes: " + "; ".join(str(x) for x in sw if x)
+                    + " — optional keypoint/wake models may be off; simple wake line can still show."
                 )
 
     pool = st.session_state.get("detector_ranked_unlabeled_pool") or []
@@ -1853,7 +1824,7 @@ def _render_review_deck(
         and sota
     ):
         _draw_full_sota_vis = st.checkbox(
-            "Draw full SOTA overlays on spot (mask, keypoints, wake segments)",
+            "Show full overlays on spot (mask, keypoints, wake)",
             key=f"{spot_k}_sota_overlay_lazy",
         )
 
@@ -1923,8 +1894,13 @@ def _render_review_deck(
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, chip_side)
     loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, chip_side)
 
-    st.markdown("##### Views · hull extent · spot · locator")
-    col_extent, col_spot, col_loc = st.columns(3)
+    with st.expander("How to use these three images", expanded=False):
+        st.caption(
+            "**Left:** hull outline. **Center:** click to place bow, stern, sides. "
+            "**Right:** wide map — click to add another spot to the queue."
+        )
+    st.markdown("##### Hull · close-up · map")
+    col_extent, col_spot, col_loc = st.columns([1, 1, 1])
     click_spot_dim = None
     click_loc = None
     with col_extent:
@@ -1963,15 +1939,15 @@ def _render_review_deck(
 
     wake_vis_k = f"wake_vis_{spot_k}"
     st.checkbox(
-        "Wake visible (image-level cue for training — no point to place)",
+        "I can see a wake behind the ship",
         key=wake_vis_k,
-        help="Labels whether a wake is visible; use with bow/stern (and future models) for heading/wake learning.",
+        help="Helps the model learn heading from water patterns.",
     )
     cloud_partial_k = f"cloud_partial_{spot_k}"
     st.checkbox(
-        "Vessel partially obscured by cloud (training cue)",
+        "Ship partly hidden by cloud",
         key=cloud_partial_k,
-        help="Labels reduced visibility from cloud over the hull or wake; for robustness / future models.",
+        help="Marks harder examples for training.",
     )
     mk_list_fb = st.session_state.get(dim_key, [])
     if not isinstance(mk_list_fb, list):
@@ -2076,17 +2052,16 @@ def _render_review_deck(
         st.markdown(spot_body, unsafe_allow_html=True)
     with f_loc:
         st.markdown(
-            '<p class="vd-deck-foot"><b>Rings</b> — orange: detector only (not in this batch). '
-            "Cyan: auto queued. Green: manual locator queued. "
-            "Magenta: already saved in labels (do not queue again). Yellow: this spot chip.</p>",
+            '<p class="vd-deck-foot"><b>Map rings</b> — orange: other suggestions; green: you queued; '
+            "purple: already labeled; yellow: this spot.</p>",
             unsafe_allow_html=True,
         )
 
-    st.markdown("##### Vessel count (this detection)")
+    st.markdown("##### How many ships in this chip?")
     v1, v2, v3, v4 = st.columns(4)
     with v1:
         if st.button(
-            "1 hull",
+            "One ship",
             key=f"hull_single_{spot_k}",
             use_container_width=True,
             type="primary" if not is_twin else "secondary",
@@ -2101,11 +2076,11 @@ def _render_review_deck(
             st.rerun()
     with v2:
         if st.button(
-            "2 hulls",
+            "Two ships",
             key=f"hull_twin_{spot_k}",
             use_container_width=True,
             type="primary" if is_twin else "secondary",
-            help="Two vessels (e.g. STS / alongside)",
+            help="Two vessels side by side",
         ):
             st.session_state[hull_mode_k] = "twin"
             st.session_state[active_hull_k] = 1
@@ -2137,11 +2112,9 @@ def _render_review_deck(
             st.session_state[active_hull_k] = 2
             st.rerun()
 
-    st.markdown("##### Marker roles")
+    st.markdown("##### Points to click (then click the close-up)")
     st.caption(
-        "Pick a role, then click **Spot**. **Side** and **Ends** keep the **two most recent** clicks per hull. "
-        "**Ends** = bow vs stern unknown (two headings ±180°). **Clear** removes all markers. "
-        "Saving a category below also writes **vessel_size_feedback**."
+        "Choose bow, stern, sides, etc., then click the **center** image. **Clear** removes all points."
     )
     r_cols = st.columns(6)
     for i, role in enumerate(MARKER_ROLES):
@@ -2313,7 +2286,7 @@ def _render_review_deck(
                         "**Already in the pending queue** — green ring on locator (same click tolerance)."
                     )
 
-    st.markdown("##### Label confidence (all categories except Unclear)")
+    st.markdown("##### How sure are you? (not for “Unclear”)")
     conf_k = f"label_conf_{spot_k}"
     if conf_k not in st.session_state:
         st.session_state[conf_k] = "high"
