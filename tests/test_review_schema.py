@@ -44,6 +44,35 @@ class TestReviewSchema(unittest.TestCase):
         self.assertAlmostEqual(e["pred_combined_proba"], 0.15)
         self.assertEqual(e["model_run_id"], "abc")
 
+    def test_enrich_sota_fields(self) -> None:
+        e = enrich_extra_with_predictions(
+            {},
+            yolo_confidence=0.88,
+            yolo_length_m=120.0,
+            yolo_width_m=30.0,
+            heading_fused_deg=45.0,
+            heading_fusion_source="fused_keypoint_wake",
+            sota_backend="ensemble",
+        )
+        self.assertAlmostEqual(e["pred_yolo_confidence"], 0.88)
+        self.assertAlmostEqual(e["pred_yolo_length_m"], 120.0)
+        self.assertAlmostEqual(e["pred_heading_fused_deg"], 45.0)
+        self.assertEqual(e["sota_backend_snapshot"], "ensemble")
+
+    def test_enrich_wake_kp_audit(self) -> None:
+        e = enrich_extra_with_predictions(
+            {},
+            heading_wake_heuristic_deg=11.0,
+            heading_wake_onnx_deg=22.0,
+            wake_combine_source="wake_onnx",
+            keypoint_bow_confidence=0.9,
+            keypoint_stern_confidence=0.85,
+            keypoint_heading_trust=0.85,
+        )
+        self.assertAlmostEqual(e["pred_heading_wake_heuristic_deg"], 11.0)
+        self.assertAlmostEqual(e["pred_heading_wake_onnx_deg"], 22.0)
+        self.assertEqual(e["pred_wake_combine_source"], "wake_onnx")
+
     def test_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             a = Path(td) / "x.bin"

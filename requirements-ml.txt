@@ -1,1 +1,8 @@
-# Heavier optional dependencies (e.g. PyTorch). Not required: training uses scikit-learn from requirements.txt.
+# Optional: marine YOLO + HF weights (torch). Core labeling/review works without this file.
+# Install: pip install -r requirements-ml.txt
+
+torch>=2.1.0
+torchvision>=0.16.0
+ultralytics>=8.3.0
+huggingface_hub>=0.20.0
+onnxruntime>=1.16.0

@@ -58,15 +58,28 @@ from vessel_detection.review_schema import (
     enrich_extra_with_predictions,
     model_run_fingerprint,
 )
+from vessel_detection.detection_backend import (
+    rank_candidates_from_config,
+    run_sota_spot_inference,
+)
+from vessel_detection.detection_config import (
+    default_detection_yaml_path,
+    example_detection_yaml_path,
+    load_detection_settings,
+    sota_inference_requested,
+    yolo_requested,
+)
 from vessel_detection.review_overlay import (
     annotate_locator_spot_outline,
     annotate_spot_detection_center,
     extent_preview_image,
     footprint_width_length_m,
     fullres_xy_from_spot_red_outline_aabb_center,
+    overlay_sota_on_spot_rgb,
     read_locator_and_spot_rgb_matching_stretch,
     vessel_quad_for_label,
 )
+from vessel_detection.yolo_marine_backend import default_marine_yolo_dir
 from vessel_detection.scene_overview_100 import (
     DEFAULT_OVERVIEW_MAX_CANDIDATES,
     DEFAULT_OVERVIEW_MAX_DIM,
@@ -175,6 +188,14 @@ def _load_classifier_cached(model_path_str: str, file_mtime: float):
 @st.cache_resource(show_spinner=False)
 def _load_chip_mlp_bundle_cached(path_str: str, file_mtime: float):
     return load_chip_mlp_bundle(Path(path_str))
+
+
+def _detection_yaml_mtime(project_root: Path) -> float:
+    p = default_detection_yaml_path(project_root)
+    try:
+        return float(p.stat().st_mtime) if p.is_file() else 0.0
+    except OSError:
+        return 0.0
 
 
 REVIEW_CATEGORY_BUTTON_LABELS: dict[str, str] = {
@@ -920,6 +941,14 @@ def main() -> None:
             key="webui_scl_path",
             placeholder="Path to *_SCL_20m.jp2",
         )
+        with st.expander("SOTA ranking (YOLO / detection.yaml)", expanded=False):
+            _det_ui = load_detection_settings(ROOT)
+            ex_p = example_detection_yaml_path()
+            st.caption(
+                f"Active backend: **`{_det_ui.backend}`**. Copy **`{ex_p}`** to **`data/config/detection.yaml`** "
+                "(create folders if needed). Install **`pip install -r requirements-ml.txt`** for Ultralytics + "
+                "HF weights (`mayrajeo/marine-vessel-yolo` → `yolo11s_tci.pt`)."
+            )
         st.markdown("---")
         st.caption(
             "**Static sea:** legacy `static_sea_witness.jsonl` can still suppress picks when "
@@ -1007,17 +1036,30 @@ def main() -> None:
                     if mlp_mod
                     else None
                 )
+                det_cfg = load_detection_settings(ROOT)
                 if cands:
                     try:
-                        cands = rank_candidates_hybrid(cands, tci_path, clf, chip_bundle)
+                        cands = rank_candidates_from_config(
+                            cands,
+                            tci_path,
+                            clf,
+                            chip_bundle,
+                            det_cfg,
+                            ROOT,
+                        )
                     except Exception:
-                        if clf is not None:
-                            try:
-                                cands = rank_candidates_by_vessel_proba(
-                                    cands, tci_path, clf
-                                )
-                            except Exception:
-                                pass
+                        try:
+                            cands = rank_candidates_hybrid(
+                                cands, tci_path, clf, chip_bundle
+                            )
+                        except Exception:
+                            if clf is not None:
+                                try:
+                                    cands = rank_candidates_by_vessel_proba(
+                                        cands, tci_path, clf
+                                    )
+                                except Exception:
+                                    pass
                 st.session_state.detector_ranked_unlabeled_pool = list(cands)
                 cands = cands[:max_k]
                 st.session_state.detector_candidates = cands
@@ -1475,6 +1517,74 @@ def _render_review_deck(
     loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = (
         read_locator_and_spot_rgb_matching_stretch(tci_p, cx, cy, chip_px, locator_px)
     )
+
+    det_settings = load_detection_settings(ROOT)
+    _mscl = (meta or {}).get("scl_path")
+    _scl_sota = Path(str(_mscl)) if _mscl else None
+    if _scl_sota is not None and not _scl_sota.is_file():
+        _scl_sota = None
+    sota_sig = (
+        _detection_yaml_mtime(ROOT),
+        mt,
+        round(cx, 4),
+        round(cy, 4),
+        det_settings.backend,
+        int(sc0),
+        int(sr0),
+    )
+    sota_k = f"vd_sota_{spot_k}"
+    sota: dict = {}
+    if sota_inference_requested(det_settings):
+        if st.session_state.get(sota_k + "_sig") != sota_sig:
+            st.session_state[sota_k] = run_sota_spot_inference(
+                ROOT,
+                tci_p,
+                cx,
+                cy,
+                det_settings,
+                spot_col_off=int(sc0),
+                spot_row_off=int(sr0),
+                scl_path=_scl_sota,
+            )
+            st.session_state[sota_k + "_sig"] = sota_sig
+        sota = st.session_state.get(sota_k, {}) or {}
+    if sota_inference_requested(det_settings) and sota:
+        with st.expander("SOTA overlays & heading hints", expanded=False):
+            if sota.get("yolo_confidence") is not None:
+                st.metric("Marine YOLO confidence", f"{float(sota['yolo_confidence']):.3f}")
+            if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:
+                st.caption(
+                    f"Mask L×W (YOLO seg. + GSD): **{sota['yolo_length_m']:.0f}** × "
+                    f"**{sota['yolo_width_m']:.0f}** m"
+                )
+            if sota.get("heading_keypoint_deg") is not None:
+                st.caption(
+                    f"Keypoint heading (bow←stern): **{float(sota['heading_keypoint_deg']):.1f}°**"
+                )
+            if sota.get("keypoint_bow_confidence") is not None:
+                st.caption(
+                    f"Keypoint conf. (bow / stern): **{float(sota['keypoint_bow_confidence']):.2f}** / "
+                    f"**{float(sota.get('keypoint_stern_confidence') or 0):.2f}**"
+                )
+            if sota.get("heading_wake_heuristic_deg") is not None:
+                st.caption(
+                    f"Heuristic wake axis: **{float(sota['heading_wake_heuristic_deg']):.1f}°**"
+                )
+            if sota.get("heading_wake_onnx_deg") is not None:
+                st.caption(
+                    f"ONNX wake direction: **{float(sota['heading_wake_onnx_deg']):.1f}°**"
+                )
+            if sota.get("heading_wake_deg") is not None:
+                st.caption(
+                    f"Combined wake heading: **{float(sota['heading_wake_deg']):.1f}°** "
+                    f"({sota.get('heading_wake_combine_source', '')})"
+                )
+            if sota.get("heading_fused_deg") is not None:
+                st.caption(
+                    f"Fused heading: **{float(sota['heading_fused_deg']):.1f}°** "
+                    f"({sota.get('heading_fusion_source', '')})"
+                )
+
     pool = st.session_state.get("detector_ranked_unlabeled_pool") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
     ranked_extra: list[tuple[float, float]] = []
@@ -1600,6 +1710,33 @@ def _render_review_deck(
         meters_per_pixel=gavg,
         draw_footprint_outline=False,
     )
+    if sota_inference_requested(det_settings) and sota:
+        _poly = None
+        raw_poly = sota.get("yolo_polygon_crop")
+        if isinstance(raw_poly, list) and len(raw_poly) >= 3:
+            _poly = [(float(t[0]), float(t[1])) for t in raw_poly]
+        _kpc = None
+        raw_kp = sota.get("keypoints_crop")
+        if isinstance(raw_kp, list) and raw_kp:
+            _kpc = [(float(t[0]), float(t[1])) for t in raw_kp]
+        _bs = None
+        raw_bs = sota.get("bow_stern_segment_crop")
+        if isinstance(raw_bs, list) and len(raw_bs) == 2:
+            a0, a1 = raw_bs[0], raw_bs[1]
+            _bs = ((float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1])))
+        _wk = None
+        raw_wk = sota.get("wake_segment_crop")
+        if isinstance(raw_wk, list) and len(raw_wk) == 2:
+            w0, w1 = raw_wk[0], raw_wk[1]
+            _wk = ((float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1])))
+        if _poly or _kpc or _bs or _wk:
+            spot_vis = overlay_sota_on_spot_rgb(
+                spot_vis,
+                yolo_polygon_crop=_poly,
+                keypoints_crop=_kpc,
+                bow_stern_segment_crop=_bs,
+                wake_segment_crop=_wk,
+            )
     mk_draw2 = st.session_state.get(dim_key, [])
     if not isinstance(mk_draw2, list):
         mk_draw2 = []
@@ -2178,7 +2315,25 @@ def _commit_review_label(
         clf_save, bundle_save, Path(tci_loaded), cx_save, cy_save
     )
     sv_comb = combined_vessel_proba_with_bundle(sv_lr, sv_mlp, bundle_save)
-    fpid = model_run_fingerprint(mp_save, mlp_save_p)
+    _fp_paths: list[Path] = [mp_save, mlp_save_p]
+    _cfg_fp = default_detection_yaml_path(ROOT)
+    if _cfg_fp.is_file():
+        _fp_paths.append(_cfg_fp)
+    _dset_fp = load_detection_settings(ROOT)
+    _yw_fp = default_marine_yolo_dir(ROOT) / _dset_fp.yolo.weights_file
+    if _yw_fp.is_file():
+        _fp_paths.append(_yw_fp)
+    _kpx = _dset_fp.keypoints.external_onnx_path
+    if _kpx:
+        _kp_p = Path(str(_kpx))
+        if _kp_p.is_file():
+            _fp_paths.append(_kp_p)
+    _wkx = _dset_fp.wake_fusion.onnx_wake_path
+    if _wkx:
+        _wk_p = Path(str(_wkx))
+        if _wk_p.is_file():
+            _fp_paths.append(_wk_p)
+    fpid = model_run_fingerprint(*_fp_paths)
     extra: dict = {"score": score, "candidate_index": idx}
     wake_k = f"wake_vis_{spot_k}"
     extra["wake_present"] = bool(st.session_state.get(wake_k, False))
@@ -2296,12 +2451,28 @@ def _commit_review_label(
     )
     if ckey == "vessel" and st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin":
         extra[TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY] = True
+    sota_save = st.session_state.get(f"vd_sota_{spot_k}", {}) or {}
     extra = enrich_extra_with_predictions(
         extra,
         lr_proba=sv_lr,
         mlp_proba=sv_mlp,
         combined_proba=sv_comb,
         model_run_id=fpid,
+        yolo_confidence=sota_save.get("yolo_confidence"),
+        yolo_length_m=sota_save.get("yolo_length_m"),
+        yolo_width_m=sota_save.get("yolo_width_m"),
+        yolo_aspect=sota_save.get("yolo_aspect"),
+        heading_keypoint_deg=sota_save.get("heading_keypoint_deg"),
+        heading_wake_deg=sota_save.get("heading_wake_deg"),
+        heading_fused_deg=sota_save.get("heading_fused_deg"),
+        heading_fusion_source=sota_save.get("heading_fusion_source"),
+        sota_backend=sota_save.get("backend"),
+        heading_wake_heuristic_deg=sota_save.get("heading_wake_heuristic_deg"),
+        heading_wake_onnx_deg=sota_save.get("heading_wake_onnx_deg"),
+        wake_combine_source=sota_save.get("heading_wake_combine_source"),
+        keypoint_bow_confidence=sota_save.get("keypoint_bow_confidence"),
+        keypoint_stern_confidence=sota_save.get("keypoint_stern_confidence"),
+        keypoint_heading_trust=sota_save.get("keypoint_heading_trust"),
     )
     append_review(
         labels_path,

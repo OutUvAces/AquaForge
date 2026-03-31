@@ -753,3 +753,58 @@ def annotate_locator_spot_outline(
         draw.rectangle([x0, y0, x1, y1], outline=(255, 255, 0), width=lw)
 
     return np.asarray(im)
+
+
+def overlay_sota_on_spot_rgb(
+    rgb: np.ndarray,
+    *,
+    yolo_polygon_crop: list[tuple[float, float]] | None = None,
+    keypoints_crop: list[tuple[float, float]] | None = None,
+    bow_stern_segment_crop: tuple[tuple[float, float], tuple[float, float]]
+    | None = None,
+    wake_segment_crop: tuple[tuple[float, float], tuple[float, float]] | None = None,
+) -> np.ndarray:
+    """
+    Draw optional SOTA overlays on the spot chip (crop pixel coordinates):
+
+    - YOLO segmentation hull (cyan outline)
+    - Keypoints / superstructure landmarks (magenta dots; low-confidence may be omitted upstream)
+    - Bow→stern segment from keypoints (green)
+    - Heuristic wake axis segment (amber)
+    """
+    from PIL import Image, ImageDraw
+
+    im = Image.fromarray(rgb.copy())
+    draw = ImageDraw.Draw(im)
+    h, w = rgb.shape[0], rgb.shape[1]
+    lw = max(2, min(h, w) // 80)
+
+    if yolo_polygon_crop and len(yolo_polygon_crop) >= 3:
+        poly = [
+            (float(np.clip(p[0], 0, w - 1)), float(np.clip(p[1], 0, h - 1)))
+            for p in yolo_polygon_crop
+        ]
+        draw.polygon(poly, outline=(0, 255, 220), width=lw)
+
+    if keypoints_crop:
+        r = max(2, lw)
+        for x, y in keypoints_crop:
+            xi = int(np.clip(round(float(x)), 0, w - 1))
+            yi = int(np.clip(round(float(y)), 0, h - 1))
+            draw.ellipse(
+                [xi - r, yi - r, xi + r, yi + r], outline=(255, 0, 200), width=1
+            )
+
+    if bow_stern_segment_crop is not None:
+        p0, p1 = bow_stern_segment_crop
+        a = (float(np.clip(p0[0], 0, w - 1)), float(np.clip(p0[1], 0, h - 1)))
+        b = (float(np.clip(p1[0], 0, w - 1)), float(np.clip(p1[1], 0, h - 1)))
+        draw.line([a, b], fill=(120, 255, 80), width=lw)
+
+    if wake_segment_crop is not None:
+        p0, p1 = wake_segment_crop
+        a = (float(np.clip(p0[0], 0, w - 1)), float(np.clip(p0[1], 0, h - 1)))
+        b = (float(np.clip(p1[0], 0, w - 1)), float(np.clip(p1[1], 0, h - 1)))
+        draw.line([a, b], fill=(255, 200, 60), width=max(1, lw - 1))
+
+    return np.asarray(im)

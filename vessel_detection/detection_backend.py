@@ -1,0 +1,369 @@
+"""
+Config-driven candidate ranking and per-spot SOTA post-processing.
+
+Keeps :func:`vessel_detection.ship_chip_mlp.rank_candidates_hybrid` as the default path;
+optional YOLO marine scores are fused or substituted per ``detection.yaml``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from vessel_detection.detection_config import (
+    DetectionSettings,
+    sota_inference_requested,
+    yolo_requested,
+)
+from vessel_detection.review_schema import combined_vessel_proba_with_bundle
+from vessel_detection.ship_chip_mlp import rank_candidates_hybrid, vessel_proba_chip_mlp
+from vessel_detection.ship_model import rank_candidates_by_vessel_proba
+from vessel_detection.training_data import extract_crop_features
+
+
+def _hybrid_proba_at(
+    tci_path: Path,
+    cx: float,
+    cy: float,
+    clf: Any,
+    chip_bundle: dict[str, Any] | None,
+) -> float | None:
+    p_lr: float | None = None
+    if clf is not None:
+        try:
+            feat = extract_crop_features(tci_path, cx, cy)
+            p_lr = float(clf.predict_proba(feat.reshape(1, -1))[0, 1])
+        except Exception:
+            p_lr = None
+    p_mlp = vessel_proba_chip_mlp(chip_bundle, tci_path, cx, cy)
+    return combined_vessel_proba_with_bundle(p_lr, p_mlp, chip_bundle)
+
+
+def rank_candidates_from_config(
+    candidates: list[tuple[float, float, float]],
+    tci_path: Path,
+    clf: Any,
+    chip_bundle: dict[str, Any] | None,
+    settings: DetectionSettings,
+    project_root: Path,
+) -> list[tuple[float, float, float]]:
+    """
+    Reorder ``(cx, cy, brightness_score)`` using YAML ``backend`` mode.
+
+    Tie-breaker: original detector ``brightness_score`` (descending).
+    """
+    if not candidates:
+        return candidates
+
+    work = list(candidates)
+    pred_yolo = None
+    if yolo_requested(settings):
+        from vessel_detection.yolo_marine_backend import (
+            merge_candidates_with_sliding_window_yolo,
+            try_load_marine_predictor,
+        )
+
+        pred_yolo = try_load_marine_predictor(project_root, settings.yolo)
+        if str(settings.yolo.inference_mode).strip() == "sliding_window_merge":
+            work = merge_candidates_with_sliding_window_yolo(
+                work, tci_path, pred_yolo, settings.yolo
+            )
+
+    if settings.backend == "legacy_hybrid":
+        try:
+            return rank_candidates_hybrid(work, tci_path, clf, chip_bundle)
+        except Exception:
+            if clf is not None:
+                try:
+                    return rank_candidates_by_vessel_proba(work, tci_path, clf)
+                except Exception:
+                    pass
+            return work
+
+    base: list[tuple[float, float, float]]
+    try:
+        base = rank_candidates_hybrid(work, tci_path, clf, chip_bundle)
+    except Exception:
+        base = list(work)
+        if clf is not None:
+            try:
+                base = rank_candidates_by_vessel_proba(work, tci_path, clf)
+            except Exception:
+                base = list(work)
+
+    if not yolo_requested(settings):
+        return base
+
+    from vessel_detection.yolo_marine_backend import yolo_confidence_only
+
+    pred = pred_yolo
+
+    wy = float(max(0.0, min(1.0, settings.yolo.weight_vs_hybrid)))
+    wh = 1.0 - wy
+
+    scored: list[tuple[float, float, float, float]] = []
+    for cx, cy, sc in base:
+        py = yolo_confidence_only(pred, tci_path, cx, cy, settings.yolo)
+        ph = _hybrid_proba_at(tci_path, cx, cy, clf, chip_bundle)
+
+        if settings.backend == "yolo_only":
+            rank_p = py
+        else:
+            if ph is None:
+                rank_p = py
+            else:
+                rank_p = wy * py + wh * float(ph)
+
+        scored.append((rank_p, cx, cy, sc))
+
+    scored.sort(key=lambda t: (-t[0], -t[3]))
+    return [(t[1], t[2], t[3]) for t in scored]
+
+
+def run_sota_spot_inference(
+    project_root: Path,
+    tci_path: Path,
+    cx: float,
+    cy: float,
+    settings: DetectionSettings,
+    *,
+    spot_col_off: int,
+    spot_row_off: int,
+    scl_path: Path | None = None,
+) -> dict[str, Any]:
+    """
+    Rich diagnostics for the review UI: YOLO mask, mask metrics, optional keypoints + wake fusion.
+
+    All keys are JSON-serializable where possible; includes crop-space polygon for overlays.
+    """
+    out: dict[str, Any] = {
+        "backend": settings.backend,
+        "yolo_confidence": None,
+        "yolo_polygon_crop": None,
+        "yolo_length_m": None,
+        "yolo_width_m": None,
+        "yolo_aspect": None,
+        "heading_keypoint_deg": None,
+        "heading_wake_deg": None,
+        "heading_wake_heuristic_deg": None,
+        "heading_wake_onnx_deg": None,
+        "heading_wake_combine_source": None,
+        "heading_fused_deg": None,
+        "heading_fusion_source": None,
+        "keypoints_json": None,
+        "keypoints_crop": None,
+        "keypoint_bow_confidence": None,
+        "keypoint_stern_confidence": None,
+        "keypoint_heading_trust": None,
+        "bow_stern_segment_crop": None,
+        "wake_segment_crop": None,
+        "heading_wake_combined_confidence": None,
+    }
+
+    if not sota_inference_requested(settings):
+        return out
+
+    from vessel_detection.mask_measurements import mask_oriented_dimensions_m
+    from vessel_detection.shipstructure_adapter import (
+        KeypointResult,
+        heading_deg_bow_to_stern,
+        keypoints_to_jsonable,
+        predict_keypoints_chip,
+    )
+    from vessel_detection.wake_heading_fusion import (
+        combine_two_wake_headings,
+        fuse_heading_keypoint_wake_adaptive,
+        heading_from_wake_onnx_chip,
+        heading_from_wake_segment_at_ship,
+        heuristic_wake_confidence,
+    )
+    from vessel_detection.yolo_marine_backend import (
+        polygon_fullres_to_crop,
+        try_load_marine_predictor,
+    )
+
+    pred = (
+        try_load_marine_predictor(project_root, settings.yolo)
+        if yolo_requested(settings)
+        else None
+    )
+
+    yr = None
+    if pred is not None:
+        yr = pred.predict_at_candidate(
+            tci_path,
+            cx,
+            cy,
+            chip_half=int(settings.yolo.chip_half),
+            imgsz=int(settings.yolo.imgsz),
+            conf_threshold=float(settings.yolo.conf_threshold),
+        )
+    if yr is not None:
+        out["yolo_confidence"] = float(yr.confidence)
+        poly_crop = polygon_fullres_to_crop(
+            yr.polygon_fullres, spot_col_off, spot_row_off
+        )
+        if poly_crop:
+            out["yolo_polygon_crop"] = [[float(x), float(y)] for x, y in poly_crop]
+        if yr.polygon_fullres:
+            dims = mask_oriented_dimensions_m(yr.polygon_fullres, tci_path)
+            if dims is not None:
+                lm, wm, ar = dims
+                out["yolo_length_m"] = float(lm)
+                out["yolo_width_m"] = float(wm)
+                out["yolo_aspect"] = float(ar)
+
+    kp: KeypointResult | None = None
+    if settings.keypoints.enabled:
+        kp = predict_keypoints_chip(
+            tci_path,
+            cx,
+            cy,
+            chip_half=int(settings.yolo.chip_half),
+            keypoints_cfg=settings.keypoints,
+        )
+        out["keypoints_json"] = keypoints_to_jsonable(kp)
+        if kp is not None and kp.xy_fullres:
+            mpc = float(settings.keypoints.min_point_confidence)
+            kpc_list: list[list[float]] = []
+            for i, (x, y) in enumerate(kp.xy_fullres):
+                cc = float(kp.conf[i]) if i < len(kp.conf) else 1.0
+                if cc < mpc:
+                    continue
+                kpc_list.append(
+                    [
+                        float(x) - float(spot_col_off),
+                        float(y) - float(spot_row_off),
+                    ]
+                )
+            out["keypoints_crop"] = kpc_list or [
+                [float(x) - float(spot_col_off), float(y) - float(spot_row_off)]
+                for x, y in kp.xy_fullres
+            ]
+
+    h_kp: float | None = None
+    kp_trust = 0.0
+    bow_c: float | None = None
+    stern_c: float | None = None
+    if kp is not None:
+        bow, stern = kp.bow_stern(
+            settings.keypoints.bow_index, settings.keypoints.stern_index
+        )
+        bow_c, stern_c = kp.bow_stern_confidences(
+            settings.keypoints.bow_index, settings.keypoints.stern_index
+        )
+        if bow_c is not None:
+            out["keypoint_bow_confidence"] = float(bow_c)
+        if stern_c is not None:
+            out["keypoint_stern_confidence"] = float(stern_c)
+        mbs = float(settings.keypoints.min_bow_stern_confidence)
+        if (
+            bow is not None
+            and stern is not None
+            and bow_c is not None
+            and stern_c is not None
+            and bow_c >= mbs
+            and stern_c >= mbs
+        ):
+            try:
+                h_kp = heading_deg_bow_to_stern(bow, stern, tci_path)
+                out["heading_keypoint_deg"] = float(h_kp)
+            except Exception:
+                h_kp = None
+            kp_trust = float(max(0.0, min(1.0, min(bow_c, stern_c))))
+            out["keypoint_heading_trust"] = kp_trust
+            out["bow_stern_segment_crop"] = [
+                [float(bow[0]) - float(spot_col_off), float(bow[1]) - float(spot_row_off)],
+                [
+                    float(stern[0]) - float(spot_col_off),
+                    float(stern[1]) - float(spot_row_off),
+                ],
+            ]
+
+    h_wake: float | None = None
+    h_heur: float | None = None
+    h_onnx: float | None = None
+    meta_heur: dict[str, Any] = {"ok": False}
+    meta_onnx: dict[str, Any] = {"ok": False}
+    if settings.backend == "ensemble" and settings.wake_fusion.enabled:
+        kp_ref = h_kp
+        if settings.wake_fusion.use_auto_wake_segment:
+            h_heur, meta_heur = heading_from_wake_segment_at_ship(
+                tci_path,
+                cx,
+                cy,
+                scl_path=scl_path,
+                reference_heading_deg=kp_ref,
+            )
+            out["wake_segment_meta_heuristic"] = meta_heur
+            if h_heur is not None:
+                out["heading_wake_heuristic_deg"] = float(h_heur)
+            if (
+                isinstance(meta_heur, dict)
+                and meta_heur.get("ok")
+                and isinstance(meta_heur.get("segment"), (list, tuple))
+                and len(meta_heur["segment"]) >= 4
+            ):
+                x1, y1, x2, y2 = [float(v) for v in meta_heur["segment"][:4]]
+                out["wake_segment_crop"] = [
+                    [x1 - float(spot_col_off), y1 - float(spot_row_off)],
+                    [x2 - float(spot_col_off), y2 - float(spot_row_off)],
+                ]
+
+        if settings.wake_fusion.use_onnx_wake and settings.wake_fusion.onnx_wake_path:
+            h_onnx, meta_onnx = heading_from_wake_onnx_chip(
+                tci_path,
+                cx,
+                cy,
+                chip_half=int(settings.yolo.chip_half),
+                onnx_path=str(settings.wake_fusion.onnx_wake_path),
+                input_size=int(settings.wake_fusion.onnx_wake_input_size),
+                layout=str(settings.wake_fusion.wake_onnx_layout),
+                confidence_prior=float(
+                    settings.wake_fusion.onnx_wake_confidence_prior
+                ),
+            )
+            out["wake_segment_meta_onnx"] = meta_onnx
+            if h_onnx is not None:
+                out["heading_wake_onnx_deg"] = float(h_onnx)
+
+        conf_heur = heuristic_wake_confidence(meta_heur)
+        conf_onnx = float(meta_onnx.get("confidence", 0.0)) if meta_onnx.get("ok") else 0.0
+        h_wake, wcomb_conf, wcomb_src = combine_two_wake_headings(
+            h_heur,
+            conf_heur,
+            h_onnx,
+            conf_onnx,
+            mode=str(settings.wake_fusion.combine_wake_mode),
+            reference_heading_deg=kp_ref,
+        )
+        out["heading_wake_combine_source"] = wcomb_src
+        out["heading_wake_combined_confidence"] = float(wcomb_conf)
+        if h_wake is not None:
+            out["heading_wake_deg"] = float(h_wake)
+        out["wake_segment_meta"] = (
+            meta_heur if meta_heur.get("ok") else meta_onnx
+        )
+
+    if settings.backend == "ensemble" and (
+        h_kp is not None or h_wake is not None
+    ):
+        wake_q = float(
+            out.get("heading_wake_combined_confidence") or 0.0
+        )
+        hf, src = fuse_heading_keypoint_wake_adaptive(
+            h_kp,
+            h_wake,
+            weight_keypoint=float(settings.wake_fusion.weight_keypoint_vs_wake),
+            kp_quality=kp_trust,
+            wake_quality=wake_q,
+            adaptive_fusion=bool(settings.wake_fusion.adaptive_fusion),
+            adaptive_min_quality=float(
+                settings.wake_fusion.adaptive_fusion_min_quality
+            ),
+        )
+        out["heading_fused_deg"] = hf
+        out["heading_fusion_source"] = src
+
+    return out
+

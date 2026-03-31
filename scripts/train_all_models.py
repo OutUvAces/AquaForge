@@ -57,6 +57,12 @@ def main() -> None:
     except ValueError as e:
         print(f"  skipped: {e}", file=sys.stderr)
 
+    print(
+        "=== Optional: YOLO marine fine-tune ===\n"
+        "  After exporting chips to YOLO format, run:\n"
+        "  py -3 scripts/train_yolo_marine_finetune.py --data-yaml <your_data.yaml>"
+    )
+
 
 if __name__ == "__main__":
     main()

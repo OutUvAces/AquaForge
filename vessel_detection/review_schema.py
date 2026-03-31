@@ -32,6 +32,23 @@ EXTRA_PRED_MLP_PROBA = "pred_mlp_proba"
 EXTRA_PRED_COMBINED_PROBA = "pred_combined_proba"
 EXTRA_MODEL_RUN_ID = "model_run_id"
 
+# Optional SOTA audit fields (YOLO marine, keypoints, wake fusion) — see detection.yaml.
+EXTRA_PRED_YOLO_CONF = "pred_yolo_confidence"
+EXTRA_PRED_YOLO_LENGTH_M = "pred_yolo_length_m"
+EXTRA_PRED_YOLO_WIDTH_M = "pred_yolo_width_m"
+EXTRA_PRED_YOLO_ASPECT = "pred_yolo_aspect"
+EXTRA_PRED_HEADING_KP_DEG = "pred_heading_keypoint_deg"
+EXTRA_PRED_HEADING_WAKE_DEG = "pred_heading_wake_deg"
+EXTRA_PRED_HEADING_FUSED_DEG = "pred_heading_fused_deg"
+EXTRA_PRED_HEADING_FUSION_SOURCE = "pred_heading_fusion_source"
+EXTRA_SOTA_BACKEND_SNAPSHOT = "sota_backend_snapshot"
+EXTRA_PRED_HEADING_WAKE_HEURISTIC_DEG = "pred_heading_wake_heuristic_deg"
+EXTRA_PRED_HEADING_WAKE_ONNX_DEG = "pred_heading_wake_onnx_deg"
+EXTRA_PRED_WAKE_COMBINE_SOURCE = "pred_wake_combine_source"
+EXTRA_PRED_KP_BOW_CONF = "pred_keypoint_bow_confidence"
+EXTRA_PRED_KP_STERN_CONF = "pred_keypoint_stern_confidence"
+EXTRA_PRED_KP_HEADING_TRUST = "pred_keypoint_heading_trust"
+
 DEFAULT_COMBINED_WEIGHT_LR = 0.35
 DEFAULT_COMBINED_WEIGHT_MLP = 0.65
 
@@ -72,6 +89,21 @@ def enrich_extra_with_predictions(
     mlp_proba: float | None = None,
     combined_proba: float | None = None,
     model_run_id: str | None = None,
+    yolo_confidence: float | None = None,
+    yolo_length_m: float | None = None,
+    yolo_width_m: float | None = None,
+    yolo_aspect: float | None = None,
+    heading_keypoint_deg: float | None = None,
+    heading_wake_deg: float | None = None,
+    heading_fused_deg: float | None = None,
+    heading_fusion_source: str | None = None,
+    sota_backend: str | None = None,
+    heading_wake_heuristic_deg: float | None = None,
+    heading_wake_onnx_deg: float | None = None,
+    wake_combine_source: str | None = None,
+    keypoint_bow_confidence: float | None = None,
+    keypoint_stern_confidence: float | None = None,
+    keypoint_heading_trust: float | None = None,
 ) -> dict[str, Any]:
     """Merge model scores into ``extra`` for training analysis (what the UI believed vs label)."""
     out = dict(extra or {})
@@ -83,6 +115,36 @@ def enrich_extra_with_predictions(
         out[EXTRA_PRED_COMBINED_PROBA] = float(combined_proba)
     if model_run_id:
         out[EXTRA_MODEL_RUN_ID] = str(model_run_id)
+    if yolo_confidence is not None:
+        out[EXTRA_PRED_YOLO_CONF] = float(yolo_confidence)
+    if yolo_length_m is not None:
+        out[EXTRA_PRED_YOLO_LENGTH_M] = float(yolo_length_m)
+    if yolo_width_m is not None:
+        out[EXTRA_PRED_YOLO_WIDTH_M] = float(yolo_width_m)
+    if yolo_aspect is not None:
+        out[EXTRA_PRED_YOLO_ASPECT] = float(yolo_aspect)
+    if heading_keypoint_deg is not None:
+        out[EXTRA_PRED_HEADING_KP_DEG] = float(heading_keypoint_deg)
+    if heading_wake_deg is not None:
+        out[EXTRA_PRED_HEADING_WAKE_DEG] = float(heading_wake_deg)
+    if heading_fused_deg is not None:
+        out[EXTRA_PRED_HEADING_FUSED_DEG] = float(heading_fused_deg)
+    if heading_fusion_source:
+        out[EXTRA_PRED_HEADING_FUSION_SOURCE] = str(heading_fusion_source)
+    if sota_backend:
+        out[EXTRA_SOTA_BACKEND_SNAPSHOT] = str(sota_backend)
+    if heading_wake_heuristic_deg is not None:
+        out[EXTRA_PRED_HEADING_WAKE_HEURISTIC_DEG] = float(heading_wake_heuristic_deg)
+    if heading_wake_onnx_deg is not None:
+        out[EXTRA_PRED_HEADING_WAKE_ONNX_DEG] = float(heading_wake_onnx_deg)
+    if wake_combine_source:
+        out[EXTRA_PRED_WAKE_COMBINE_SOURCE] = str(wake_combine_source)
+    if keypoint_bow_confidence is not None:
+        out[EXTRA_PRED_KP_BOW_CONF] = float(keypoint_bow_confidence)
+    if keypoint_stern_confidence is not None:
+        out[EXTRA_PRED_KP_STERN_CONF] = float(keypoint_stern_confidence)
+    if keypoint_heading_trust is not None:
+        out[EXTRA_PRED_KP_HEADING_TRUST] = float(keypoint_heading_trust)
     return out
 
 
