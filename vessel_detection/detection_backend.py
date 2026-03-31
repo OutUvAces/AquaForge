@@ -110,6 +110,33 @@ def rank_candidates_from_config(
             except Exception:
                 base = list(work)
 
+    if settings.backend == "aquaforge":
+        from vessel_detection.aquaforge.inference import aquaforge_confidence_only
+        from vessel_detection.model_manager import get_cached_aquaforge_predictor
+
+        pred_af = get_cached_aquaforge_predictor(project_root, settings)
+        wy = float(max(0.0, min(1.0, settings.aquaforge.weight_vs_hybrid)))
+        wh = 1.0 - wy
+        centers = [(float(cx), float(cy)) for cx, cy, _sc in base]
+        af_batch: list[Any] | None = None
+        if pred_af is not None and len(base) > 0:
+            af_batch = pred_af.predict_batch_at_candidates(tci_path, centers)
+        scored_af: list[tuple[float, float, float, float]] = []
+        for i, (cx, cy, sc) in enumerate(base):
+            if af_batch is not None and i < len(af_batch):
+                ar = af_batch[i]
+                py = float(ar.confidence) if ar is not None else 0.0
+            else:
+                py = aquaforge_confidence_only(pred_af, tci_path, cx, cy)
+            ph = _hybrid_proba_at(tci_path, cx, cy, clf, chip_bundle)
+            if ph is None:
+                rank_p = py
+            else:
+                rank_p = wy * py + wh * float(ph)
+            scored_af.append((rank_p, cx, cy, sc))
+        scored_af.sort(key=lambda t: (-t[0], -t[3]))
+        return [(t[1], t[2], t[3]) for t in scored_af]
+
     if not yolo_requested(settings):
         return base
 
@@ -174,6 +201,20 @@ def run_sota_spot_inference(
 
     All keys are JSON-serializable where possible; includes crop-space polygon for overlays.
     """
+    if settings.backend == "aquaforge":
+        from vessel_detection.aquaforge.integration import run_aquaforge_spot_inference
+
+        return run_aquaforge_spot_inference(
+            project_root,
+            tci_path,
+            cx,
+            cy,
+            settings,
+            spot_col_off=int(spot_col_off),
+            spot_row_off=int(spot_row_off),
+            hybrid_proba=hybrid_proba,
+        )
+
     out: dict[str, Any] = {
         "backend": settings.backend,
         "yolo_confidence": None,

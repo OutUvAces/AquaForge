@@ -7,12 +7,26 @@
 # candidate chip (good for interactive review). ``sliding_window_merge`` scans the full TCI in a
 # coarse grid and merges extra high-confidence boxes — higher recall, more compute.
 
-# Backend: legacy_hybrid | yolo_only | yolo_fusion | ensemble
+# Backend: legacy_hybrid | yolo_only | yolo_fusion | ensemble | aquaforge
 # - legacy_hybrid: LR + chip MLP only (default, no extra deps).
 # - yolo_only: rank by marine YOLO confidence on each candidate chip (requires ultralytics + weights).
 # - yolo_fusion: weighted mix of hybrid P(vessel) and YOLO score.
 # - ensemble: optional keypoint heading + wake fusion (heuristic and/or ONNX wake) + YOLO when enabled.
+# - aquaforge: single multi-task model (seg + landmarks + heading + wake hint); see scripts/train_aquaforge.py.
 backend: legacy_hybrid
+
+# AquaForge (optional): train with scripts/train_aquaforge.py, export ONNX with scripts/export_aquaforge_onnx.py
+# aquaforge:
+#   weights_path: data/models/aquaforge/aquaforge.pt
+#   onnx_path: data/models/aquaforge/aquaforge.onnx
+#   use_onnx_inference: false
+#   onnx_quantize: false
+#   imgsz: 512
+#   chip_half: 320
+#   conf_threshold: 0.15
+#   weight_vs_hybrid: 0.55
+#   chip_batch_size: 6
+#   min_direct_heading_confidence: 0.35
 
 yolo:
   hf_repo: mayrajeo/marine-vessel-yolo

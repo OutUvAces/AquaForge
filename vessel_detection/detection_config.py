@@ -17,7 +17,7 @@ from typing import Any
 
 DEFAULT_BACKEND = "legacy_hybrid"
 VALID_BACKENDS = frozenset(
-    {"legacy_hybrid", "yolo_only", "yolo_fusion", "ensemble"}
+    {"legacy_hybrid", "yolo_only", "yolo_fusion", "ensemble", "aquaforge"}
 )
 
 
@@ -107,11 +107,33 @@ class WakeFusionSection:
 
 
 @dataclass
+class AquaForgeSection:
+    """
+    Unified multi-task vessel model (segmentation + landmarks + heading + wake hint).
+
+    Weights default to ``data/models/aquaforge/aquaforge.pt``; ONNX optional for CPU EP tuning.
+    """
+
+    weights_path: str | None = None
+    onnx_path: str | None = None
+    use_onnx_inference: bool = False
+    onnx_quantize: bool = False
+    imgsz: int = 512
+    chip_half: int = 320
+    conf_threshold: float = 0.15
+    weight_vs_hybrid: float = 0.55
+    chip_batch_size: int = 6
+    # Prefer direct heading head over landmark geodesy when sigmoid(conf) >= this.
+    min_direct_heading_confidence: float = 0.35
+
+
+@dataclass
 class DetectionSettings:
     backend: str = DEFAULT_BACKEND
     yolo: YoloSection = field(default_factory=YoloSection)
     keypoints: KeypointsSection = field(default_factory=KeypointsSection)
     wake_fusion: WakeFusionSection = field(default_factory=WakeFusionSection)
+    aquaforge: AquaForgeSection = field(default_factory=AquaForgeSection)
     onnx_runtime: OnnxRuntimeSection = field(default_factory=OnnxRuntimeSection)
     # If set and ``hybrid_proba`` is passed to :func:`run_sota_spot_inference`, skip keypoints + wake
     # after YOLO when hybrid P(vessel) is below this (UI can pass hybrid to save CPU on weak spots).
@@ -207,6 +229,36 @@ def _parse_keypoints(d: dict[str, Any] | None) -> KeypointsSection:
         quantize=bool(d.get("quantize", False)),
         min_yolo_confidence=float(
             d.get("min_yolo_confidence", KeypointsSection.min_yolo_confidence)
+        ),
+    )
+
+
+def _parse_aquaforge(d: dict[str, Any] | None) -> AquaForgeSection:
+    if not d:
+        return AquaForgeSection()
+    return AquaForgeSection(
+        weights_path=d.get("weights_path"),
+        onnx_path=d.get("onnx_path"),
+        use_onnx_inference=bool(d.get("use_onnx_inference", False)),
+        onnx_quantize=bool(d.get("onnx_quantize", False)),
+        imgsz=int(d.get("imgsz", AquaForgeSection.imgsz)),
+        chip_half=int(d.get("chip_half", AquaForgeSection.chip_half)),
+        conf_threshold=float(d.get("conf_threshold", AquaForgeSection.conf_threshold)),
+        weight_vs_hybrid=float(
+            d.get("weight_vs_hybrid", AquaForgeSection.weight_vs_hybrid)
+        ),
+        chip_batch_size=max(
+            1,
+            min(
+                32,
+                int(d.get("chip_batch_size", AquaForgeSection.chip_batch_size)),
+            ),
+        ),
+        min_direct_heading_confidence=float(
+            d.get(
+                "min_direct_heading_confidence",
+                AquaForgeSection.min_direct_heading_confidence,
+            )
         ),
     )
 
@@ -332,6 +384,9 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
         wake_fusion=_parse_wake(
             data.get("wake_fusion") if isinstance(data.get("wake_fusion"), dict) else None
         ),
+        aquaforge=_parse_aquaforge(
+            data.get("aquaforge") if isinstance(data.get("aquaforge"), dict) else None
+        ),
         onnx_runtime=_parse_onnx_runtime(
             data.get("onnx_runtime")
             if isinstance(data.get("onnx_runtime"), dict)
@@ -348,8 +403,15 @@ def yolo_requested(settings: DetectionSettings) -> bool:
     return settings.backend in {"yolo_only", "yolo_fusion", "ensemble"}
 
 
+def aquaforge_requested(settings: DetectionSettings) -> bool:
+    return settings.backend == "aquaforge"
+
+
 def sota_inference_requested(settings: DetectionSettings) -> bool:
-    """Spot-level overlays: YOLO, keypoints, and/or ensemble wake fusion."""
-    return yolo_requested(settings) or settings.keypoints.enabled or (
-        settings.backend == "ensemble" and settings.wake_fusion.enabled
+    """Spot-level overlays: YOLO, AquaForge, keypoints, and/or ensemble wake fusion."""
+    return (
+        yolo_requested(settings)
+        or aquaforge_requested(settings)
+        or settings.keypoints.enabled
+        or (settings.backend == "ensemble" and settings.wake_fusion.enabled)
     )

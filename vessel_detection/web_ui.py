@@ -1616,7 +1616,7 @@ def _render_review_deck(
                     f"- rank score used for ordering **{_rk_s}** "
                     f"(`{det_settings.backend}`) - marine YOLO conf **{_yo_s}**. "
                     "With `legacy_hybrid`, queue order matches hybrid only; with "
-                    "`yolo_fusion` / `ensemble`, rank score blends or replaces hybrid per YAML."
+                    "`yolo_fusion` / `ensemble` / `aquaforge`, rank score blends or replaces hybrid per YAML."
                 )
             _gt_hint = spot_geometry_gt_from_labels(
                 labels_path,

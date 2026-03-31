@@ -9,6 +9,7 @@ from pathlib import Path
 from vessel_detection.detection_config import (
     DetectionSettings,
     KeypointsSection,
+    aquaforge_requested,
     load_detection_settings,
     merged_onnx_providers,
     sota_inference_requested,
@@ -127,6 +128,26 @@ class TestDetectionConfig(unittest.TestCase):
             s = load_detection_settings(root)
             self.assertTrue(s.ui_require_checkbox_for_sota)
             self.assertTrue(s.ui_lazy_sota_overlays)
+
+    def test_aquaforge_backend_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "backend: aquaforge\n"
+                "aquaforge:\n"
+                "  imgsz: 384\n"
+                "  min_direct_heading_confidence: 0.4\n",
+                encoding="utf-8",
+            )
+            s = load_detection_settings(root)
+            self.assertEqual(s.backend, "aquaforge")
+            self.assertTrue(aquaforge_requested(s))
+            self.assertTrue(sota_inference_requested(s))
+            self.assertFalse(yolo_requested(s))
+            self.assertEqual(s.aquaforge.imgsz, 384)
+            self.assertAlmostEqual(s.aquaforge.min_direct_heading_confidence, 0.4)
 
     def test_merged_onnx_providers_global_wins(self) -> None:
         s = DetectionSettings(

@@ -123,6 +123,7 @@ class TestEvalReportJson(unittest.TestCase):
             txt = format_eval_report(res, settings_sota=DetectionSettings())
             self.assertIn("Ranking (Pearson", txt)
             self.assertIn("YOLO-fus.", txt)
+            self.assertIn("AquaForge", txt)
             self.assertIn("Hull overlap", txt)
             self.assertIn("N/A", txt)
         finally:
@@ -193,17 +194,19 @@ class TestSummaryMarkdown(unittest.TestCase):
                 "legacy_hybrid": 0.2,
                 "yolo_fusion": 0.9,
                 "ensemble": 0.4,
+                "aquaforge": 0.35,
             },
             n_ranking_scored=12,
             n_scored_by_backend={
                 "legacy_hybrid": 4,
                 "yolo_fusion": 4,
                 "ensemble": 4,
+                "aquaforge": 4,
             },
             heading_buckets=hb,
-            rel_length_by_backend={"yolo_fusion": [0.1], "ensemble": [0.05]},
-            rel_width_by_backend={"yolo_fusion": [], "ensemble": []},
-            mask_iou_by_backend={"yolo_fusion": [0.5], "ensemble": [0.8]},
+            rel_length_by_backend={"yolo_fusion": [0.1], "ensemble": [0.05], "aquaforge": [0.08]},
+            rel_width_by_backend={"yolo_fusion": [], "ensemble": [], "aquaforge": []},
+            mask_iou_by_backend={"yolo_fusion": [0.5], "ensemble": [0.8], "aquaforge": [0.55]},
             pct_keypoint_better_than_wake_line=10.0,
             n_kp_vs_wake_pairs=5,
             pct_fusion_better_than_wake_ambiguity=25.0,
