@@ -1550,6 +1550,35 @@ def _render_review_deck(
         sota = st.session_state.get(sota_k, {}) or {}
     if sota_inference_requested(det_settings) and sota:
         with st.expander("SOTA overlays & heading hints", expanded=False):
+            if clf_disp is not None or bundle_disp is not None:
+                from vessel_detection.evaluation import rank_score_at_point
+
+                _rs = rank_score_at_point(
+                    ROOT,
+                    tci_p,
+                    cx,
+                    cy,
+                    clf_disp,
+                    bundle_disp,
+                    det_settings,
+                )
+                _leg = (
+                    p_comb
+                    if p_comb is not None
+                    else _rs.get("hybrid_proba")
+                )
+                _yo = _rs.get("yolo_confidence")
+                _rk = _rs.get("rank_score")
+                _leg_s = f"{float(_leg):.3f}" if _leg is not None else "n/a"
+                _rk_s = f"{float(_rk):.3f}" if _rk is not None else "n/a"
+                _yo_s = f"{float(_yo):.3f}" if _yo is not None else "n/a"
+                st.caption(
+                    f"**Legacy vs SOTA (this spot):** hybrid fused P(vessel) **{_leg_s}** "
+                    f"- rank score used for ordering **{_rk_s}** "
+                    f"(`{det_settings.backend}`) - marine YOLO conf **{_yo_s}**. "
+                    "With `legacy_hybrid`, queue order matches hybrid only; with "
+                    "`yolo_fusion` / `ensemble`, rank score blends or replaces hybrid per YAML."
+                )
             if sota.get("yolo_confidence") is not None:
                 st.metric("Marine YOLO confidence", f"{float(sota['yolo_confidence']):.3f}")
             if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:

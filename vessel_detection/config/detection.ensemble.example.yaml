@@ -1,7 +1,19 @@
-# Full SOTA ensemble example — copy sections into ``data/config/detection.yaml`` or merge with
-# ``detection.example.yaml``. Default production default remains ``legacy_hybrid`` (no extra deps).
+# =============================================================================
+# Full SOTA ensemble example (YOLO + optional pose ONNX + heuristic / ONNX wake)
+# =============================================================================
+# HOW TO USE:
+#   1. Copy this file to:  data/config/detection.yaml
+#      (create data/config/ if needed). Or merge these blocks into your existing YAML.
+#   2. Install ML deps:    pip install -r requirements-ml.txt
+#   3. Place pose ONNX at keypoints.external_onnx_path (or edit path).
+#   4. First run: keep backend: legacy_hybrid in a backup; switch to ensemble when ready.
+#
+# README: "Example: full ensemble" and "Benchmarking" sections describe behavior and eval CLI.
+# Default shipped app behavior if YAML is missing: legacy_hybrid only (unchanged).
+# =============================================================================
 
-# --- Backend: use ``ensemble`` when you want wake + optional keypoint fusion on each spot ---
+# --- Backend ---
+# ensemble: YOLO ranking + per-spot masks/metrics; keypoints + wake_fusion per flags below.
 backend: ensemble
 
 yolo:
@@ -38,15 +50,19 @@ keypoints:
 
 wake_fusion:
   enabled: true
-  # Prefer keypoint heading when bow/stern are confident; else lean on wake.
+  # Requires backend: ensemble. Heuristic wake uses auto_wake-style segment from SCL/TCI.
+  # Prefer keypoint heading when bow/stern confidences exceed keypoints.min_bow_stern_confidence.
   weight_keypoint_vs_wake: 0.65
   use_auto_wake_segment: true
-  # Optional second wake cue from ONNX (disable if no model — heuristic wake still runs).
+  # Optional second wake cue from ONNX (WakeNet-style / custom export). If load fails, eval
+  # continues with heuristic wake only (see sota_warnings in UI / evaluation report notes).
   use_onnx_wake: false
   onnx_wake_path: null
   onnx_wake_input_size: 256
   wake_onnx_layout: dxy
+  # How heuristic vs ONNX wake directions merge before keypoint fusion.
   combine_wake_mode: best_confidence
   onnx_wake_confidence_prior: 0.72
+  # Tilt blend toward the stronger of keypoint vs wake quality signals.
   adaptive_fusion: true
   adaptive_fusion_min_quality: 0.15

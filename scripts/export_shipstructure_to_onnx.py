@@ -19,6 +19,7 @@ References:
 
 Examples:
   py -3 scripts/export_shipstructure_to_onnx.py instructions
+  py -3 scripts/export_shipstructure_to_onnx.py labels-mmpose-guide
   py -3 scripts/export_shipstructure_to_onnx.py print-snippet --opset 12 --input-size 384
   py -3 scripts/export_shipstructure_to_onnx.py validate-chip --onnx path/to/pose.onnx \\
       --tci path/to/*TCI_10m*.jp2 --cx 5000 --cy 3200 --bow-index 0 --stern-index 1
@@ -164,11 +165,64 @@ def cmd_validate_chip(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_labels_mmpose_guide() -> None:
+    # ASCII-only for Windows cp1252 consoles.
+    print(
+        """
+=== JSONL review labels -> MMPose / ShipStructure (SLAD-style K=20) ===
+
+Your app stores bow/stern and optional dimension markers on vessel_size_feedback rows and
+point classes on standard review rows (see vessel_detection.labels and review_schema).
+
+This repo does NOT write COCO/MMPose JSON for you. Use this outline in a small script or
+notebook (run next to your JSONL + JP2s):
+
+1) Parse ship_reviews.jsonl
+   - iter_vessel_size_feedback() for rows with dimension_markers / heading_deg_from_north.
+   - Pair each geometry row with the same-scene TCI (tci_path, cx_full, cy_full).
+
+2) Map bow/stern to full-raster (x, y) pixels
+   - dimension_markers use spot-crop coordinates; convert using the same chip geometry as the
+     review UI (read_locator_and_spot_rgb_matching_stretch / square_crop_window from cx, cy).
+   - For each vessel instance you need K keypoints. SLAD uses 20 hull landmarks; if you only
+     have bow+stern labeled, either:
+     a) Train a reduced head (K=2) and set num_keypoints: 2 in detection.yaml, OR
+     b) Copy bow/stern into SLAD index slots and mark other joints "unlabeled" in MMPose
+        (visibility=0) using the official ShipStructure skeleton definition, OR
+     c) Interpolate / freeze untrained joints in the loss.
+
+3) Export training chips
+   - Crop a square around (cx, cy) with chip_half matching yolo.chip_half (e.g. 320 px).
+   - Resize to onnx_input_size for the pose model (e.g. 384).
+   - Store joint x,y in model input space (0..S-1) and visibility 0/1/2 per MMPose.
+
+4) COCO keypoints format (typical MMPose top-down)
+   - images: [{id, file_name, width, height}, ...]
+   - annotations: [{image_id, keypoints: [x1,y1,v1, ...], num_keypoints, bbox}, ...]
+   - categories: [{id, name, keypoints: [name0,...,name19], skeleton: [...]}]
+   Match keypoint order to bow_index/stern_index in detection.yaml after you pick indices.
+
+5) Fine-tune in ShipStructure / MMPose, export ONNX, validate with:
+   py -3 scripts/export_shipstructure_to_onnx.py validate-chip --onnx ... --tci ... --cx ... --cy ...
+
+6) Training label QA in-app
+   - vessel_detection.training_label_review_ui: open saved JSONL rows, edit markers, re-save.
+   Use that loop to fix bow/stern swaps before exporting a training manifest.
+
+See README "Fine-tuning keypoints from review labels" for the end-to-end loop.
+"""
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="ShipStructure ONNX export / validate helpers")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("instructions", help="Print export + wiring guide")
+    sub.add_parser(
+        "labels-mmpose-guide",
+        help="How to turn ship_reviews JSONL into MMPose / SLAD-style training data",
+    )
 
     p_snip = sub.add_parser("print-snippet", help="Print torch.onnx.export template")
     p_snip.add_argument("--opset", type=int, default=12)
@@ -195,6 +249,9 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "instructions":
         cmd_instructions()
+        return 0
+    if args.cmd == "labels-mmpose-guide":
+        cmd_labels_mmpose_guide()
         return 0
     if args.cmd == "print-snippet":
         cmd_print_snippet(args)

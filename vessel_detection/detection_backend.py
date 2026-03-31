@@ -42,6 +42,21 @@ def _hybrid_proba_at(
     return combined_vessel_proba_with_bundle(p_lr, p_mlp, chip_bundle)
 
 
+def hybrid_vessel_proba_at(
+    tci_path: Path,
+    cx: float,
+    cy: float,
+    clf: Any,
+    chip_bundle: dict[str, Any] | None,
+) -> float | None:
+    """
+    LR + chip-MLP fused P(vessel) at one full-raster point (same fusion as legacy ranking).
+
+    Public alias for benchmarking; see :mod:`vessel_detection.evaluation`.
+    """
+    return _hybrid_proba_at(tci_path, cx, cy, clf, chip_bundle)
+
+
 def rank_candidates_from_config(
     candidates: list[tuple[float, float, float]],
     tci_path: Path,

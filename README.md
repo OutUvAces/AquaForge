@@ -5,7 +5,7 @@
 - **Default backend:** `legacy_hybrid` — logistic regression + chip MLP ranking only (no extra ML weights required).
 - **Config file:** `data/config/detection.yaml` (copy from [`vessel_detection/config/detection.example.yaml`](vessel_detection/config/detection.example.yaml)). Override path with env `VD_DETECTION_CONFIG`.
 
-Repository layout (core package): [`vessel_detection/`](vessel_detection/) — `detection_config.py`, `detection_backend.py`, `yolo_marine_backend.py`, `shipstructure_adapter.py`, `onnx_session_cache.py`, `wake_heading_fusion.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `web_ui.py`, and packaged YAML under `vessel_detection/config/`.
+Repository layout (core package): [`vessel_detection/`](vessel_detection/) — `detection_config.py`, `detection_backend.py`, `evaluation.py`, `yolo_marine_backend.py`, `shipstructure_adapter.py`, `onnx_session_cache.py`, `wake_heading_fusion.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `web_ui.py`, and packaged YAML under `vessel_detection/config/`.
 
 ---
 
@@ -109,7 +109,7 @@ wake_fusion:
 
 ### Example: full ensemble (keypoints + heuristic wake + optional ONNX wake)
 
-See **[`vessel_detection/config/detection.ensemble.example.yaml`](vessel_detection/config/detection.ensemble.example.yaml)** for a commented template. Minimal sketch:
+Copy **[`vessel_detection/config/detection.ensemble.example.yaml`](vessel_detection/config/detection.ensemble.example.yaml)** into `data/config/detection.yaml` (or merge sections). That file is the **canonical commented ensemble** reference. Minimal sketch:
 
 ```yaml
 backend: ensemble
@@ -147,6 +147,42 @@ wake_fusion:
 
 See the script docstring for ONNX I/O alignment with [`vessel_detection.shipstructure_adapter`](vessel_detection/shipstructure_adapter.py).
 
+### Fine-tuning keypoints from review labels
+
+1. **Clean geometry in-app** — Use [`vessel_detection/training_label_review_ui.py`](vessel_detection/training_label_review_ui.py) (Streamlit **Training label review** in the app) to fix bow/stern and markers on saved JSONL rows before export.
+2. **MMPose / COCO outline** — Run:
+
+   ```bash
+   py -3 scripts/export_shipstructure_to_onnx.py labels-mmpose-guide
+   ```
+
+   That prints how `vessel_size_feedback` rows, `dimension_markers`, and chip geometry relate to SLAD-style 20 keypoints and MMPose training. You still implement the exporter (this repo stays dependency-light).
+
+---
+
+## Benchmarking (legacy vs SOTA)
+
+[`vessel_detection/evaluation.py`](vessel_detection/evaluation.py) compares **hybrid LR+chip P(vessel)** with the **rank score** from your YAML backend (`yolo_fusion`, `ensemble`, etc.) on all binary-labeled points, and runs **spot SOTA inference** on `vessel_size_feedback` rows to score heading vs `heading_deg_from_north` and mask L×W vs labeled dimensions.
+
+**Metrics (summary):**
+
+- Pearson **r** between hybrid proba / SOTA rank score and the human binary label.
+- Mean absolute **heading error** (keypoint, fused, and undirected **wake line** = min error vs two opposite directions).
+- **%** of cases where keypoint heading beats the wake line alone by more than 5° (among rows with GT heading + both predictions).
+- Mean **relative** error on length/width vs YOLO mask metrics (where GT exists).
+
+**CLI** (from repo root; install `requirements-ml.txt` for YOLO-backed modes):
+
+```bash
+py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl -o eval_report.txt
+py -3 scripts/run_detection_eval.py --backend ensemble --max-spots 50
+py -3 scripts/run_detection_eval.py --labels-dir data/labels
+```
+
+Or: `py -3 -m vessel_detection.evaluation --help`.
+
+Use `--detection-config path/to/detection.yaml` or set `VD_DETECTION_CONFIG`. The **legacy** arm always uses `legacy_hybrid` scoring; the **SOTA** arm uses the loaded YAML (optionally overridden with `--backend yolo_fusion` or `ensemble`).
+
 ---
 
 ## Review UI — overlays and audit fields
@@ -159,6 +195,16 @@ See the script docstring for ONNX I/O alignment with [`vessel_detection.shipstru
 - **Wake** — amber axis segment (heuristic and/or fused result geometry where exposed).
 
 **JSONL / export extras** (see [`vessel_detection/review_schema.py`](vessel_detection/review_schema.py)): predicted headings (`pred_heading_keypoint_deg`, `pred_heading_wake_deg`, `pred_heading_fused_deg`, heuristic vs ONNX wake variants), fusion source strings, keypoint bow/stern confidences, heading trust, and `sota_backend_snapshot`.
+
+The **SOTA overlays & heading hints** expander also shows a short **Legacy vs SOTA** caption when models are loaded: hybrid fused P(vessel), the rank score used for queue ordering, and marine YOLO confidence.
+
+---
+
+## Contributing
+
+- **New backends** — Add a mode in [`detection_config.py`](vessel_detection/detection_config.py) (`VALID_BACKENDS`), extend [`detection_backend.py`](vessel_detection/detection_backend.py) (`rank_candidates_from_config`, `run_sota_spot_inference` as needed), and document keys in [`vessel_detection/config/detection.example.yaml`](vessel_detection/config/detection.example.yaml). Keep `legacy_hybrid` as the default when YAML is missing or invalid.
+- **Fine-tuned ONNX models** — ShipStructure / wake ONNX files are **not** committed; document opset, input size, and `output_layout` in your PR or issue. Run `validate-chip` before opening a PR that changes adapter expectations.
+- **Tests** — `py -3 -m pytest` and `py -3 -m py_compile` on touched modules.
 
 ---
 
