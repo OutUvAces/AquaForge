@@ -121,7 +121,11 @@ class TestAquaForgeLosses(unittest.TestCase):
         self.assertIn("seg", out)
 
     def test_active_learning_priority(self) -> None:
-        from aquaforge.unified.distill import review_ui_active_learning_priority
+        from aquaforge.unified.distill import (
+            aquaforge_uncertainty_from_outputs,
+            merge_al_priority_with_aquaforge_u,
+            review_ui_active_learning_priority,
+        )
 
         p1 = review_ui_active_learning_priority({}, heading_labeled=False)
         self.assertGreaterEqual(p1, 0.45)
@@ -130,6 +134,31 @@ class TestAquaForgeLosses(unittest.TestCase):
             heading_labeled=True,
         )
         self.assertGreater(p2, p1)
+        p3 = merge_al_priority_with_aquaforge_u(1.0, 0.8)
+        self.assertGreater(p3, 1.0)
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+        out = {
+            "cls_logit": torch.zeros(1, 1),
+            "hdg": torch.zeros(1, 3),
+            "seg_logit": torch.zeros(1, 1, 8, 8),
+        }
+        u = aquaforge_uncertainty_from_outputs(out)
+        self.assertGreaterEqual(u, 0.0)
+        self.assertLessEqual(u, 1.0)
+
+    def test_adaptive_heatmap_sigma(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+        from aquaforge.unified.losses import adaptive_heatmap_sigma_from_mask
+
+        s_small = adaptive_heatmap_sigma_from_mask(torch.full((1, 1, 32, 32), 0.01))
+        s_big = adaptive_heatmap_sigma_from_mask(torch.full((1, 1, 32, 32), 0.5))
+        self.assertLess(s_small, s_big)
 
 
 if __name__ == "__main__":

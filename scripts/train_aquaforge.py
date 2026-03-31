@@ -10,7 +10,9 @@ of curriculum weights from detached per-task losses (our stabiliser, not third-p
 **Active learning** — JSONL rows from the review UI carry ``al_priority`` (uncertainty, small-vessel
 proxies, etc.). Optional :class:`torch.utils.data.WeightedRandomSampler` oversamples hard chips.
 Optional **ensemble teacher** distillation (heading sin/cos only) with a per-epoch CPU budget via
-``hydrate_teacher_signals`` in :mod:`aquaforge.unified.distill`.
+``hydrate_teacher_signals``. Optional **pseudo self-training** from a curated unlabeled JSONL
+(``--pseudo-jsonl``) with AquaForge-derived soft targets and trust. Balancer uses **batch context**
+(small hulls, heading ambiguity, AL priority).
 
 YOLO11/12 backbone path: ``--architecture yolo_unified``, ``--freeze-backbone-epochs``.
 
@@ -105,6 +107,26 @@ def main() -> None:
         default=0.38,
         help="Max curriculum weight for heading distillation when teacher targets exist (scaled by curriculum).",
     )
+    ap.add_argument(
+        "--pseudo-jsonl",
+        type=Path,
+        default=None,
+        help="Optional JSONL of unlabeled chips (tci_path, cx_full, cy_full) — human-curated pool for self-training.",
+    )
+    ap.add_argument(
+        "--pseudo-per-epoch",
+        type=int,
+        default=0,
+        help="Sample up to this many pseudo chips per epoch (0 = off). Runs after supervised batches.",
+    )
+    ap.add_argument(
+        "--pseudo-mix-weight",
+        type=float,
+        default=0.28,
+        help="Multiplier on self-training loss (AquaForge teacher pass → student pass on same weights).",
+    )
+    ap.add_argument("--pseudo-min-conf", type=float, default=0.58, help="Min vessel prob to accept pseudo chip.")
+    ap.add_argument("--pseudo-max-u", type=float, default=0.62, help="Max AquaForge uncertainty to accept pseudo chip.")
     args = ap.parse_args()
 
     try:
@@ -120,11 +142,14 @@ def main() -> None:
         build_training_row,
         collate_batch,
         iter_aquaforge_samples,
+        iter_pseudo_chip_candidates,
+        prepare_pseudo_self_training_batch,
     )
     from aquaforge.unified.distill import clear_teacher_signals, hydrate_teacher_signals
     from aquaforge.unified.losses import (
         DynamicLossBalancer,
         aquaforge_joint_loss,
+        aquaforge_self_training_loss,
         curriculum_base_weights,
     )
     from aquaforge.unified.model import (
@@ -141,6 +166,11 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     rows: list[AquaForgeSample] = list(iter_aquaforge_samples(jp, project_root))
+    pseudo_pool = (
+        list(iter_pseudo_chip_candidates(Path(args.pseudo_jsonl), project_root))
+        if args.pseudo_jsonl
+        else []
+    )
     if len(rows) < 2:
         print(
             f"Need at least 2 labeled vessel rows in {jp} (vessel + markers / vessel_size_feedback).",
@@ -222,6 +252,8 @@ def main() -> None:
     teacher_budget = int(args.teacher_per_epoch)
     distill_w = float(args.teacher_distill_weight)
     use_balance = not bool(args.no_dynamic_balance)
+    pseudo_n = int(args.pseudo_per_epoch)
+    pseudo_w = float(args.pseudo_mix_weight)
 
     for epoch in range(int(args.epochs)):
         model.train()
@@ -274,9 +306,44 @@ def main() -> None:
             n_batches += 1
             if balancer is not None:
                 balancer.update_from_logs(logs)
-                sw_eff = balancer.scale_weights(base_sw)
+                cov = float(batch_dict["seg"].mean().item())
+                h_conf = torch.sigmoid(hdg[:, 2:3])
+                h_amb = float((4.0 * h_conf * (1.0 - h_conf)).mean().item())
+                ctx = {
+                    "seg_coverage_mean": cov,
+                    "heading_ambiguity_mean": h_amb,
+                    "al_priority_mean": float(batch_dict["al_priority"].mean().item()),
+                }
+                sw_eff = balancer.scale_weights(base_sw, batch_context=ctx)
             else:
                 sw_eff = dict(base_sw)
+
+        if pseudo_pool and pseudo_n > 0 and pseudo_w > 0:
+            random.shuffle(pseudo_pool)
+            chunk = pseudo_pool[: max(1, min(pseudo_n, len(pseudo_pool)))]
+            prep = prepare_pseudo_self_training_batch(
+                model,
+                device,
+                chunk,
+                int(args.chip_half),
+                int(args.imgsz),
+                min_vessel_conf=float(args.pseudo_min_conf),
+                max_uncertainty=float(args.pseudo_max_u),
+            )
+            if prep is not None:
+                imgs_p, soft, trust = prep
+                out_p = model(imgs_p)
+                loss_st, _st_logs = aquaforge_self_training_loss(
+                    out_p, soft, base_sw, trust=trust
+                )
+                opt.zero_grad()
+                (pseudo_w * loss_st).backward()
+                opt.step()
+                print(
+                    f"epoch {epoch + 1}: self-training batch size={imgs_p.shape[0]} "
+                    f"loss_st={float(loss_st.detach().item()):.4f}",
+                    flush=True,
+                )
 
         avg = total_loss / max(n_batches, 1)
         fr = "frozen" if arch == "yolo_unified" and epoch < freeze_n else "e2e"
@@ -298,6 +365,9 @@ def main() -> None:
             "priority_sampling": use_sampler,
             "teacher_per_epoch": teacher_budget,
             "teacher_distill_weight": distill_w,
+            "pseudo_jsonl": str(args.pseudo_jsonl) if args.pseudo_jsonl else None,
+            "pseudo_per_epoch": pseudo_n,
+            "pseudo_mix_weight": pseudo_w,
         },
     }
     if arch == "yolo_unified":

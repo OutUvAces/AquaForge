@@ -1,18 +1,22 @@
 """
 Joint AquaForge losses (our design — not Ultralytics defaults).
 
-Combines:
-  * vessel classification (BCE)
-  * segmentation: soft Dice + **soft IoU** on logits + masked BCE (hull geometry for Sentinel-2 L×W)
-  * landmark L1 + Gaussian heatmaps (spatial + global readout)
-  * circular heading via unit-circle cosine loss on (sin, cos) targets
-  * wake direction cosine loss (optional weak supervision)
-  * optional ensemble **distillation** on heading (sin, cos), not logits from third-party heads
+We combine **task-specific** terms with an explicitly documented blend (not a pasted vendor recipe):
 
-**Curriculum** (:func:`curriculum_base_weights`) and **dynamic balancing**
-(:class:`DynamicLossBalancer`) are AquaForge-specific: piecewise ramps with smoothsteps plus
-EMA-based rescaling of base weights so no single task dominates magnitudes mid-training — inspired
-by multi-task learning practice but implemented here with our own formulas (not copied schedules).
+  * Classification: BCE on vessel logit.
+  * Segmentation: soft Dice + soft IoU + **Tversky** (asymmetric FP/FN) + masked BCE — favours
+    recall on thin hulls typical of small S2 vessels without copying a single public loss.
+  * Landmarks: L1 + visibility BCE + **adaptive-width** Gaussian heatmaps (tighter when GT mask
+    footprint is small — our resolution heuristic, not a fixed Gaussian from a paper).
+  * Heading: **cosine + normalised angular (geodesic) term** on (sin, cos) — proper circular
+    treatment beyond cosine-only shortcuts.
+  * Wake: cosine to supervised wake vector plus **coherence** with the model’s own heading
+    (same convention as training wake targets).
+  * Optional ensemble distillation on heading (sin, cos).
+
+**Curriculum** — :class:`CurriculumSchedule` + interpolation between **named stage targets**;
+**DynamicLossBalancer** rescales with optional **batch context** (mask footprint, heading ambiguity
+from the confidence logit, sampler priority) — our stabiliser, not GradNorm/DWA source dumps.
 """
 
 from __future__ import annotations
@@ -58,6 +62,34 @@ def build_kp_heat_targets(
     return out.clamp(0, 1)
 
 
+def adaptive_heatmap_sigma_from_mask(seg_gt: torch.Tensor) -> float:
+    """
+    **Adaptive keypoint heatmaps**: shrink Gaussians when the supervised hull occupies a small
+    fraction of the chip (tight landmarks for small vessels); widen when the mask is large.
+    Uses only GT mask area — no test-time model dependency.
+    """
+    with torch.no_grad():
+        cov = float(seg_gt.clamp(0, 1).mean().item())
+    cov = max(1e-5, min(cov, 0.95))
+    # sigma ∝ (mask_fraction / ref)^+power — small hull → smaller σ (sharper peaks).
+    ref = 0.09
+    ratio = math.sqrt(cov / ref)
+    sigma = 1.75 * (ratio**0.42)
+    return float(max(0.95, min(sigma, 2.85)))
+
+
+def build_kp_heat_targets_adaptive(
+    kp_gt: torch.Tensor,
+    kp_vis: torch.Tensor,
+    h: int,
+    w: int,
+    seg_gt: torch.Tensor,
+) -> torch.Tensor:
+    """Per-batch single sigma from mean mask coverage (call once per batch in collate)."""
+    sig = adaptive_heatmap_sigma_from_mask(seg_gt)
+    return build_kp_heat_targets(kp_gt, kp_vis, h, w, sigma=sig)
+
+
 def keypoint_heatmap_loss(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -99,6 +131,27 @@ def soft_iou_loss_with_logits(logits: torch.Tensor, target: torch.Tensor, eps: f
     return (1.0 - iou).mean()
 
 
+def tversky_loss_with_logits(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 1e-6,
+    *,
+    alpha: float = 0.32,
+    beta: float = 0.68,
+) -> torch.Tensor:
+    """
+    Tversky index loss — we use **beta > alpha** to penalise missed hull (FN) more than false water
+    (FP), matching coastal / glitter false positives without copying a specific paper’s constants.
+    """
+    p = torch.sigmoid(logits)
+    t = target.clamp(0, 1)
+    tp = (p * t).sum(dim=(2, 3))
+    fp = (p * (1.0 - t)).sum(dim=(2, 3))
+    fn = ((1.0 - p) * t).sum(dim=(2, 3))
+    tversky = (tp + eps) / (tp + float(alpha) * fp + float(beta) * fn + eps)
+    return (1.0 - tversky).mean()
+
+
 def bce_logits_masked(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -133,19 +186,21 @@ def keypoint_loss(
     return coord, vb
 
 
-def heading_sin_cos_loss(pred_sc: torch.Tensor, gt_deg: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+def heading_combined_circular_loss(pred_sc: torch.Tensor, gt_deg: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
     """
-    pred_sc: (B, 2) arbitrary scale — L2-normalize then match unit circle.
-    gt_deg: (B,) degrees [0, 360).
-    valid: (B,) bool mask.
+    **Circular heading**: combine (1 − cos Δ) with **geodesic** loss (acos / π) on unit vectors.
+    Cosine alone under-penalises large errors; angular term is proper for 360° wrap (via sin/cos).
     """
     rad = gt_deg * (torch.pi / 180.0)
     tgt = torch.stack([torch.sin(rad), torch.cos(rad)], dim=-1)
     p = F.normalize(pred_sc, dim=-1, eps=1e-6)
     if valid.sum() < 1:
         return pred_sc.sum() * 0.0
-    cos_sim = (p * tgt).sum(dim=-1)
-    return ((1.0 - cos_sim) * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
+    cos_sim = (p * tgt).sum(dim=-1).clamp(-1.0 + 1e-4, 1.0 - 1e-4)
+    cos_term = ((1.0 - cos_sim) * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
+    ang = torch.acos(cos_sim) / torch.pi
+    ang_term = (ang * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
+    return cos_term + 0.42 * ang_term
 
 
 def wake_cosine_loss(pred: torch.Tensor, tgt: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -156,6 +211,21 @@ def wake_cosine_loss(pred: torch.Tensor, tgt: torch.Tensor, valid: torch.Tensor)
         return pred.sum() * 0.0
     cos = (p * t).sum(dim=-1)
     return ((1.0 - cos) * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
+
+
+def wake_heading_coherence_loss(
+    wake_raw: torch.Tensor,
+    hdg_raw: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """
+    **Wake cue**: encourage wake head to align with heading head in **(cos, sin)** chip convention
+    (matches ``wake_vec`` built from ``heading_deg`` in the dataset). hdg stored as (sin, cos) in loss tgt.
+    """
+    p = F.normalize(hdg_raw[:, :2], dim=-1, eps=1e-6)
+    sin_v, cos_v = p[:, 0], p[:, 1]
+    hdg_as_wake = torch.stack([cos_v, sin_v], dim=-1)
+    return wake_cosine_loss(wake_raw, hdg_as_wake, valid)
 
 
 def distill_l2(student: torch.Tensor, teacher: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -182,51 +252,161 @@ def _smoothstep(u: float) -> float:
     return u * u * (3.0 - 2.0 * u)
 
 
+@dataclass(frozen=True)
+class CurriculumSchedule:
+    """
+    **Tunable AquaForge schedule**: piecewise targets in normalized time ``t ∈ [0,1]``.
+    Interpolation is linear between nodes, then a light smoothstep on the whole vector for
+    stable optimizer steps at stage boundaries (our transition shaping).
+    """
+
+    # (t_fraction, weight_dict) — must include t=0; increasing t; distill overwritten by distill_cap.
+    nodes: tuple[tuple[float, dict[str, float]], ...] = (
+        (
+            0.0,
+            {
+                "cls": 1.05,
+                "seg": 1.2,
+                "kp": 0.0,
+                "kp_hm": 0.0,
+                "hdg": 0.0,
+                "wake": 0.0,
+                "distill": 0.0,
+            },
+        ),
+        (
+            0.12,
+            {
+                "cls": 1.0,
+                "seg": 1.15,
+                "kp": 0.0,
+                "kp_hm": 0.0,
+                "hdg": 0.0,
+                "wake": 0.0,
+                "distill": 0.0,
+            },
+        ),
+        (
+            0.28,
+            {
+                "cls": 0.98,
+                "seg": 1.05,
+                "kp": 0.45,
+                "kp_hm": 0.55,
+                "hdg": 0.0,
+                "wake": 0.0,
+                "distill": 0.0,
+            },
+        ),
+        (
+            0.48,
+            {
+                "cls": 0.95,
+                "seg": 1.0,
+                "kp": 0.72,
+                "kp_hm": 0.78,
+                "hdg": 0.55,
+                "wake": 0.0,
+                "distill": 0.0,
+            },
+        ),
+        (
+            0.72,
+            {
+                "cls": 0.9,
+                "seg": 1.0,
+                "kp": 0.82,
+                "kp_hm": 0.72,
+                "hdg": 1.05,
+                "wake": 0.35,
+                "distill": 0.0,
+            },
+        ),
+        (
+            1.0,
+            {
+                "cls": 0.88,
+                "seg": 1.0,
+                "kp": 0.88,
+                "kp_hm": 0.65,
+                "hdg": 1.08,
+                "wake": 0.62,
+                "distill": 0.0,
+            },
+        ),
+    )
+
+
+def _interpolate_nodes(t: float, schedule: CurriculumSchedule) -> dict[str, float]:
+    nodes = list(schedule.nodes)
+    if not nodes:
+        raise ValueError("empty curriculum")
+    t = max(0.0, min(1.0, t))
+    keys = set().union(*(n[1].keys() for n in nodes))
+    # find bracket
+    if t <= nodes[0][0]:
+        base = dict(nodes[0][1])
+    elif t >= nodes[-1][0]:
+        base = dict(nodes[-1][1])
+    else:
+        for i in range(len(nodes) - 1):
+            t0, w0 = nodes[i]
+            t1, w1 = nodes[i + 1]
+            if t0 <= t <= t1:
+                span = max(t1 - t0, 1e-9)
+                u = (t - t0) / span
+                base = {}
+                for k in keys:
+                    a = float(w0.get(k, 0.0))
+                    b = float(w1.get(k, 0.0))
+                    base[k] = a + u * (b - a)
+                break
+        else:
+            base = dict(nodes[-1][1])
+    return base
+
+
+DEFAULT_CURRICULUM = CurriculumSchedule()
+
+
 def curriculum_base_weights(
     epoch: int,
     total_epochs: int,
     *,
     distill_cap: float = 0.0,
+    schedule: CurriculumSchedule | None = None,
 ) -> dict[str, float]:
     """
-    AquaForge multi-task curriculum: **segmentation + vessel logit first**, then **landmarks +
-    heatmaps**, then **heading**, then **wake** (and optional distill cap).
-
-    Uses normalized time ``t = epoch / max(total_epochs - 1, 1)`` and smooth ramps between
-    phase boundaries tuned for incremental human-in-the-loop retraining (short runs stay in
-    early phases longer when ``total_epochs`` is small).
+    Multi-task curriculum: interpolate :class:`CurriculumSchedule` nodes in ``t = epoch/(T-1)``,
+    apply smoothstep for gentle stage transitions, then inject ``distill_cap`` on the distill slot.
     """
+    sch = schedule or DEFAULT_CURRICULUM
     T = max(int(total_epochs), 1)
     denom = max(T - 1, 1)
-    t = float(epoch) / float(denom)
-    # Phase edges (fraction of run) — deliberate spacing for S2-sized chips.
-    e0, e1, e2 = 0.17, 0.40, 0.68
-    u_kp = _smoothstep((t - e0) / max(e1 - e0, 1e-6))
-    u_hdg = _smoothstep((t - e1) / max(e2 - e1, 1e-6))
-    u_wake = _smoothstep((t - e2) / max(1.0 - e2, 1e-6))
-    return {
-        # Classification stays on but gently yields relative emphasis to geometry late.
-        "cls": 0.9 + 0.1 * (1.0 - t),
-        "seg": 1.0,
-        "kp": 0.9 * u_kp,
-        "kp_hm": 1.0 * u_kp,
-        "hdg": 1.05 * u_hdg,
-        "wake": 0.6 * u_wake,
-        "distill": float(distill_cap) * u_wake,
-    }
+    t_raw = float(epoch) / float(denom)
+    base = _interpolate_nodes(t_raw, sch)
+    u = _smoothstep(t_raw)
+    # Mild global easing — emphasises mid-training stability (our knob).
+    for k in list(base.keys()):
+        if k == "distill":
+            continue
+        base[k] = float(base[k]) * (0.92 + 0.08 * u)
+    base["distill"] = float(distill_cap) * _smoothstep(max(0.0, (t_raw - 0.55) / max(0.45, 1e-9)))
+    return base
 
 
 @dataclass
 class DynamicLossBalancer:
     """
-    EMA of per-task **unweighted** loss scalars from the previous step; rescales curriculum
-    weights so tasks with persistently higher magnitude get slightly **lower** relative weight
-    and vice versa (geometric-mean anchor). This is our own stabiliser — not GradNorm / DWA code.
+    EMA of per-task unweighted losses, then geometric-mean rescaling. Optional **batch_context**
+    nudges weights for **small vessels** (low mask coverage), **heading ambiguity** (entropy-like
+    proxy from heading confidence logits in the trainer), and **high AL priority** — explicit
+    AquaForge knobs, not imported MT algorithms.
     """
 
     decay: float = 0.93
     floor: float = 1e-5
-    exponent: float = 0.55
+    exponent: float = 0.52
     ema: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
@@ -244,23 +424,40 @@ class DynamicLossBalancer:
             prev = self.ema.get(wk, x)
             self.ema[wk] = self.decay * prev + (1.0 - self.decay) * x
 
-    def scale_weights(self, base: dict[str, float]) -> dict[str, float]:
-        if not self.ema:
-            return dict(base)
-        active = [k for k, w in base.items() if w > 0.0]
-        if not active:
-            return dict(base)
-        vals = [max(self.ema.get(k, 1.0), self.floor) for k in active]
-        log_geo = sum(math.log(v) for v in vals) / len(vals)
-        geom = math.exp(log_geo)
-        out: dict[str, float] = {}
-        for k, w in base.items():
-            if w <= 0.0:
-                out[k] = 0.0
-                continue
-            ek = max(self.ema.get(k, geom), self.floor)
-            factor = (geom / ek) ** self.exponent
-            out[k] = float(w * factor)
+    def scale_weights(
+        self,
+        base: dict[str, float],
+        *,
+        batch_context: dict[str, float] | None = None,
+    ) -> dict[str, float]:
+        bc = batch_context or {}
+        out: dict[str, float] = dict(base)
+        if self.ema:
+            active = [k for k, w in base.items() if w > 0.0]
+            if active:
+                vals = [max(self.ema.get(k, 1.0), self.floor) for k in active]
+                log_geo = sum(math.log(v) for v in vals) / len(vals)
+                geom = math.exp(log_geo)
+                for k, w in list(out.items()):
+                    if w <= 0.0:
+                        out[k] = 0.0
+                        continue
+                    ek = max(self.ema.get(k, geom), self.floor)
+                    factor = (geom / ek) ** self.exponent
+                    out[k] = float(w * factor)
+
+        cov = bc.get("seg_coverage_mean")
+        if cov is not None and cov < 0.028:
+            out["seg"] = float(out.get("seg", 0.0) * 1.11)
+            out["kp_hm"] = float(out.get("kp_hm", 0.0) * 1.08)
+        amb = bc.get("heading_ambiguity_mean")
+        if amb is not None and amb > 0.38:
+            out["hdg"] = float(out.get("hdg", 0.0) * 1.1)
+        pr = bc.get("al_priority_mean")
+        if pr is not None and pr > 1.65:
+            out["cls"] = float(out.get("cls", 0.0) * 1.05)
+            out["kp"] = float(out.get("kp", 0.0) * 1.04)
+
         return out
 
 
@@ -275,7 +472,7 @@ def aquaforge_joint_loss(
     batch keys: cls, seg, kp_gt (B,K,2), kp_vis (B,K), kp_heat (B,K,H',W') optional (stride~8),
                 hdg_deg, hdg_valid, wake_vec (B,2), wake_valid,
                 teacher_hdg_sc (B,2), teacher_valid (B,) optional for ensemble distill,
-                seg_weight (B,1,H,W) optional.
+                loss_scale optional scalar broadcast (self-training trust).
     """
     logs: dict[str, float] = {}
     total = torch.zeros((), device=out["cls_logit"].device, dtype=out["cls_logit"].dtype)
@@ -297,9 +494,9 @@ def aquaforge_joint_loss(
             seg_tgt = F.interpolate(seg_tgt, size=sl.shape[-2:], mode="nearest")
         d_dice = dice_loss_with_logits(sl, seg_tgt)
         d_iou = soft_iou_loss_with_logits(sl, seg_tgt)
+        d_tversk = tversky_loss_with_logits(sl, seg_tgt)
         d_bce = bce_logits_masked(sl, seg_tgt, torch.ones_like(seg_tgt))
-        # Our hull term: Dice + IoU + masked BCE — distinct from any single third-party seg loss.
-        seg_loss = d_dice + 0.42 * d_iou + 0.48 * d_bce
+        seg_loss = d_dice + 0.38 * d_iou + 0.22 * d_tversk + 0.42 * d_bce
         total = total + w * seg_loss
         logs["loss_seg"] = float(seg_loss.detach())
 
@@ -327,13 +524,21 @@ def aquaforge_joint_loss(
     w = stage_weights.get("hdg", 1.0)
     if w > 0:
         h = out["hdg"]
-        lh = heading_sin_cos_loss(h[:, :2], batch["hdg_deg"], batch["hdg_valid"] > 0)
+        lh = heading_combined_circular_loss(h[:, :2], batch["hdg_deg"], batch["hdg_valid"] > 0)
         total = total + w * lh
         logs["loss_hdg"] = float(lh.detach())
 
     w = stage_weights.get("wake", 1.0)
     if w > 0:
-        lw = wake_cosine_loss(out["wake"], batch["wake_vec"], batch["wake_valid"] > 0)
+        wv = batch["wake_valid"] > 0
+        hdg_ok = batch["hdg_valid"] > 0
+        coh_mask = wv & hdg_ok
+        lw_gt = wake_cosine_loss(out["wake"], batch["wake_vec"], wv)
+        if coh_mask.sum() >= 1:
+            lw_coh = wake_heading_coherence_loss(out["wake"], out["hdg"], coh_mask)
+            lw = lw_gt + 0.34 * lw_coh
+        else:
+            lw = lw_gt
         total = total + w * lw
         logs["loss_wake"] = float(lw.detach())
 
@@ -345,8 +550,62 @@ def aquaforge_joint_loss(
         total = total + w * ld
         logs["loss_distill"] = float(ld.detach())
 
+    ls = batch.get("loss_scale")
+    if ls is not None:
+        if isinstance(ls, torch.Tensor):
+            total = total * ls.to(device=total.device, dtype=total.dtype)
+        else:
+            total = total * float(ls)
+
     logs["loss_total"] = float(total.detach())
     return total, logs
+
+
+def aquaforge_self_training_loss(
+    out: dict[str, torch.Tensor],
+    soft: dict[str, torch.Tensor],
+    stage_weights: dict[str, float],
+    *,
+    trust: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    **Pseudo-label / self-training** (AquaForge-as-teacher): match probabilities / directions to
+    detached teacher outputs from a prior forward. ``trust`` (B,) downweights uncertain chips.
+    Human review remains the gate for which unlabeled chips enter the pool (JSONL curation).
+    """
+    device = out["cls_logit"].device
+    dtype = out["cls_logit"].dtype
+    tw = trust.clamp(0.04, 1.0)
+    denom = tw.sum().clamp_min(1e-6)
+    logs: dict[str, float] = {}
+    total = torch.zeros((), device=device, dtype=dtype)
+
+    w = stage_weights.get("seg", 1.0) * 0.55
+    if w > 0 and "seg_logit" in out:
+        sl = out["seg_logit"]
+        st = soft["seg"]
+        if sl.shape[-2:] != st.shape[-2:]:
+            st = F.interpolate(st, size=sl.shape[-2:], mode="bilinear", align_corners=False)
+        mse = (torch.sigmoid(sl) - st.clamp(0, 1)).pow(2).mean(dim=(1, 2, 3))
+        ls = (mse * tw).sum() / denom
+        total = total + w * ls
+        logs["loss_st_seg"] = float(ls.detach())
+
+    w = stage_weights.get("hdg", 1.0) * 0.45
+    if w > 0:
+        p = F.normalize(out["hdg"][:, :2], dim=-1, eps=1e-6)
+        tgt = F.normalize(soft["hdg_sc"], dim=-1, eps=1e-6)
+        cos_sim = (p * tgt).sum(dim=-1)
+        lh = ((1.0 - cos_sim) * tw).sum() / denom
+        total = total + w * lh
+        logs["loss_st_hdg"] = float(lh.detach())
+
+    logs["loss_st_total"] = float(total.detach())
+    return total, logs
+
+
+# Backward-compatible name for tests / callers.
+heading_sin_cos_loss = heading_combined_circular_loss
 
 
 def stage_weights_for_epoch(epoch: int, stage_schedule: list[tuple[int, dict[str, float]]]) -> dict[str, float]:

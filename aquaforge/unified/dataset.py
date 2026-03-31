@@ -21,7 +21,7 @@ import numpy as np
 
 from aquaforge.unified.constants import NUM_LANDMARKS
 from aquaforge.unified.distill import review_ui_active_learning_priority
-from aquaforge.unified.losses import build_kp_heat_targets
+from aquaforge.unified.losses import build_kp_heat_targets_adaptive
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
 from aquaforge.vessel_markers import (
     markers_for_hull,
@@ -196,7 +196,9 @@ def iter_aquaforge_samples(
                     heading = None
             cls = 1.0
             ex_fb = rec.get("extra") if isinstance(rec.get("extra"), dict) else {}
-            pr = review_ui_active_learning_priority(ex_fb, heading_labeled=heading is not None)
+            pr = review_ui_active_learning_priority(
+                ex_fb, heading_labeled=heading is not None, review_category=None
+            )
             yield AquaForgeSample(
                 Path(path), cx, cy, cls, heading, mlist, rid, al_priority=pr
             )
@@ -211,7 +213,9 @@ def iter_aquaforge_samples(
                 heading = float(h2) % 360.0
             except (TypeError, ValueError):
                 heading = None
-        pr = review_ui_active_learning_priority(extra, heading_labeled=heading is not None)
+        pr = review_ui_active_learning_priority(
+            extra, heading_labeled=heading is not None, review_category="vessel"
+        )
         yield AquaForgeSample(
             Path(path), cx, cy, cls, heading, mlist, rid, al_priority=pr
         )
@@ -260,7 +264,11 @@ def collate_batch(
     imgsz = int(seg.shape[-1])
     hm_h = max(1, imgsz // 8)
     hm_w = max(1, imgsz // 8)
-    kp_heat = build_kp_heat_targets(kp_gt, kp_vis, hm_h, hm_w)
+    kp_heat = build_kp_heat_targets_adaptive(kp_gt, kp_vis, hm_h, hm_w, seg)
+    if len(batch_items[0]) >= 12:
+        ls = torch.tensor([float(b[11]) for b in batch_items], device=device, dtype=torch.float32).mean()
+    else:
+        ls = torch.tensor(1.0, device=device, dtype=torch.float32)
     return {
         "imgs": imgs,
         "cls": cls,
@@ -275,6 +283,7 @@ def collate_batch(
         "al_priority": al_pr,
         "teacher_hdg_sc": teacher_sc,
         "teacher_valid": teacher_v,
+        "loss_scale": ls,
     }
 
 
@@ -303,6 +312,7 @@ def build_training_row(
         float,
         float,
         np.ndarray | None,
+        float,
         float,
     ]
     | None
@@ -335,4 +345,110 @@ def build_training_row(
         float(sample.al_priority),
         sample.teacher_heading_sc,
         float(sample.teacher_valid),
+        1.0,
     )
+
+
+@dataclass
+class PseudoChipCandidate:
+    """Unlabeled chip queued for self-training (curate via review UI / export tooling)."""
+
+    tci_path: Path
+    cx: float
+    cy: float
+    record_id: str
+
+
+def iter_pseudo_chip_candidates(jsonl_path: Path, project_root: Path) -> Iterator[PseudoChipCandidate]:
+    """JSONL lines: ``tci_path``, ``cx_full``, ``cy_full``, optional ``id``."""
+    import json
+
+    p = Path(jsonl_path)
+    if not p.is_file():
+        return
+    with p.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            raw_tp = rec.get("tci_path")
+            if not raw_tp:
+                continue
+            path = resolve_stored_asset_path(str(raw_tp), project_root)
+            if path is None:
+                continue
+            try:
+                cx = float(rec["cx_full"])
+                cy = float(rec["cy_full"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            rid = str(rec.get("id", "")) or f"pseudo_{hash((path, cx, cy)) % (10**9)}"
+            yield PseudoChipCandidate(Path(path), cx, cy, rid)
+
+
+def prepare_pseudo_self_training_batch(
+    model: Any,
+    device: Any,
+    candidates: list[PseudoChipCandidate],
+    chip_half: int,
+    imgsz: int,
+    *,
+    min_vessel_conf: float = 0.58,
+    max_uncertainty: float = 0.62,
+) -> tuple[Any, dict[str, Any], Any] | None:
+    """
+    Teacher pass (no grad): AquaForge produces soft seg + heading direction and a **trust** scalar
+    per chip from :func:`aquaforge.unified.distill.aquaforge_uncertainty_from_outputs`.
+    Student pass is done in the trainer on the returned ``imgs`` with ``model.train()``.
+    """
+    import torch
+    import torch.nn.functional as Fn
+
+    from aquaforge.unified.distill import aquaforge_uncertainty_from_outputs
+    from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+
+    if not candidates:
+        return None
+    imgs_list: list[np.ndarray] = []
+    trust_list: list[float] = []
+    soft_seg: list[Any] = []
+    soft_hdg_sc: list[np.ndarray] = []
+
+    model.eval()
+    with torch.no_grad():
+        for c in candidates:
+            bgr, _, _, cw, ch = read_yolo_chip_bgr(c.tci_path, c.cx, c.cy, chip_half)
+            if bgr.size == 0 or cw < 8 or ch < 8:
+                continue
+            img = chip_bgr_to_tensor(bgr, imgsz)
+            x = torch.from_numpy(img).float().unsqueeze(0).to(device)
+            cls_l, seg, _kp, hdg, _wake, _kp_hm = model(x)
+            out = {
+                "cls_logit": cls_l,
+                "seg_logit": seg,
+                "hdg": hdg,
+            }
+            u = float(aquaforge_uncertainty_from_outputs(out))
+            pv = float(torch.sigmoid(cls_l.reshape(-1)[0]).item())
+            if pv < min_vessel_conf or u > max_uncertainty:
+                continue
+            trust = max(0.05, min(1.0, (1.0 - u) * pv))
+            imgs_list.append(img)
+            trust_list.append(trust)
+            soft_seg.append(torch.sigmoid(seg).detach())
+            p = Fn.normalize(hdg[0, :2], dim=-1, eps=1e-6)
+            soft_hdg_sc.append(p.cpu().numpy().astype(np.float32))
+
+    if not imgs_list:
+        return None
+
+    imgs = torch.tensor(np.stack(imgs_list, axis=0), device=device, dtype=torch.float32)
+    seg_t = torch.cat(soft_seg, dim=0).to(device)
+    hdg_t = torch.tensor(np.stack(soft_hdg_sc, axis=0), device=device, dtype=torch.float32)
+    trust_t = torch.tensor(trust_list, device=device, dtype=torch.float32)
+    model.train()
+    return imgs, {"seg": seg_t, "hdg_sc": hdg_t}, trust_t

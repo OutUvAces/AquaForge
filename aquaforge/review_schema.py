@@ -11,6 +11,7 @@ Common ``extra`` keys written by the review UI include:
 - ``hull_aspect_ratio`` / ``hull_aspect_ratio_source`` — length÷width (≥1) from graphic hull or footprint.
 - ``wake_present``, ``partial_cloud_obscuration`` — image-level training flags.
 - ``af_training_priority`` — optional float multiplier (Streamlit / tooling) for AquaForge **active-learning** oversampling (see :mod:`aquaforge.unified.distill`).
+- ``coastal_or_land_adjacent`` / ``near_coast_proxy`` — optional bool flags to up-weight hard **coastal** chips in training sampling.
 
 Multi-task sklearn heads (after UI retrain) learn many of these keys from LR+chip features; see
 :mod:`aquaforge.review_multitask_train` and ``data/models/ship_review_multitask.joblib``.

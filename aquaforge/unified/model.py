@@ -79,6 +79,18 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
     raise RuntimeError("AquaForge YOLO backbone produced no 4D feature maps")
 
 
+# --- AquaForge YOLO fusion (our design, not a literal FPN head copy) ---
+# We take the *neck output tensors that would feed Ultralytics Detect/Segment* and:
+#   1) 1×1 ``neck_proj`` to a **shared width** ``hidden`` (decouples channel layouts from our heads).
+#   2) **Align to the finest stride** with *nearest* upsample (hard preserve, no learnable
+#      transposed-conv drift) — emphasises high-frequency hull cues for S2 small vessels.
+#   3) **Depth concatenation** + a single 3×3 ``fuse`` conv mixes scales in one shot; we do *not*
+#      reuse YOLO’s top-down additive fusion graph. Seg decodes from fused map at native stride
+#      then bilinear upsample to full ``imgsz``; heatmaps stay at /8 for our Gaussian targets.
+# This is intentionally simpler than cloning PAFPN internals while still exploiting multi-scale
+# context for heading / wake globals via GAP on the fused tensor.
+
+
 class _EncoderTower(nn.Module):
     """Stride-16 feature map: imgsz -> imgsz/16 (standard 4× stride-2 stages)."""
 
@@ -224,6 +236,7 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.wake_head = nn.Linear(self.hidden, 2)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # See module-level note: concat-fuse on aligned scales, not YOLO’s detect head FPN.
         feats = _take_last_three_scales(forward_yolo_to_detect_inputs(self.ultra, x))
         p3, p4, p5 = [self.neck_proj[i](feats[i]) for i in range(3)]
         target_hw = p3.shape[2:]

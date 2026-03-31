@@ -21,10 +21,41 @@ import numpy as np
 from aquaforge.review_schema import EXTRA_AF_TRAINING_PRIORITY
 
 
+def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
+    """
+    Scalar **epistemic-style** uncertainty from AquaForge’s own logits (0 ≈ confident, ~1 ≈ unsure).
+    We blend vessel margin, heading angular margin proxy, and seg entropy — our heuristic, not MC dropout.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    cls = out["cls_logit"].reshape(-1)
+    p = torch.sigmoid(cls[0])
+    u_cls = float((1.0 - (2.0 * p - 1.0).abs()).item())
+
+    h = out["hdg"][:, :2]
+    hn = F.normalize(h, dim=-1, eps=1e-6)
+    u_h = float((1.0 - hn.abs().sum(dim=-1).clamp(0, 1).mean()).item())
+
+    seg = out["seg_logit"]
+    ps = torch.sigmoid(seg).clamp(1e-5, 1 - 1e-5)
+    ent = float((-(ps * ps.log() + (1 - ps) * (1 - ps).log()).mean()).item())
+
+    u = 0.38 * u_cls + 0.32 * u_h + 0.30 * (ent / 0.69314718056)
+    return max(0.0, min(1.0, u))
+
+
+def merge_al_priority_with_aquaforge_u(base_priority: float, af_u: float) -> float:
+    """Boost sampling weight when the **student** is uncertain (complements UI / ensemble cues)."""
+    u = max(0.0, min(1.0, float(af_u)))
+    return float(max(0.45, min(base_priority * (1.0 + 0.55 * u), 5.5)))
+
+
 def review_ui_active_learning_priority(
     extra: dict[str, Any] | None,
     *,
     heading_labeled: bool,
+    review_category: str | None = None,
 ) -> float:
     """
     Score ≥ 1.0 for oversampling: uncertain hybrid scores, small YOLO length proxies, weak keypoint
@@ -67,6 +98,13 @@ def review_ui_active_learning_priority(
 
     if ex.get("partial_cloud_obscuration") is True:
         p += 0.45
+
+    # Coastal / land-adjacent queue (optional UI flag — not a third-party dataset label).
+    if ex.get("coastal_or_land_adjacent") is True or ex.get("near_coast_proxy") is True:
+        p += 0.5
+
+    if review_category == "land":
+        p += 0.35
 
     if heading_labeled:
         p += 0.15
