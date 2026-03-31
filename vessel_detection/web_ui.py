@@ -8,6 +8,7 @@ Launched via ``app.py``, ``run_web.bat``, or ``Open Web App (no terminal).vbs``.
 from __future__ import annotations
 
 import hashlib
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -1590,43 +1591,68 @@ def _render_review_deck(
                 float(cy),
                 chip_half=int(det_settings.yolo.chip_half),
             )
-            if _gt_hint and isinstance(sota, dict):
-                gth = float(_gt_hint["heading_deg"])
-                prov = str(_gt_hint.get("provenance", ""))
-                ef = (
-                    angular_error_deg(float(sota["heading_fused_deg"]), gth)
-                    if sota.get("heading_fused_deg") is not None
-                    else None
-                )
-                ek = (
-                    angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
-                    if sota.get("heading_keypoint_deg") is not None
-                    else None
-                )
-                delta_improve = (
-                    (ek - ef) if (ek is not None and ef is not None) else None
-                )
-                fused_meaningful = (
-                    ef is not None
-                    and ek is not None
-                    and ef < ek - 1.0
-                )
-                _ins_parts: list[str] = []
-                if ek is not None:
-                    _ins_parts.append(f"- Keypoint circular error vs labeled heading: **{ek:.1f}°**")
-                if ef is not None:
-                    if fused_meaningful and delta_improve is not None:
+            if isinstance(sota, dict) and isinstance(_gt_hint, dict):
+                prov = str(_gt_hint.get("provenance", "") or "")
+                _raw_h = _gt_hint.get("heading_deg")
+                gth: float | None = None
+                if _raw_h is not None:
+                    try:
+                        gth = float(_raw_h)
+                    except (TypeError, ValueError):
+                        gth = None
+                if gth is not None and not math.isfinite(gth):
+                    gth = None
+
+                if gth is None:
+                    st.caption(
+                        "Benchmark insight: matched `vessel_size_feedback` row but **heading "
+                        "ground truth** is unavailable or not numeric (cannot score this spot)."
+                    )
+                else:
+                    ef = (
+                        angular_error_deg(float(sota["heading_fused_deg"]), gth)
+                        if sota.get("heading_fused_deg") is not None
+                        else None
+                    )
+                    ek = (
+                        angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
+                        if sota.get("heading_keypoint_deg") is not None
+                        else None
+                    )
+                    delta_improve = (
+                        (ek - ef) if (ek is not None and ef is not None) else None
+                    )
+                    fused_meaningful = (
+                        ef is not None
+                        and ek is not None
+                        and ef < ek - 1.0
+                    )
+                    _ins_parts: list[str] = []
+                    if ek is not None:
                         _ins_parts.append(
-                            f"- **Fused error: {ef:.1f}°** (~**{delta_improve:.1f}°** tighter than keypoint vs same GT)"
+                            f"- Keypoint circular error vs labeled heading: **{ek:.1f}°**"
+                        )
+                    if ef is not None:
+                        if fused_meaningful and delta_improve is not None:
+                            _ins_parts.append(
+                                f"- **Fused error: {ef:.1f}°** (~**{delta_improve:.1f}°** tighter than keypoint vs same GT)"
+                            )
+                        else:
+                            _ins_parts.append(
+                                f"- Fused circular error vs labeled heading: **{ef:.1f}°**"
+                            )
+                    if _ins_parts:
+                        st.markdown(
+                            "**Benchmark insight** (matched `vessel_size_feedback`, "
+                            f"source `{prov}`)\n\n" + "\n".join(_ins_parts)
                         )
                     else:
-                        _ins_parts.append(f"- Fused circular error vs labeled heading: **{ef:.1f}°**")
-                if _ins_parts:
-                    st.markdown(
-                        "**Benchmark insight** (matched `vessel_size_feedback`, "
-                        f"source `{prov}`)\n\n"
-                        + "\n".join(_ins_parts)
-                    )
+                        st.markdown(
+                            "**Benchmark insight** (matched `vessel_size_feedback`, "
+                            f"source `{prov}`)\n\n"
+                            "- Heading ground truth is available, but **neither keypoint nor fused** "
+                            "heading is available on this spot for a circular-error comparison."
+                        )
             if sota.get("yolo_confidence") is not None:
                 st.metric("Marine YOLO confidence", f"{float(sota['yolo_confidence']):.3f}")
             if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:

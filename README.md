@@ -197,6 +197,30 @@ py -3 scripts/run_detection_eval.py --demo --max-spots 10 --jsonl data/labels/sh
 
 If the JSONL is empty or labels are missing, the demo still runs and reports zeros / `N/A` where applicable.
 
+### Example outputs
+
+**`--demo`** prints a short **plain-text** block (no markdown). Example shape:
+
+```
+=== Vessel Detector quick eval demo ===
+JSONL: .../data/labels/ship_reviews.jsonl
+Reference backend: legacy_hybrid
+Cap: 8 geometry spot(s)
+Geometry spots evaluated: 8
+Binary labeled points: 42 | Heading GT rows: 12
+Pearson r (legacy / YOLO-fusion / ensemble): 0.1234 / 0.1456 / 0.1500
+Ensemble heading MAE (deg): wake / keypoint / fused: 12.50 / 10.20 / 9.10
+% fused beats wake (ensemble, >5°): 30.0% (n=20)
+Mean mask IoU (ensemble): 0.4500 (n=15)
+```
+
+**`--summary-markdown`** writes **GFM**: scannable **Key Takeaways** (Fusion **≥5°** vs ambiguous wake in **X%** of cases, keypoint line, best Pearson, then **Scope**), a **Summary** table, horizontal-scroll hint for narrow views, and the full metric tables (best per row in bold). A static illustration lives in [`docs/examples/eval_github.sample.md`](docs/examples/eval_github.sample.md).
+
+```bash
+py -3 scripts/run_detection_eval.py --demo --max-spots 8 --jsonl data/labels/ship_reviews.jsonl
+py -3 scripts/run_detection_eval.py --summary-markdown -o eval_github.md
+```
+
 Or: `py -3 -m vessel_detection.evaluation --help`.
 
 Use `--detection-config path/to/detection.yaml` or set `VD_DETECTION_CONFIG`. The evaluation run always computes all three ranking columns; `settings_backend` in JSON records your YAML reference backend.
@@ -289,7 +313,15 @@ Quantized ONNX files are written under **`<system temp>/vessel_detector_ort_quan
 
 ---
 
-## Roadmap (ideas)
+## Known limitations and roadmap
+
+**Limitations (today)**
+
+- Review and offline eval are **spot- / chip-centric**; there is no first-class **full-scene tiled inference** pipeline in-repo.
+- Defaults target **CPU-oriented** workflows; **GPU** for YOLO or ORT depends on your install and is not a single turnkey path in this README.
+- Geometry metrics need **labeled** `vessel_size_feedback` (and markers where applicable); empty or partial labels yield **`N/A`** in tables.
+
+**Roadmap (ideas)**
 
 - Deeper integration tests for ONNX exports across opset/layout variants.
 - Optional GPU-first Docker image for review + YOLO + ORT CUDA.

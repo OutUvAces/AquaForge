@@ -9,6 +9,8 @@ copy under the system temp directory; falls back to the float model if quantizat
 
 Quantized ONNX cache directory (same on all platforms): ``<temp>/vessel_detector_ort_quant/``
 where ``<temp>`` is :func:`tempfile.gettempdir` (e.g. ``%TEMP%`` on Windows, ``/tmp`` on Linux).
+To reset cached quant models, delete that folder (e.g. ``rm -rf /tmp/vessel_detector_ort_quant`` on
+Linux/macOS, or remove ``%TEMP%\\vessel_detector_ort_quant`` on Windows) and restart the process.
 """
 
 from __future__ import annotations

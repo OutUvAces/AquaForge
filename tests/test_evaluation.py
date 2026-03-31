@@ -122,7 +122,7 @@ class TestEvalReportJson(unittest.TestCase):
             )
             txt = format_eval_report(res, settings_sota=DetectionSettings())
             self.assertIn("Ranking (Pearson", txt)
-            self.assertIn("YOLO-fusion", txt)
+            self.assertIn("YOLO-fus.", txt)
             self.assertIn("Hull overlap", txt)
             self.assertIn("N/A", txt)
         finally:
@@ -174,6 +174,9 @@ class TestSummaryMarkdown(unittest.TestCase):
                 jsonl_path=str(jp),
             )
             self.assertIn("### Key Takeaways", md)
+            self.assertIn("#### Highlights", md)
+            self.assertIn("#### Scope", md)
+            self.assertIn("≥5°", md)
             self.assertIn("| JSONL |", md)
             self.assertIn("Vessel Detector", md)
             self.assertIn("| Legacy |", md)
@@ -215,8 +218,11 @@ class TestSummaryMarkdown(unittest.TestCase):
         self.assertIn("**0.9000**", md)
         self.assertIn("**0.0500**", md)
         self.assertIn("**0.8000**", md)
-        self.assertIn("Fusion benefit (ensemble)", md)
+        self.assertIn("#### Highlights", md)
+        self.assertIn("Improved heading vs ambiguous wake", md)
+        self.assertIn("≥5°", md)
         self.assertIn("25.0%", md)
+        self.assertIn("Beat ambiguous wake by **≥5°**", md)
 
 
 if __name__ == "__main__":

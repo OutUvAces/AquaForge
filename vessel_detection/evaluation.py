@@ -147,7 +147,7 @@ def _bold_best_three(
     for i in valid_ix:
         v = vals[i]
         assert v is not None
-        if abs(float(v) - best) <= 1e-9:
+        if math.isclose(float(v), best, rel_tol=0.0, abs_tol=1e-6):
             out[i] = f"**{cells[i]}**"
     return (out[0], out[1], out[2])
 
@@ -779,7 +779,8 @@ def format_eval_report(
     """
     yf = res.heading_buckets.get("yolo_fusion") or HeadingErrorBucket()
     ens = res.heading_buckets.get("ensemble") or HeadingErrorBucket()
-    hdr4 = "| Metric | Legacy | YOLO-fusion | Ensemble |"
+    # Short "YOLO-fus." keeps tables narrower on mobile/GitHub (still spelled out in prose above).
+    hdr4 = "| Metric | Legacy | YOLO-fus. | Ensemble |"
     sep4 = "| :--- | ---: | ---: | ---: |"
 
     r_leg = fmt_eval_num(res.pearson_r_by_backend.get("legacy_hybrid"), ndigits=4)
@@ -936,21 +937,26 @@ def _key_takeaways_and_summary_lines(
     takeaway_lines = [
         "### Key Takeaways",
         "",
-        f"- **Dataset:** {res.n_geometry_spots} geometry spot(s) evaluated, "
-        f"{res.n_labeled_points} binary-labeled point row(s), "
-        f"{res.n_heading_gt} row(s) with heading ground truth.",
-        f"- **Ranking:** {n_scored} backend(s) with Pearson scores: {scored_txt}.",
+        "#### Highlights",
+        "",
     ]
     if res.n_fusion_vs_wake_pairs > 0 and res.pct_fusion_better_than_wake_ambiguity is not None:
         takeaway_lines.append(
-            f"- **Fusion benefit (ensemble):** fused heading beats ambiguous wake (by >5°) on "
-            f"**{fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)}** of spots "
-            f"(n={res.n_fusion_vs_wake_pairs})."
+            "- **Fusion:** Improved heading vs ambiguous wake by **≥5°** in "
+            f"**{fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)}** of cases "
+            f"(n={res.n_fusion_vs_wake_pairs}; ensemble, undirected wake baseline)."
         )
     else:
         takeaway_lines.append(
-            "- **Fusion benefit:** insufficient fused-vs-wake pairs for a reliable `%` "
-            "(needs ensemble headings, wake line, and heading GT on the same spots)."
+            "- **Fusion:** No **≥5°** improvement rate vs ambiguous wake (not enough paired "
+            "fused + wake + heading GT on the same spots)."
+        )
+
+    if res.n_kp_vs_wake_pairs > 0 and res.pct_keypoint_better_than_wake_line is not None:
+        takeaway_lines.append(
+            "- **Keypoint:** Beat ambiguous wake by **≥5°** in "
+            f"**{fmt_eval_pct(res.pct_keypoint_better_than_wake_line)}** of cases "
+            f"(n={res.n_kp_vs_wake_pairs}; ensemble)."
         )
 
     best_r = None
@@ -968,8 +974,21 @@ def _key_takeaways_and_summary_lines(
             best_name = label
     if best_name is not None and best_r is not None:
         takeaway_lines.append(
-            f"- **Best ranking correlation:** {best_name} (Pearson r **{best_r:.4f}**)."
+            f"- **Ranking:** Strongest Pearson **r** is **{best_name}** (**{best_r:.4f}**)."
         )
+
+    takeaway_lines.extend(
+        [
+            "",
+            "#### Scope",
+            "",
+            f"- **Dataset:** {res.n_geometry_spots} geometry spot(s), "
+            f"{res.n_labeled_points} binary-labeled point row(s), "
+            f"{res.n_heading_gt} with heading GT.",
+            f"- **Backends scored (Pearson):** {n_scored} - {scored_txt}.",
+            "",
+        ]
+    )
 
     jl = jsonl_path or "(default labels path)"
     fusion_cell = (
@@ -990,6 +1009,8 @@ def _key_takeaways_and_summary_lines(
         f"| Heading GT rows | {res.n_heading_gt} |",
         f"| Backends with ranking scores | {n_scored} ({scored_txt}) |",
         f"| % fused beats wake (ensemble) | {fusion_cell} |",
+        "",
+        "_Wide tables scroll horizontally on narrow GitHub / mobile views._",
         "",
     ]
     return "\n".join(takeaway_lines), "\n".join(glance)
