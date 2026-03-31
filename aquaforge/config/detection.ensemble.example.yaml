@@ -9,8 +9,11 @@
 #   4. First run: keep backend: legacy_hybrid in a backup; switch to ensemble when ready.
 #
 # README: "Example: full ensemble" and "Benchmarking" sections describe behavior and eval CLI.
-# Default shipped app behavior if YAML is missing: legacy_hybrid only (unchanged).
+# Normal app use forces AquaForge unless you set force_legacy (this file enables the old stack).
 # =============================================================================
+
+# Required so ``backend: ensemble`` is honored (otherwise the app stays on AquaForge).
+force_legacy: true
 
 # --- Backend ---
 # ensemble: YOLO ranking + per-spot masks/metrics; keypoints + wake_fusion per flags below.

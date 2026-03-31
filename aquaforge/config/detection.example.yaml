@@ -1,19 +1,18 @@
 # Copy to data/config/detection.yaml (create folder if needed) to enable SOTA backends.
 # data/ is gitignored — keep this example under version control and copy locally.
 #
-# Full ensemble (YOLO + keypoints + heuristic / ONNX wake): see detection.ensemble.example.yaml
+# Full ensemble (YOLO + keypoints + wake): see detection.ensemble.example.yaml (needs force_legacy: true).
 #
 # Performance (YOLO): ``yolo.inference_mode: chip_per_candidate`` runs one marine YOLO pass per
 # candidate chip (good for interactive review). ``sliding_window_merge`` scans the full TCI in a
 # coarse grid and merges extra high-confidence boxes — higher recall, more compute.
 
-# Backend: legacy_hybrid | yolo_only | yolo_fusion | ensemble | aquaforge
-# - legacy_hybrid: LR + chip MLP only (default, no extra deps).
-# - yolo_only: rank by marine YOLO confidence on each candidate chip (requires ultralytics + weights).
-# - yolo_fusion: weighted mix of hybrid P(vessel) and YOLO score.
-# - ensemble: optional keypoint heading + wake fusion (heuristic and/or ONNX wake) + YOLO when enabled.
-# - aquaforge: single multi-task model (seg + landmarks + heading + wake hint); see scripts/train_aquaforge.py.
-backend: legacy_hybrid
+# Default app path: AquaForge (seg + landmarks + heading + measurements). Train with **Retrain AquaForge** in the UI
+# or scripts/train_aquaforge.py. Review labels JSONL is used automatically.
+backend: aquaforge
+#
+# Hidden: set force_legacy: true to honor backend below (legacy_hybrid | yolo_only | yolo_fusion | ensemble).
+# force_legacy: false
 
 # AquaForge (optional): train with scripts/train_aquaforge.py, export ONNX with scripts/export_aquaforge_onnx.py
 # aquaforge:

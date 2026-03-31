@@ -2,8 +2,8 @@
 Streamlit UI: pick a scene, refresh, review spots.
 
 **Left panel (starts closed):** **Scene** + **Refresh spot list** only at top; everything else under
-**Advanced** (finding spots, download, re-sort, exports, duplicates, label fixer, whole-scene map, optional
-outline-hint consent).
+**Advanced** (retrain AquaForge, finding spots, download, ranking helpers, exports, duplicates, label fixer,
+whole-scene map, optional heavy-inference consent).
 
 **Main:** large close-up, subtle **On image** toggles (default outline + direction), optional readouts
 after the image, then **Back / Next** and **Ship / Not a ship / Unsure**.
@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import math
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,7 @@ from aquaforge.detection_backend import (
     run_sota_spot_inference,
 )
 from aquaforge.detection_config import (
+    aquaforge_requested,
     default_detection_yaml_path,
     example_detection_yaml_path,
     load_detection_settings,
@@ -837,6 +839,76 @@ def _session_init() -> None:
         st.session_state.vd_advanced_spot_hints = False
 
 
+def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> None:
+    """
+    Run scripts/train_aquaforge.py on the live review JSONL (same file append_review writes).
+
+    Long-running; Streamlit blocks until the subprocess exits. Requires requirements-ml.txt.
+    """
+    st.markdown("##### Retrain AquaForge")
+    st.caption(
+        "Uses your latest saved reviews and feedback in the labels file — no extra export step."
+    )
+    script = project_root / "scripts" / "train_aquaforge.py"
+    if not script.is_file():
+        st.caption(f"Training script not found: `{script}`")
+        return
+    try:
+        rel_lbl = str(labels_path.relative_to(project_root))
+    except ValueError:
+        rel_lbl = str(labels_path)
+    st.caption(f"Labels: `{rel_lbl}`")
+    if st.button(
+        "Retrain AquaForge",
+        type="primary",
+        use_container_width=True,
+        key="vd_retrain_aquaforge_btn",
+        help="Runs train_aquaforge.py with defaults on the current JSONL (can take a long time).",
+    ):
+        if not labels_path.is_file():
+            st.warning("No labels file yet — save a few reviews first.")
+            return
+        cmd = [
+            sys.executable,
+            str(script),
+            "--project-root",
+            str(project_root),
+            "--jsonl",
+            str(labels_path),
+        ]
+        with st.status("Training AquaForge…", expanded=True) as status:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(project_root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as e:
+                status.update(label="Training failed to start", state="error")
+                st.error(str(e))
+                return
+            tail = 12000
+            out = (proc.stdout or "")[-tail:]
+            err = (proc.stderr or "")[-tail:]
+            if proc.returncode == 0:
+                status.update(label="Training finished", state="complete")
+                st.success(
+                    "Training finished. Restart the Streamlit app (or reload) to pick up new weights."
+                )
+                if out.strip():
+                    st.code(out, language="text")
+            else:
+                status.update(label="Training failed", state="error")
+                st.error(f"Exit code {proc.returncode}")
+                if err.strip():
+                    st.code(err, language="text")
+                elif out.strip():
+                    st.code(out, language="text")
+
+
 def _sidebar_spot_finding_settings() -> None:
     """
     Detector queue limits and mask path — lives in the sidebar so the main column stays calm.
@@ -869,12 +941,12 @@ def _sidebar_spot_finding_settings() -> None:
             key="webui_scl_path",
             placeholder="path to …SCL…jp2",
         )
-        with st.expander("Where detection settings live", expanded=False):
-            _det_ui = load_detection_settings(ROOT)
+        # AquaForge is the default; no backend picker. Optional YAML is for power users / ML tuning only.
+        with st.expander("Optional: advanced config", expanded=False):
             ex_p = example_detection_yaml_path()
             st.caption(
-                f"Current file mode: **`{_det_ui.backend}`**. Example copy: **`{ex_p}`** → **`data/config/detection.yaml`**. "
-                "Richer drawings need **`pip install -r requirements-ml.txt`**."
+                f"Copy **`{ex_p}`** → **`data/config/detection.yaml`** only if you tune paths or ORT threads. "
+                "Install **`pip install -r requirements-ml.txt`** for full on-image inference."
             )
         st.markdown("---")
         st.caption(
@@ -960,13 +1032,15 @@ def main() -> None:
                     "Add a `*TCI_10m*.jp2` under **data/** or download one below."
                 )
             _det_adv = load_detection_settings(ROOT)
+            _render_retrain_aquaforge_section(ROOT, labels_path)
+            st.markdown("---")
             if sota_inference_requested(_det_adv) and getattr(
                 _det_adv, "ui_require_checkbox_for_sota", False
             ):
                 st.checkbox(
-                    "Allow outline hints on spots (uses more CPU/GPU)",
+                    "Allow full AquaForge inference on spots (uses more CPU/GPU)",
                     key="vd_advanced_spot_hints",
-                    help="When off, the app skips heavy models until you enable this.",
+                    help="When off, the app skips heavy model work until you enable this.",
                 )
             _sidebar_spot_finding_settings()
             with st.expander("Download satellite image", expanded=False):
@@ -1461,7 +1535,7 @@ def _render_spot_measurements_expander(
     cx: float,
     cy: float,
 ) -> None:
-    """Helper readouts from SOTA stack — kept out of the main focus; shown after the close-up image."""
+    """Helper readouts from detection (AquaForge by default) — optional expander after the close-up image."""
     if not sota:
         return
     with st.expander("Lengths, angles, helper readouts", expanded=False):
@@ -1481,8 +1555,11 @@ def _render_spot_measurements_expander(
             _leg_s = f"{float(_leg):.3f}" if _leg is not None else "n/a"
             _rk_s = f"{float(_rk):.3f}" if _rk is not None else "n/a"
             _yo_s = f"{float(_yo):.3f}" if _yo is not None else "n/a"
+            _conf_lbl = (
+                "model confidence" if aquaforge_requested(det_settings) else "mask confidence"
+            )
             st.caption(
-                f"This spot — blend **{_leg_s}**, sort **{_rk_s}**, mask **{_yo_s}**."
+                f"This spot — blend **{_leg_s}**, sort **{_rk_s}**, {_conf_lbl} **{_yo_s}**."
             )
         _gt_hint = spot_geometry_gt_from_labels(
             labels_path,
@@ -1665,9 +1742,10 @@ def _render_review_deck(
         st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
     with _hr:
         if sota_inference_requested(det_settings):
+            # Default overlays: outline, heading, and landmarks (AquaForge-first UX).
             for _xk, _dv in (
                 ("vd_ov_hull", True),
-                ("vd_ov_mark", False),
+                ("vd_ov_mark", True),
                 ("vd_ov_dir", True),
                 ("vd_ov_wake", False),
             ):
@@ -1686,7 +1764,7 @@ def _render_review_deck(
     if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
         _sota_allow = bool(st.session_state.get("vd_advanced_spot_hints", False))
 
-    # Performance: background warm — YOLO/ORT load off the main thread when models may run soon.
+    # Performance: background warm — AquaForge / optional YOLO+ORT off the main thread when models may run soon.
     _need_warm = yolo_requested(det_settings) or (
         sota_inference_requested(det_settings)
         and (not det_settings.ui_require_checkbox_for_sota or _sota_allow)

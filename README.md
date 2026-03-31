@@ -1,9 +1,9 @@
 # AquaForge
 
-**Sentinel-2–based vessel candidate detection** with a **human-in-the-loop** Streamlit review UI: operators confirm vessels, mark bow/stern, adjust footprints, and export labeled training data. Optional **config-driven SOTA backends** add marine **YOLO** instance segmentation, **ShipStructure / SLAD-style keypoints** (ONNX), and **wake–keypoint heading fusion** (heuristic wake and/or ONNX wake), without changing the default offline-first path.
+**Sentinel-2–based vessel candidate detection** with a **human-in-the-loop** Streamlit review UI: operators confirm vessels, mark bow/stern, adjust footprints, and export labeled training data. The app **defaults to AquaForge** (unified seg + landmarks + heading + measurements). Older **YOLO / ensemble** stacks remain available as a **hidden** fallback via YAML `force_legacy: true` or env `AF_FORCE_LEGACY=1`.
 
-- **Default backend:** `legacy_hybrid` — logistic regression + chip MLP ranking only (no extra ML weights required).
-- **Config file:** `data/config/detection.yaml` (copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml)). Override path with env `AF_DETECTION_CONFIG` (preferred) or legacy `VD_DETECTION_CONFIG`.
+- **Default backend:** `aquaforge` (no `detection.yaml` required). Install `requirements-ml.txt` for full on-image inference and training.
+- **Config file (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override path with env `AF_DETECTION_CONFIG` (preferred) or `VD_DETECTION_CONFIG`.
 
 Repository layout (core package): [`aquaforge/`](aquaforge/) — `detection_config.py`, `detection_backend.py`, `evaluation.py`, `yolo_marine_backend.py`, `shipstructure_adapter.py`, `onnx_session_cache.py`, `wake_heading_fusion.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `web_ui.py`, and packaged YAML under `aquaforge/config/`.
 
@@ -15,7 +15,7 @@ Repository layout (core package): [`aquaforge/`](aquaforge/) — `detection_conf
 2. **`py -3 -m streamlit run app.py`** (or `run_web.bat`).
 3. Open the URL shown (often [http://localhost:8501](http://localhost:8501)).
 
-**Defaults:** `legacy_hybrid` in `data/config/detection.yaml` needs no extra model files. **`ensemble`** or **`aquaforge`** adds stronger on-image hints when configured.
+**Defaults:** Without a config file, the UI uses **AquaForge** for ranking and spot overlays when weights exist under `data/models/aquaforge/`. For CLI-only legacy/YOLO modes, set `force_legacy: true` in YAML and choose `backend` (see table below).
 
 Entry point: [`app.py`](app.py) → `aquaforge.web_ui.main`.
 
@@ -23,25 +23,27 @@ Entry point: [`app.py`](app.py) → `aquaforge.web_ui.main`.
 
 1. Open the **left panel** (arrow on the edge) — it starts **closed** so the picture stays calm.
 2. Choose your **scene** and tap **Refresh spot list**.
-3. The **big image** is what you answer. **On image** (top-right, small) turns layers on or off — **Outline** and **Direction** are on by default; **Keypoints** and **Wake** stay off unless you want them.
-4. Use **← Back** / **Next →** and **Ship**, **Not a ship**, or **Unsure** at the bottom.
-5. Anything else — map, downloads, re-sort, cloud/land/skip, extra readouts — lives under **Advanced** (sidebar or **Advanced (this spot)** on the page).
+3. The **big image** is what you answer. **On image** (top-right, small) turns layers on or off — **Outline**, **Direction**, and **Keypoints** are on by default.
+4. Use **← Back** / **Next →** and **Ship**, **Not a ship**, or **Unsure** at the bottom (labels go straight into the JSONL AquaForge trains on).
+5. **Advanced → Retrain AquaForge** runs `scripts/train_aquaforge.py` on that labels file (defaults, same path the UI writes). Other tools — map, downloads, ranking helpers, exports — stay under **Advanced**.
 
-You can be reviewing within a minute without touching Advanced.
+You can be reviewing within a minute without touching YAML.
 
 ### Improve the model over time
 
-1. **Review regularly** — Saving labels writes JSONL. Tricky cases (borderline scores, clouds, hand-placed map picks, small-ship cues, coast-like flags) get a **higher sampling weight** and a **review-uncertainty** signal the trainer feeds into the loss balancer.
-2. **Train** — `py -3 scripts/train_aquaforge.py` oversamples those rows (unless `--no-priority-sampling`). Weights also **nudge toward higher `review_uncertainty`** from the JSONL so borderline UI rows see the GPU a bit more often. `--teacher-per-epoch` fills ensemble heading hints on the **same** high-priority IDs first. **`--pseudo-jsonl`** adds self-training: AquaForge picks **high-confidence, low-uncertainty** unlabeled chips, builds soft targets, and mixes them each epoch with weight **`--pseudo-mix-weight`** (see logs for `trust_mean`). Optional **`extra.af_export_uncertainty`** (0–1) on pseudo rows lowers trust when you exported a “hard” chip.
-3. **Deploy** — Point YAML at `data/models/aquaforge/aquaforge.pt` (or ONNX) and keep the same review habit.
+1. **Review regularly** — Saving labels writes JSONL (`data/labels/ship_reviews.jsonl` by default). Priority / uncertainty metadata in rows feeds the trainer.
+2. **Retrain** — Use **Advanced → Retrain AquaForge** in the UI, or `py -3 scripts/train_aquaforge.py` (same JSONL by default). Advanced CLI flags: `--teacher-per-epoch`, `--pseudo-jsonl`, etc. (see script docstring).
+3. **Deploy** — Checkpoint `data/models/aquaforge/aquaforge.pt` (or ONNX via YAML) is picked up automatically on the next app run.
 
 ---
 
-## Legacy vs SOTA backend
+## Backends (AquaForge default; legacy is opt-in)
 
-| Mode | `backend` in YAML | Behavior |
+Unless `force_legacy: true` (or `AF_FORCE_LEGACY=1`), the loaded `backend` is always **`aquaforge`** regardless of older YAML text.
+
+| Mode | `backend` in YAML (with `force_legacy: true`) | Behavior |
 |------|-------------------|----------|
-| **Legacy (default)** | `legacy_hybrid` | Bright-spot candidates ranked with LR + chip MLP only. |
+| **Legacy** | `legacy_hybrid` | Bright-spot candidates ranked with LR + chip MLP only. |
 | **YOLO ranking** | `yolo_only` | Order candidates by marine YOLO confidence on each chip (`requirements-ml.txt`). |
 | **Blend** | `yolo_fusion` | Weighted mix of hybrid probability and YOLO score. |
 | **Ensemble** | `ensemble` | YOLO masks/metrics when enabled; optional **keypoint heading** + **wake fusion** (see below). |
@@ -68,11 +70,12 @@ AquaForge is **not** a repackaged Ultralytics or public multi-task recipe. The d
 
 Create `data/config/` and copy [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml) to `data/config/detection.yaml`.
 
-### `backend`
+### `backend` and `force_legacy`
 
-- `legacy_hybrid` — **safe default**, no YOLO/keypoints.
-- `yolo_only` / `yolo_fusion` / `ensemble` — require `pip install -r requirements-ml.txt` and (for YOLO) downloaded weights (see `yolo` section).
-- `aquaforge` — requires trained checkpoint (or ONNX) under `data/models/aquaforge/`; see **`aquaforge`** YAML block in `detection.example.yaml`.
+- **Normal use:** omit YAML or set `backend: aquaforge` — no `force_legacy` needed.
+- **`force_legacy: true`** — honor `backend` for `legacy_hybrid`, `yolo_only`, `yolo_fusion`, or `ensemble` (expert / recovery). Example ensemble file sets this flag.
+- `yolo_*` / `ensemble` — require `requirements-ml.txt` and marine YOLO weights when YOLO is part of the stack.
+- `aquaforge` — checkpoint under `data/models/aquaforge/`; optional YAML block in `detection.example.yaml`.
 
 ### `yolo`
 
@@ -262,7 +265,7 @@ The **SOTA overlays & heading hints** expander also shows a short **Legacy vs SO
 
 ## Contributing
 
-- **New backends** — Add a mode in [`detection_config.py`](aquaforge/detection_config.py) (`VALID_BACKENDS`), extend [`detection_backend.py`](aquaforge/detection_backend.py) (`rank_candidates_from_config`, `run_sota_spot_inference` as needed), and document keys in [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Keep `legacy_hybrid` as the default when YAML is missing or invalid.
+- **New backends** — Add a mode in [`detection_config.py`](aquaforge/detection_config.py) (`VALID_BACKENDS`), extend [`detection_backend.py`](aquaforge/detection_backend.py) (`rank_candidates_from_config`, `run_sota_spot_inference` as needed), and document keys in [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Normal installs default to **AquaForge**; use `force_legacy` to exercise non-default backends.
 - **Fine-tuned ONNX models** — ShipStructure / wake ONNX files are **not** committed; document opset, input size, and `output_layout` in your PR or issue. Run `validate-chip` before opening a PR that changes adapter expectations.
 - **Tests** — `py -3 -m pytest` and `py -3 -m py_compile` on touched modules.
 

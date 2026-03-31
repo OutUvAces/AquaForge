@@ -5,7 +5,10 @@ Default path: ``<project_root>/data/config/detection.yaml``.
 Override with env ``AF_DETECTION_CONFIG`` (preferred) or legacy ``VD_DETECTION_CONFIG``
 (absolute path to a YAML file).
 If the file is missing, :func:`load_detection_settings` returns safe defaults
-(``legacy_hybrid``, no optional models).
+(``aquaforge`` backend unless ``force_legacy: true`` in YAML or ``AF_FORCE_LEGACY`` env).
+
+Hidden escape hatch: set ``force_legacy: true`` (or env ``AF_FORCE_LEGACY=1``) to honor the
+YAML ``backend`` key (``legacy_hybrid``, ``yolo_*``, ``ensemble``) for debugging or recovery.
 """
 
 from __future__ import annotations
@@ -16,7 +19,10 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_BACKEND = "legacy_hybrid"
+# Default when no YAML or when ``force_legacy`` is false (normal UI path).
+DEFAULT_BACKEND = "aquaforge"
+# Used only when ``force_legacy: true`` and ``backend`` in YAML is invalid.
+LEGACY_INVALID_BACKEND_FALLBACK = "legacy_hybrid"
 VALID_BACKENDS = frozenset(
     {"legacy_hybrid", "yolo_only", "yolo_fusion", "ensemble", "aquaforge"}
 )
@@ -131,6 +137,8 @@ class AquaForgeSection:
 @dataclass
 class DetectionSettings:
     backend: str = DEFAULT_BACKEND
+    # When False (default), effective backend is always aquaforge after load (YAML backend ignored).
+    force_legacy: bool = False
     yolo: YoloSection = field(default_factory=YoloSection)
     keypoints: KeypointsSection = field(default_factory=KeypointsSection)
     wake_fusion: WakeFusionSection = field(default_factory=WakeFusionSection)
@@ -336,7 +344,9 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
     Load YAML from env ``AF_DETECTION_CONFIG``, then legacy ``VD_DETECTION_CONFIG``,
     else ``data/config/detection.yaml``.
 
-    Missing file → defaults. Invalid ``backend`` string → ``legacy_hybrid``.
+    Missing file → AquaForge defaults. Unless ``force_legacy: true`` or ``AF_FORCE_LEGACY``,
+    the effective ``backend`` is always ``aquaforge``. With ``force_legacy``, invalid
+    ``backend`` falls back to ``legacy_hybrid``.
     """
     raw_env = (
         os.environ.get("AF_DETECTION_CONFIG", "").strip()
@@ -361,9 +371,18 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
     if not isinstance(data, dict):
         return DetectionSettings()
 
+    force_legacy = bool(data.get("force_legacy", False))
+    _env_fl = os.environ.get("AF_FORCE_LEGACY", "").strip().lower()
+    if _env_fl in ("1", "true", "yes", "on"):
+        force_legacy = True
+
     backend = str(data.get("backend", DEFAULT_BACKEND)).strip()
     if backend not in VALID_BACKENDS:
-        backend = DEFAULT_BACKEND
+        backend = (
+            LEGACY_INVALID_BACKEND_FALLBACK if force_legacy else DEFAULT_BACKEND
+        )
+    if not force_legacy:
+        backend = "aquaforge"
 
     sh = data.get("sota_min_hybrid_proba_for_expensive")
     sota_hybrid: float | None
@@ -382,6 +401,7 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
 
     return DetectionSettings(
         backend=backend,
+        force_legacy=force_legacy,
         yolo=_parse_yolo(data.get("yolo") if isinstance(data.get("yolo"), dict) else None),
         keypoints=_parse_keypoints(
             data.get("keypoints") if isinstance(data.get("keypoints"), dict) else None

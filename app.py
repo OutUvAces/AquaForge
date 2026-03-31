@@ -6,7 +6,9 @@ then use the bookmark file ``AquaForge.url`` or http://127.0.0.1:8501
 
 **Terminal:** ``py -3 -m streamlit run app.py`` or ``run_web.bat``
 
-**Main:** large close-up, small **On image** toggles (defaults: outline + direction), bottom **Back / Next** and **Ship / Not a ship / Unsure**. **Left panel:** scene + refresh; other tools under **Advanced**.
+**Daily flow:** open a scene → review spots (outline, heading, landmarks on by default) → **Ship / Not / Unsure** saves labels → **Advanced → Retrain AquaForge** when you want a new model from those labels.
+
+**Main:** large close-up, **On image** toggles, **Back / Next** and save buttons. **Left:** scene + refresh; **Advanced** has retrain, downloads, exports, label fixer.
 
 The app only answers at that URL while this computer is running the server.
 For a public URL with no local server, host the app (e.g. Streamlit Community Cloud).

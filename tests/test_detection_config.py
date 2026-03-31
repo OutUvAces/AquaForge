@@ -23,13 +23,15 @@ class TestDetectionConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             s = load_detection_settings(root)
-            self.assertEqual(s.backend, "legacy_hybrid")
+            self.assertEqual(s.backend, "aquaforge")
+            self.assertFalse(s.force_legacy)
             self.assertFalse(yolo_requested(s))
-            self.assertFalse(sota_inference_requested(s))
+            self.assertTrue(sota_inference_requested(s))
+            self.assertTrue(aquaforge_requested(s))
             self.assertEqual(s.yolo.chip_batch_size, 6)
             self.assertEqual(s.onnx_runtime.graph_optimization_level, "all")
 
-    def test_yaml_backend(self) -> None:
+    def test_yaml_backend_forced_to_aquaforge_without_force_legacy(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cfg = root / "data" / "config"
@@ -40,11 +42,28 @@ class TestDetectionConfig(unittest.TestCase):
                 encoding="utf-8",
             )
             s = load_detection_settings(root)
-            self.assertEqual(s.backend, "yolo_fusion")
-            self.assertTrue(yolo_requested(s))
+            self.assertFalse(s.force_legacy)
+            self.assertEqual(s.backend, "aquaforge")
+            self.assertFalse(yolo_requested(s))
             self.assertTrue(sota_inference_requested(s))
             self.assertAlmostEqual(s.yolo.weight_vs_hybrid, 0.7)
             self.assertEqual(s.yolo.chip_half, 256)
+
+    def test_force_legacy_respects_yaml_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "force_legacy: true\n"
+                "backend: yolo_fusion\n"
+                "yolo:\n  weight_vs_hybrid: 0.7\n",
+                encoding="utf-8",
+            )
+            s = load_detection_settings(root)
+            self.assertTrue(s.force_legacy)
+            self.assertEqual(s.backend, "yolo_fusion")
+            self.assertTrue(yolo_requested(s))
 
     def test_invalid_backend_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -55,10 +74,23 @@ class TestDetectionConfig(unittest.TestCase):
                 "backend: not_a_real_mode\n", encoding="utf-8"
             )
             s = load_detection_settings(root)
+            self.assertEqual(s.backend, "aquaforge")
+
+    def test_invalid_backend_with_force_legacy_falls_back_to_legacy_hybrid(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "force_legacy: true\n"
+                "backend: not_a_real_mode\n",
+                encoding="utf-8",
+            )
+            s = load_detection_settings(root)
             self.assertEqual(s.backend, "legacy_hybrid")
 
     def test_ensemble_wake_requests_sota_without_yolo_weights(self) -> None:
-        from aquaforge.detection_config import DetectionSettings, WakeFusionSection
+        from aquaforge.detection_config import WakeFusionSection
 
         s = DetectionSettings(
             backend="ensemble",
@@ -154,10 +186,12 @@ class TestDetectionConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             alt = Path(td) / "custom.yaml"
-            alt.write_text("backend: yolo_only\n", encoding="utf-8")
+            alt.write_text("force_legacy: true\nbackend: yolo_only\n", encoding="utf-8")
             old_af = os.environ.pop("AF_DETECTION_CONFIG", None)
             old_vd = os.environ.pop("VD_DETECTION_CONFIG", None)
+            old_fl = os.environ.pop("AF_FORCE_LEGACY", None)
             try:
+                os.environ.pop("AF_FORCE_LEGACY", None)
                 os.environ["AF_DETECTION_CONFIG"] = str(alt)
                 s = load_detection_settings(root)
                 self.assertEqual(s.backend, "yolo_only")
@@ -170,15 +204,21 @@ class TestDetectionConfig(unittest.TestCase):
                     os.environ["VD_DETECTION_CONFIG"] = old_vd
                 else:
                     os.environ.pop("VD_DETECTION_CONFIG", None)
+                if old_fl is not None:
+                    os.environ["AF_FORCE_LEGACY"] = old_fl
+                else:
+                    os.environ.pop("AF_FORCE_LEGACY", None)
 
     def test_vd_detection_config_env_still_supported(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             alt = Path(td) / "legacy.yaml"
-            alt.write_text("backend: yolo_only\n", encoding="utf-8")
+            alt.write_text("force_legacy: true\nbackend: yolo_only\n", encoding="utf-8")
             old_af = os.environ.pop("AF_DETECTION_CONFIG", None)
             old_vd = os.environ.pop("VD_DETECTION_CONFIG", None)
+            old_fl = os.environ.pop("AF_FORCE_LEGACY", None)
             try:
+                os.environ.pop("AF_FORCE_LEGACY", None)
                 os.environ["VD_DETECTION_CONFIG"] = str(alt)
                 s = load_detection_settings(root)
                 self.assertEqual(s.backend, "yolo_only")
@@ -191,6 +231,42 @@ class TestDetectionConfig(unittest.TestCase):
                     os.environ["VD_DETECTION_CONFIG"] = old_vd
                 else:
                     os.environ.pop("VD_DETECTION_CONFIG", None)
+                if old_fl is not None:
+                    os.environ["AF_FORCE_LEGACY"] = old_fl
+                else:
+                    os.environ.pop("AF_FORCE_LEGACY", None)
+
+    def test_af_force_legacy_env_overrides_yaml_force_legacy_false(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "force_legacy: false\n"
+                "backend: yolo_only\n",
+                encoding="utf-8",
+            )
+            old_af = os.environ.pop("AF_DETECTION_CONFIG", None)
+            old_vd = os.environ.pop("VD_DETECTION_CONFIG", None)
+            old_fl = os.environ.pop("AF_FORCE_LEGACY", None)
+            try:
+                os.environ["AF_FORCE_LEGACY"] = "1"
+                s = load_detection_settings(root)
+                self.assertTrue(s.force_legacy)
+                self.assertEqual(s.backend, "yolo_only")
+            finally:
+                if old_af is not None:
+                    os.environ["AF_DETECTION_CONFIG"] = old_af
+                else:
+                    os.environ.pop("AF_DETECTION_CONFIG", None)
+                if old_vd is not None:
+                    os.environ["VD_DETECTION_CONFIG"] = old_vd
+                else:
+                    os.environ.pop("VD_DETECTION_CONFIG", None)
+                if old_fl is not None:
+                    os.environ["AF_FORCE_LEGACY"] = old_fl
+                else:
+                    os.environ.pop("AF_FORCE_LEGACY", None)
 
     def test_af_detection_config_wins_over_vd_when_both_set(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -198,10 +274,12 @@ class TestDetectionConfig(unittest.TestCase):
             p_af = Path(td) / "af.yaml"
             p_vd = Path(td) / "vd.yaml"
             p_af.write_text("backend: aquaforge\n", encoding="utf-8")
-            p_vd.write_text("backend: yolo_only\n", encoding="utf-8")
+            p_vd.write_text("force_legacy: true\nbackend: yolo_only\n", encoding="utf-8")
             old_af = os.environ.pop("AF_DETECTION_CONFIG", None)
             old_vd = os.environ.pop("VD_DETECTION_CONFIG", None)
+            old_fl = os.environ.pop("AF_FORCE_LEGACY", None)
             try:
+                os.environ.pop("AF_FORCE_LEGACY", None)
                 os.environ["AF_DETECTION_CONFIG"] = str(p_af)
                 os.environ["VD_DETECTION_CONFIG"] = str(p_vd)
                 s = load_detection_settings(root)
@@ -215,6 +293,10 @@ class TestDetectionConfig(unittest.TestCase):
                     os.environ["VD_DETECTION_CONFIG"] = old_vd
                 else:
                     os.environ.pop("VD_DETECTION_CONFIG", None)
+                if old_fl is not None:
+                    os.environ["AF_FORCE_LEGACY"] = old_fl
+                else:
+                    os.environ.pop("AF_FORCE_LEGACY", None)
 
     def test_merged_onnx_providers_global_wins(self) -> None:
         s = DetectionSettings(

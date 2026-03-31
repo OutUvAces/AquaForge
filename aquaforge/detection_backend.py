@@ -1,8 +1,9 @@
 """
-Config-driven candidate ranking and per-spot SOTA post-processing.
+Config-driven candidate ranking and per-spot detection post-processing.
 
-Keeps :func:`aquaforge.ship_chip_mlp.rank_candidates_hybrid` as the default path;
-optional YOLO marine scores are fused or substituted per ``detection.yaml``.
+Normal installs use **AquaForge** (see :func:`aquaforge.detection_config.load_detection_settings`:
+``force_legacy: false`` forces ``backend`` to ``aquaforge``). Legacy YOLO / ensemble paths run only
+when ``force_legacy: true`` or ``AF_FORCE_LEGACY`` is set in YAML/env.
 """
 
 from __future__ import annotations
