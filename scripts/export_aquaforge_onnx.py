@@ -1,5 +1,5 @@
 """
-Export AquaForge ``.pt`` checkpoint to ONNX (multi-output: cls, seg, kp, hdg, wake).
+Export AquaForge ``.pt`` checkpoint to ONNX (multi-output: cls, seg, kp, hdg, wake, kp_hm).
 
 CPU inference: set ``aquaforge.use_onnx_inference: true`` and ``onnx_path`` in detection.yaml,
 or place ``aquaforge.onnx`` under ``data/models/aquaforge/``.
@@ -56,7 +56,7 @@ def main() -> None:
         dummy,
         str(out),
         input_names=["images"],
-        output_names=["cls_logit", "seg_logits", "kp", "hdg", "wake"],
+        output_names=["cls_logit", "seg_logits", "kp", "hdg", "wake", "kp_hm"],
         dynamic_axes={"images": {0: "batch"}},
         opset_version=int(args.opset),
     )

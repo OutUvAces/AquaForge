@@ -17,6 +17,58 @@ import torch
 import torch.nn.functional as F
 
 
+def build_kp_heat_targets(
+    kp_gt: torch.Tensor,
+    kp_vis: torch.Tensor,
+    h: int,
+    w: int,
+    *,
+    sigma: float = 1.75,
+) -> torch.Tensor:
+    """
+    Gaussian heatmaps (B, K, H, W) in [0,1] for visible landmarks.
+    ``kp_gt`` is normalized [0,1] in full chip space; placed on stride-8 grid by default (H,W ~ imgsz/8).
+    """
+    b, k, _ = kp_gt.shape
+    device, dtype = kp_gt.device, kp_gt.dtype
+    out = torch.zeros(b, k, h, w, device=device, dtype=dtype)
+    if h < 1 or w < 1:
+        return out
+    yy, xx = torch.meshgrid(
+        torch.arange(h, device=device, dtype=dtype),
+        torch.arange(w, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    sig2 = 2.0 * float(sigma) ** 2
+    for bi in range(b):
+        for ki in range(k):
+            if float(kp_vis[bi, ki]) < 0.5:
+                continue
+            cx = kp_gt[bi, ki, 0].clamp(0, 1) * (w - 1)
+            cy = kp_gt[bi, ki, 1].clamp(0, 1) * (h - 1)
+            dist = (xx - cx) ** 2 + (yy - cy) ** 2
+            out[bi, ki] = torch.exp(-dist / sig2)
+    return out.clamp(0, 1)
+
+
+def keypoint_heatmap_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    vis: torch.Tensor,
+) -> torch.Tensor:
+    """
+    MSE on sigmoid(logits) vs Gaussian target, averaged over visible joints only.
+    logits/target: (B, K, H, W); vis (B, K).
+    """
+    pred = torch.sigmoid(logits)
+    m = vis.clamp(0, 1).unsqueeze(-1).unsqueeze(-1)
+    if m.sum() < 1:
+        return logits.sum() * 0.0
+    err = (pred - target).pow(2) * m
+    denom = m.sum() * pred.shape[-1] * pred.shape[-2] + 1e-6
+    return err.sum() / denom
+
+
 def dice_loss_with_logits(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Soft Dice on binary mask; logits (B,1,H,W), target (B,1,H,W) in {0,1}."""
     p = torch.sigmoid(logits)
@@ -100,9 +152,9 @@ def aquaforge_joint_loss(
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     out keys: cls_logit (B,1), seg_logit (B,1,H,W), kp (B,K,3) raw (xy logits, vis logit),
-              hdg (B,3) sin/cos raw + conf logit, wake (B,2).
-    batch keys: cls, seg, kp_gt (B,K,2), kp_vis (B,K), hdg_deg, hdg_valid,
-                wake_vec (B,2), wake_valid, seg_weight (B,1,H,W) optional.
+              hdg (B,3) sin/cos raw + conf logit, wake (B,2), kp_hm (B,K,H',W') landmark heatmap logits.
+    batch keys: cls, seg, kp_gt (B,K,2), kp_vis (B,K), kp_heat (B,K,H',W') optional (stride~8),
+                hdg_deg, hdg_valid, wake_vec (B,2), wake_valid, seg_weight (B,1,H,W) optional.
     """
     logs: dict[str, float] = {}
     total = torch.zeros((), device=out["cls_logit"].device, dtype=out["cls_logit"].dtype)
@@ -120,6 +172,8 @@ def aquaforge_joint_loss(
     if w > 0 and "seg_logit" in out:
         sl = out["seg_logit"]
         seg_tgt = batch["seg"]
+        if sl.shape[-2:] != seg_tgt.shape[-2:]:
+            seg_tgt = F.interpolate(seg_tgt, size=sl.shape[-2:], mode="nearest")
         d1 = dice_loss_with_logits(sl, seg_tgt)
         d2 = bce_logits_masked(sl, seg_tgt, torch.ones_like(seg_tgt))
         seg_loss = d1 + 0.5 * d2
@@ -136,6 +190,16 @@ def aquaforge_joint_loss(
         lk = c + 0.25 * vb
         total = total + w * lk
         logs["loss_kp"] = float(lk.detach())
+
+    w = stage_weights.get("kp_hm", 0.0)
+    if w > 0 and out.get("kp_hm") is not None and batch.get("kp_heat") is not None:
+        lhm = keypoint_heatmap_loss(
+            out["kp_hm"],
+            batch["kp_heat"],
+            batch["kp_vis"],
+        )
+        total = total + w * lhm
+        logs["loss_kp_hm"] = float(lhm.detach())
 
     w = stage_weights.get("hdg", 1.0)
     if w > 0:

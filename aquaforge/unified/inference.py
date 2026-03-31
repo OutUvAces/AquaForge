@@ -155,15 +155,13 @@ class AquaForgePredictor:
             arr = x.cpu().numpy()
             in_name = self._sess.get_inputs()[0].name
             outs = self._sess.run(None, {in_name: arr})
-            cls_l = outs[0]
-            seg = outs[1]
-            kp = outs[2]
-            hdg = outs[3]
-            wake = outs[4]
+            # v2 ONNX: 6 outputs (kp_hm logits); legacy: 5.
+            cls_l, seg, kp, hdg, wake = outs[0], outs[1], outs[2], outs[3], outs[4]
         elif self._torch is not None:
             self._torch.eval()
             with torch.no_grad():
-                cls_l, seg, kp, hdg, wake = self._torch(x)
+                raw = self._torch(x)
+                cls_l, seg, kp, hdg, wake = raw[0], raw[1], raw[2], raw[3], raw[4]
             cls_l = cls_l.cpu().numpy()
             seg = seg.cpu().numpy()
             kp = kp.cpu().numpy()

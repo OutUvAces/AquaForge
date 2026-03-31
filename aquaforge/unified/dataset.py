@@ -20,6 +20,7 @@ from typing import Any, Iterator
 import numpy as np
 
 from aquaforge.unified.constants import NUM_LANDMARKS
+from aquaforge.unified.losses import build_kp_heat_targets
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
 from aquaforge.vessel_markers import (
     markers_for_hull,
@@ -230,11 +231,17 @@ def collate_batch(
     )
     wake = torch.tensor(np.stack([b[6] for b in batch_items], axis=0), device=device).float()
     wake_v = torch.tensor([b[7] for b in batch_items], device=device, dtype=torch.float32)
+    imgsz = int(seg.shape[-1])
+    hm_h = max(1, imgsz // 8)
+    hm_w = max(1, imgsz // 8)
+    kp_heat = build_kp_heat_targets(kp_gt, kp_vis, hm_h, hm_w)
     return {
+        "imgs": imgs,
         "cls": cls,
         "seg": seg,
         "kp_gt": kp_gt,
         "kp_vis": kp_vis,
+        "kp_heat": kp_heat,
         "hdg_deg": hdg,
         "hdg_valid": hdg_valid,
         "wake_vec": wake,

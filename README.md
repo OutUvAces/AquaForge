@@ -44,7 +44,7 @@ Entry point: [`app.py`](app.py) imports `aquaforge.web_ui.main`.
 | **YOLO ranking** | `yolo_only` | Order candidates by marine YOLO confidence on each chip (`requirements-ml.txt`). |
 | **Blend** | `yolo_fusion` | Weighted mix of hybrid probability and YOLO score. |
 | **Ensemble** | `ensemble` | YOLO masks/metrics when enabled; optional **keypoint heading** + **wake fusion** (see below). |
-| **AquaForge** | `aquaforge` | Single multi-task model (seg + landmarks + direct heading + wake hint). Train: `scripts/train_aquaforge.py`; ONNX: `scripts/export_aquaforge_onnx.py`. Weights: `data/models/aquaforge/aquaforge.pt`. |
+| **AquaForge** | `aquaforge` | Single multi-task model (seg + landmarks + heatmap supervision + direct heading + wake hint). **CNN** (default): `py -3 scripts/train_aquaforge.py --epochs 12`. **YOLO11/12 backbone+our heads**: `--architecture yolo_unified --yolo-weights yolo11n.pt --imgsz 640 --freeze-backbone-epochs 4`. Export ONNX: `scripts/export_aquaforge_onnx.py` (six outputs including `kp_hm`). Weights: `data/models/aquaforge/aquaforge.pt`. |
 
 **Spot overlays** (masks, keypoints, wake segments) run when `sota_inference_requested` is true: any of YOLO backends, **`aquaforge`**, `keypoints.enabled`, or `ensemble` + `wake_fusion.enabled`. If ONNX fails to load or infer, the pipeline **degrades gracefully**: warnings are logged and surfaced in the UI (`sota_warnings`); heuristic wake can still run without ONNX wake; keypoints are omitted if pose ONNX is missing or invalid.
 
