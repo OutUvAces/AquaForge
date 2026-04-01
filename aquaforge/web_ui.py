@@ -17,7 +17,7 @@ import math
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -915,6 +915,121 @@ def _count_aquaforge_training_rows(labels_path: Path, project_root: Path) -> int
     return sum(1 for _ in iter_aquaforge_samples(labels_path, project_root))
 
 
+class _PipMlInstallResult(NamedTuple):
+    """Outcome of in-app ``pip install -r requirements-ml.txt`` (optional ``--user`` retry)."""
+
+    ok: bool
+    returncode: int
+    stdout_tail: str
+    stderr_tail: str
+    retried_with_user: bool
+
+
+def _pip_blob_suggests_permission_denied(blob: str) -> bool:
+    """
+    Detect Windows store / system-Python permission failures so we can retry with ``pip --user``.
+
+    Matches WinError 5, errno 13, and pip's own hint to use ``--user``.
+    """
+    s = blob.lower()
+    return (
+        "winerror 5" in s
+        or "access is denied" in s
+        or "permission denied" in s
+        or "[errno 13]" in s
+        or "errno 13" in s
+        or "consider using the `--user` option" in s
+        or "consider using the --user option" in s
+    )
+
+
+def _python_version_warn_ml_wheels() -> bool:
+    """True when current CPython is new enough that wheels / store installs are often problematic."""
+    v = sys.version_info
+    return v.major == 3 and v.minor >= 14
+
+
+def _copyable_terminal_ml_install_script(project_root: Path) -> str:
+    """Single copy-paste block: cd project, then pip, then ``--user`` fallback (comments explain each)."""
+    py = _streamlit_python_exe()
+    root = str(project_root.resolve())
+    return (
+        f'# Go to the project folder\n'
+        f'cd "{root}"\n'
+        f'\n'
+        f'# Install ML stack (same Python as this Streamlit app)\n'
+        f'"{py}" -m pip install -r requirements-ml.txt\n'
+        f'\n'
+        f'# If you see "Access is denied" or WinError 5, run this instead (no admin; installs to your user profile):\n'
+        f'"{py}" -m pip install --user -r requirements-ml.txt'
+    )
+
+
+def _copyable_venv312_instructions(project_root: Path) -> str:
+    """Recommended path when Python 3.14+ or repeated pip failures — isolated venv with 3.12."""
+    root = str(project_root.resolve())
+    return (
+        f'# Recommended: Python 3.12 in a virtual environment (best wheel support, no store-folder locks)\n'
+        f'cd "{root}"\n'
+        f'py -3.12 -m venv .venv\n'
+        f'.venv\\Scripts\\activate\n'
+        f'python -m pip install -U pip\n'
+        f'python -m pip install -r requirements.txt\n'
+        f'python -m pip install -r requirements-ml.txt\n'
+        f'python -m streamlit run app.py'
+    )
+
+
+def _pip_install_ml_requirements(project_root: Path) -> _PipMlInstallResult:
+    """
+    Run ``pip install -r requirements-ml.txt`` with Streamlit's interpreter.
+
+    Tries a normal install first. If pip fails with a permission / access-denied style error
+    (typical for Windows **Store** / locked ``Lib\\site-packages``), retries once with ``--user``.
+    """
+    req = (project_root / "requirements-ml.txt").resolve()
+    py = _streamlit_python_exe()
+    if not req.is_file():
+        return _PipMlInstallResult(False, -1, "", f"Missing requirements file: {req}", False)
+
+    def _run(extra_after_req: list[str]) -> subprocess.CompletedProcess[str]:
+        cmd = [py, "-m", "pip", "install", "-r", str(req), *extra_after_req]
+        return subprocess.run(
+            cmd,
+            cwd=str(project_root.resolve()),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    p1 = _run([])
+    o1, e1 = p1.stdout or "", p1.stderr or ""
+    tail_o1, tail_e1 = o1[-16000:], e1[-16000:]
+    if int(p1.returncode) == 0:
+        return _PipMlInstallResult(True, 0, tail_o1, tail_e1, False)
+
+    blob1 = o1 + "\n" + e1
+    if not _pip_blob_suggests_permission_denied(blob1):
+        return _PipMlInstallResult(False, int(p1.returncode), tail_o1, tail_e1, False)
+
+    p2 = _run(["--user"])
+    o2, e2 = p2.stdout or "", p2.stderr or ""
+    merged_o = (
+        o1
+        + "\n\n--- Retrying: pip install --user (packages go under your user site-packages) ---\n\n"
+        + o2
+    )
+    merged_e = e1 + "\n" + e2
+    return _PipMlInstallResult(
+        int(p2.returncode) == 0,
+        int(p2.returncode),
+        merged_o[-20000:],
+        merged_e[-20000:],
+        True,
+    )
+
+
 def _explain_aquaforge_train_failure(code: int, stderr_txt: str, stdout_txt: str) -> str | None:
     """Map ``train_aquaforge.py`` exit codes / markers to human text (see script ``AQUAFORGE_EXIT:*``)."""
     blob = f"{stderr_txt or ''}\n{stdout_txt or ''}"
@@ -929,26 +1044,6 @@ def _explain_aquaforge_train_failure(code: int, stderr_txt: str, stdout_txt: str
             "or add **vessel_size_feedback** rows with a valid scene path — see the trainer message below for counts."
         )
     return None
-
-
-def _subprocess_pip_install_ml(project_root: Path) -> tuple[int, str, str]:
-    """``pip install -r requirements-ml.txt`` using :func:`_streamlit_python_exe` only."""
-    req = (project_root / "requirements-ml.txt").resolve()
-    py = _streamlit_python_exe()
-    if not req.is_file():
-        return -1, "", f"Missing {req}"
-    cmd = [py, "-m", "pip", "install", "-r", str(req)]
-    proc = subprocess.run(
-        cmd,
-        cwd=str(project_root.resolve()),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    tail_o = (proc.stdout or "")[-16000:]
-    tail_e = (proc.stderr or "")[-16000:]
-    return int(proc.returncode), tail_o, tail_e
 
 
 def _subprocess_train_aquaforge(
@@ -984,48 +1079,114 @@ def _subprocess_train_aquaforge(
 
 
 def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None:
-    """Shown when ``torch`` is missing: copy-paste command + one-click pip using Streamlit's Python."""
+    """
+    Shown when ``torch`` is missing: Python-version warning, large copy-paste terminal scripts,
+    and one-click pip (standard install, then automatic ``--user`` retry on permission errors).
+    """
     py = _streamlit_python_exe()
     req = project_root / "requirements-ml.txt"
-    st.caption("**Copy/paste** (run from the project folder):")
-    st.code(f'"{py}" -m pip install -r requirements-ml.txt', language="text")
+
+    if _python_version_warn_ml_wheels():
+        st.warning(
+            f"You are running **Python {sys.version_info.major}.{sys.version_info.minor}**. "
+            "ML packages (especially **PyTorch**) may not have wheels yet, and **Microsoft Store / "
+            "system** Python installs often cannot overwrite files under `Lib\\site-packages` "
+            "(**Access denied** / WinError 5). "
+            "**Strongly recommended:** use **Python 3.12** from [python.org](https://www.python.org/downloads/) "
+            "inside a **virtual environment** in this project, then start Streamlit from that venv "
+            "(copy-paste block below)."
+        )
+
     if not req.is_file():
         st.error(f"Missing `{req}` — add requirements-ml.txt to the project.")
         return
+
+    st.markdown("**Run in a terminal (same Python as this app)**")
+    st.caption(
+        "The button below tries a normal install first, then automatically retries with "
+        "`pip install --user` if Windows blocks the system folder. "
+        "If both fail, copy these lines into **PowerShell** or **Command Prompt**."
+    )
+    st.code(_copyable_terminal_ml_install_script(project_root), language="text")
+
+    st.markdown("**Best long-term setup: project venv with Python 3.12**")
+    st.caption(
+        "Avoids Store permission issues and matches where PyTorch publishes wheels. "
+        "Requires `py -3.12` (install 3.12 from python.org if needed)."
+    )
+    st.code(_copyable_venv312_instructions(project_root), language="text")
+
     if st.button(
         "Install ML dependencies",
         type="primary",
         use_container_width=True,
         key=f"vd_pip_ml_install_{key_suffix}",
-        help="Uses the same Python as this Streamlit app. Can take several minutes.",
+        help="pip install -r requirements-ml.txt; retries with --user if Access denied.",
     ):
         with st.status("Installing ML stack (pip)…", expanded=True) as pip_status:
-            pip_status.write(f"Interpreter: `{py}`")
-            pip_status.write(f"Requirements: `{req.name}`")
+            pip_status.write(f"**Interpreter:** `{py}`")
+            pip_status.write(f"**File:** `{req.name}`")
+            pip_status.write("**Step 1:** `pip install -r requirements-ml.txt` (default location)…")
             try:
-                code, out, err = _subprocess_pip_install_ml(project_root)
+                result = _pip_install_ml_requirements(project_root)
             except OSError as e:
-                pip_status.update(label="Install failed to start", state="error")
-                st.error(str(e))
-                return
-            if code == 0:
-                pip_status.update(label="Install finished", state="complete")
-                if out.strip():
-                    st.code(out[-8000:], language="text")
-                st.session_state["_vd_af_train_flash"] = (
-                    "ML dependencies installed with this app's Python — you can run training below."
-                )
-                st.rerun()
-            else:
-                pip_status.update(label="pip install failed", state="error")
+                pip_status.update(label="Install could not start", state="error")
                 st.error(
-                    f"pip exited with **{code}**. On Python 3.14+ you may need **Python 3.12** "
-                    "(see requirements-ml.txt). Details:"
+                    "The installer process failed to start. "
+                    f"Try the copy-paste commands above in a terminal. Details: {e}"
                 )
-                if err.strip():
-                    st.code(err, language="text")
-                elif out.strip():
-                    st.code(out, language="text")
+                return
+
+            if result.retried_with_user:
+                pip_status.write(
+                    "**Step 2:** Permission-style error detected — retrying with `pip install --user`…"
+                )
+
+            if result.ok:
+                pip_status.update(label="Install finished", state="complete")
+                if result.retried_with_user:
+                    st.success(
+                        "Packages were installed with **`--user`** (your user profile) because the "
+                        "system `site-packages` folder was not writable."
+                    )
+                if result.stdout_tail.strip():
+                    with st.expander("pip output (tail)", expanded=False):
+                        st.code(result.stdout_tail[-8000:], language="text")
+                flash = "ML dependencies installed — you can run training below."
+                if result.retried_with_user:
+                    flash += " (user site-packages)."
+                st.session_state["_vd_af_train_flash"] = flash
+                st.rerun()
+
+            pip_status.update(label="Install did not complete", state="error")
+            st.error(
+                "**pip could not finish installing.** On many Windows setups the Store or system Python "
+                "folder is read-only for package updates, so pip cannot replace files such as `cv2.pyd`."
+            )
+            st.markdown(
+                f"**Use this exact command** with the same interpreter Streamlit is using:\n\n"
+                f'`"{py}" -m pip install --user -r requirements-ml.txt`\n\n'
+                "**Better:** create a **venv** (see the **Python 3.12** block above) and run "
+                "`streamlit run app.py` from that environment so pip owns the folder."
+            )
+            if _python_version_warn_ml_wheels():
+                st.info(
+                    "On **Python 3.14+**, even with `--user`, some wheels may be missing. "
+                    "A **Python 3.12 venv** is the most reliable path."
+                )
+            with st.expander("Technical details (pip log — for support)", expanded=False):
+                log = (result.stderr_tail or "").strip() or (result.stdout_tail or "").strip()
+                if log:
+                    st.code(log, language="text")
+                else:
+                    st.caption(f"No log captured (exit code {result.returncode}).")
+
+    st.markdown("---")
+    st.markdown(
+        "**Suggested order:** (1) Install ML packages with the button or terminal. "
+        "(2) This page **reloads automatically** after a successful install. "
+        "(3) Use **Train** / **Retrain** — training always uses the same Python as this app."
+    )
 
 
 def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> None:
