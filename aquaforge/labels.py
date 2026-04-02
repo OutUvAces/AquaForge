@@ -197,7 +197,7 @@ def append_overview_grid_feedback(
 
 def count_human_verified_point_reviews(path: Path) -> tuple[int, int, int]:
     """
-    Rows that contribute to binary / multitask training: point reviews with a clear vessel / non-vessel label.
+    Rows that contribute to AquaForge training / eval: point reviews with a clear vessel / non-vessel label.
 
     Returns ``(total, n_vessel, n_negative)``. Skips ``ambiguous``, ``vessel_size_feedback``,
     ``overview_grid_tile``, and rows with no usable category or ``is_vessel``.

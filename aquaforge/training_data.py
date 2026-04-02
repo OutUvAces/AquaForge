@@ -134,7 +134,7 @@ def jsonl_to_numpy(
     return np.stack(rows_x), np.array(rows_y, dtype=np.int64), ids, n_skipped
 
 
-# Flat RGB chip for multitask training (concatenated with :func:`extract_crop_features`).
+# Flat RGB chip for feature extraction (concatenated with :func:`extract_crop_features`).
 REVIEW_CHIP_MODEL_SIDE = 48
 REVIEW_CHIP_SRC_HALF = 64
 

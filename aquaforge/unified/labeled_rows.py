@@ -1,5 +1,5 @@
 """
-Human point labels from review JSONL for multitask training and AquaForge agreement checks.
+Human point labels from review JSONL for AquaForge training sampling, evaluation, and label-agreement checks.
 
 Not a detector — only parses and validates rows against readable TCIs. AquaForge tiled inference
 is the sole scene-detection path.

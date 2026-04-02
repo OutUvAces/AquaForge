@@ -2,7 +2,7 @@
 Streamlit UI: pick a scene, refresh, review spots.
 
 **Left panel (starts closed):** **Scene** + **Refresh spot list** only at top; everything else under
-**Advanced** (retrain AquaForge, finding spots, download, optional review-multitask helpers, exports, duplicates, label fixer,
+**Advanced** (retrain AquaForge, finding spots, download, label agreement check, exports, duplicates, label fixer,
 whole-scene map, optional heavy-inference consent).
 
 **Main:** large close-up, **On image** toggles (defaults: outline, direction, keypoints, wake on), optional readouts
@@ -127,12 +127,6 @@ from aquaforge.scene_overview_100 import (
 )
 from aquaforge.s2_masks import find_scl_for_tci
 from aquaforge.unified.label_agreement import evaluate_aquaforge_vs_binary_labels
-from aquaforge.review_multitask_train import (
-    default_multitask_path,
-    load_review_multitask_bundle,
-    predict_review_multitask_at,
-    train_review_multitask_joblib,
-)
 from aquaforge.s2_download import (
     cdse_download_ready,
     download_item_tci_scl,
@@ -491,18 +485,14 @@ def _render_catalog_panel() -> None:
                     st.error(str(e))
 
 
-def _review_multitask_models_expander(labels_path: Path) -> None:
-    """Optional sklearn heads on review ``extra`` fields; vessel listing is always AquaForge tiled."""
-    with st.expander("Extra-field models (optional)", expanded=False):
+def _aquaforge_vs_labels_expander(labels_path: Path) -> None:
+    """AquaForge-only: compare detector P(vessel) to human binary point labels (no auxiliary models)."""
+    with st.expander("AquaForge vs labels", expanded=False):
         try:
             rel = str(labels_path.relative_to(ROOT))
         except ValueError:
             rel = str(labels_path)
         st.caption(f"Labels: `{rel}`")
-        st.caption(
-            "**Multi-task** trains small helpers that predict manual fields you saved in `extra` "
-            "(wake, cloud, lengths, heading, etc.). It does **not** replace AquaForge detection."
-        )
         n_lab, n_v, n_neg = count_human_verified_point_reviews(labels_path)
         st.markdown(
             f"**Human-verified point reviews:** **{n_lab}** total — **{n_v}** vessel, **{n_neg}** non-vessel."
@@ -528,21 +518,20 @@ def _review_multitask_models_expander(labels_path: Path) -> None:
                 ]
             )
 
-        last_rep = st.session_state.get("last_review_multitask_train_report")
+        last_rep = st.session_state.get("last_aquaforge_vs_labels_report")
         if last_rep and isinstance(last_rep, dict) and last_rep.get("markdown"):
             with st.container():
-                st.markdown("**Last train**")
+                st.markdown("**Last run**")
                 st.markdown(last_rep["markdown"])
 
         if st.button(
-            "Train multi-task + check AquaForge vs labels",
+            "Run AquaForge vs binary labels",
             use_container_width=True,
-            key="retrain_review_multitask_and_agreement",
-            help="Refresh sklearn heads on extra fields; report AquaForge binary agreement on labeled points.",
+            key="run_aquaforge_vs_labels",
+            help="Score saved point labels against AquaForge vessel probability at each center.",
         ):
             after_ag: dict | None = None
-            multitask_report: dict[str, Any] | None = None
-            with st.status("Training…", expanded=True) as status:
+            with st.status("Scoring…", expanded=True) as status:
                 try:
                     after_ag = evaluate_aquaforge_vs_binary_labels(
                         labels_path,
@@ -553,32 +542,12 @@ def _review_multitask_models_expander(labels_path: Path) -> None:
                             status.write(_ln)
                 except Exception as ex:
                     status.write(f"AquaForge agreement failed: `{ex}`")
-
-                status.write("**Multi-task** on `extra` fields…")
-                try:
-                    multitask_report = train_review_multitask_joblib(
-                        labels_path,
-                        default_multitask_path(ROOT),
-                        project_root=ROOT,
-                        progress=status.write,
-                    )
-                except Exception as ex:
-                    multitask_report = {"error": str(ex)}
-                    status.write(f"Multi-task failed: `{ex}`")
                 status.update(label="Finished", state="complete")
 
-            md_parts: list[str] = ["### AquaForge vs binary labels", _af_agreement_summary_md(after_ag or {})]
-            md_parts.append("### Multi-task")
-            if multitask_report and multitask_report.get("error"):
-                md_parts.append(f"- Error: `{multitask_report['error']}`")
-            elif multitask_report:
-                n_h = len(multitask_report.get("heads_trained") or [])
-                md_parts.append(
-                    f"- **`{default_multitask_path(ROOT).name}`** — **{n_h}** head(s), "
-                    f"**{multitask_report.get('n_rows', '?')}** rows."
-                )
-            full_md = "\n\n".join(md_parts)
-            st.session_state["last_review_multitask_train_report"] = {"markdown": full_md}
+            full_md = "### AquaForge vs binary labels\n\n" + _af_agreement_summary_md(
+                after_ag or {}
+            )
+            st.session_state["last_aquaforge_vs_labels_report"] = {"markdown": full_md}
             st.markdown(full_md)
 
 
@@ -1364,7 +1333,7 @@ def main() -> None:
             _sidebar_spot_finding_settings()
             with st.expander("Download satellite image", expanded=False):
                 _render_catalog_panel()
-            _review_multitask_models_expander(labels_path)
+            _aquaforge_vs_labels_expander(labels_path)
             _exports_and_analytics_expander(labels_path)
             render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
             if st.button(
@@ -1843,9 +1812,6 @@ def _render_spot_measurements_panel(
     *,
     af_spot: dict,
     det_settings: Any,
-    clf_disp: Any,
-    bundle_disp: Any,
-    p_comb: float | None,
     labels_path: Path,
     tci_p: Path,
     tci_loaded: str,
@@ -1856,7 +1822,6 @@ def _render_spot_measurements_panel(
     """AquaForge chip readouts — expander or inline column."""
 
     def _body() -> None:
-        _ = clf_disp, bundle_disp, p_comb
         _gt_hint = spot_geometry_gt_from_labels(
             labels_path,
             ROOT,
@@ -2015,24 +1980,9 @@ def _render_review_deck(
     if flash_loc:
         st.success(str(flash_loc))
 
-    clf_disp = None
-    bundle_disp = None
-
-    mt_path = default_multitask_path(ROOT)
-    mt_bundle = load_review_multitask_bundle(mt_path)
-    mt_pred: dict[str, Any] = {}
-    if mt_bundle and mt_bundle.get("heads"):
-        try:
-            mt_pred = predict_review_multitask_at(mt_bundle, Path(tci_loaded), cx, cy)
-        except Exception:
-            mt_pred = {}
-
     tci_p = Path(tci_loaded)
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
     det_settings = load_aquaforge_settings(ROOT)
-    _af_pred_gate = get_cached_aquaforge_predictor(ROOT, det_settings)
-    af_gate_prob = float(aquaforge_confidence_only(_af_pred_gate, tci_p, cx, cy))
-    p_comb = af_gate_prob
 
     # Minimal header + top-right overlay toggles (defaults: all layers on).
     _sc_prev_hdr = cands[idx][2]
@@ -2508,9 +2458,6 @@ def _render_review_deck(
             _render_spot_measurements_panel(
                 af_spot=dict(af_spot) if isinstance(af_spot, dict) else {},
                 det_settings=det_settings,
-                clf_disp=clf_disp,
-                bundle_disp=bundle_disp,
-                p_comb=p_comb,
                 labels_path=labels_path,
                 tci_p=tci_p,
                 tci_loaded=tci_loaded,
@@ -2988,20 +2935,8 @@ def _render_review_deck(
         st.markdown("**Queue / AquaForge**")
         st.caption(
             "Queue order is **AquaForge vessel confidence** (highest first). "
-            "**Vessel confidence** (as a %) is in the captions next to the locator above. "
-            "Optional spectral LR is for analytics only, not queue order."
+            "**Vessel confidence** (as a %) is in the captions next to the locator above."
         )
-
-        if mt_pred:
-            st.divider()
-            st.markdown("**Guesses from past labels**")
-            st.caption("Rough hints when you have enough examples.")
-            items = sorted(mt_pred.items(), key=lambda t: t[0])
-            for k, v in items:
-                if isinstance(v, float):
-                    st.markdown(f"**{k}** — `{v:.4f}`")
-                else:
-                    st.markdown(f"**{k}** — `{v}`")
 
 
 def _commit_review_label(
@@ -3173,12 +3108,6 @@ def _commit_review_label(
                     ]
                 if gmx2.get("heading_source"):
                     extra["heading_source_hull2"] = gmx2["heading_source"]
-    mt_bundle = load_review_multitask_bundle(default_multitask_path(ROOT))
-    mt_pred: dict[str, Any] = (
-        predict_review_multitask_at(mt_bundle, tci_p, cx_save, cy_save)
-        if mt_bundle is not None
-        else {}
-    )
     merge_keel_heading_into_extra(
         extra,
         quad_crop=quad_crop_h1,
@@ -3186,7 +3115,6 @@ def _commit_review_label(
         row_off=spot_sr,
         raster_path=tci_p,
         markers=mk_save if isinstance(mk_save, list) else None,
-        multitask_pred=mt_pred if mt_pred else None,
         hull2=False,
         hull_index=1,
     )
@@ -3202,7 +3130,6 @@ def _commit_review_label(
                 row_off=spot_sr,
                 raster_path=tci_p,
                 markers=mk_save,
-                multitask_pred=mt_pred if mt_pred else None,
                 hull2=True,
                 hull_index=2,
             )

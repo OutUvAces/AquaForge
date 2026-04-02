@@ -23,11 +23,6 @@ from aquaforge.locator_coords import (
     click_square_letterbox_to_original_xy,
     letterbox_rgb_to_square,
 )
-from aquaforge.review_multitask_train import (
-    default_multitask_path,
-    load_review_multitask_bundle,
-    predict_review_multitask_at,
-)
 from aquaforge.review_overlay import (
     annotate_locator_spot_outline,
     annotate_spot_detection_center,
@@ -763,16 +758,6 @@ def merge_spot_session_into_record(
     except Exception:
         pass
 
-    mt_pred: dict[str, Any] = {}
-    try:
-        _root = _project_root_from_tci(ctx.tci_p)
-        _mb = load_review_multitask_bundle(default_multitask_path(_root))
-        if _mb is not None:
-            mt_pred = predict_review_multitask_at(
-                _mb, ctx.tci_p, float(rec["cx_full"]), float(rec["cy_full"])
-            )
-    except Exception:
-        mt_pred = {}
     merge_keel_heading_into_extra(
         ex,
         quad_crop=quad_h1,
@@ -780,7 +765,6 @@ def merge_spot_session_into_record(
         row_off=spot_sr,
         raster_path=ctx.tci_p,
         markers=mk if mk else None,
-        multitask_pred=mt_pred if mt_pred else None,
         hull2=False,
         hull_index=1,
     )
@@ -794,7 +778,6 @@ def merge_spot_session_into_record(
                 row_off=spot_sr,
                 raster_path=ctx.tci_p,
                 markers=mk,
-                multitask_pred=mt_pred if mt_pred else None,
                 hull2=True,
                 hull_index=2,
             )

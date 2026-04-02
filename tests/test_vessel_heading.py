@@ -54,7 +54,6 @@ class TestHeadingDisambiguation(unittest.TestCase):
                 fake_path,
                 stern_full=(5.0, 0.0),
                 bow_full=(0.0, 0.0),
-                multitask_pred=None,
             )
         self.assertEqual(src, "keel_quad_bow_stern")
         self.assertAlmostEqual(h, 90.0)

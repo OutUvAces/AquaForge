@@ -6,8 +6,7 @@ When bow + stern markers exist, the keel line direction is **flipped** so it mat
 the hull angle from a noisy bow/stern segment.
 
 Without bow/stern, heading is **±180° ambiguous**; ``heading_deg_from_north_alt`` is the opposite
-bearing. Optional multitask ``heading_deg_from_north`` regression (chip bundle) picks one side when
-both are otherwise ambiguous.
+bearing. The review UI does not apply any secondary model to disambiguate — both bearings are kept.
 """
 
 from __future__ import annotations
@@ -16,13 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from aquaforge.geodesy_bearing import geodesic_bearing_deg
-
-
-def _angular_distance_deg(a: float, b: float) -> float:
-    d = (float(a) - float(b)) % 360.0
-    if d > 180.0:
-        d = 360.0 - d
-    return float(d)
 
 
 def keel_midpoints_fullres_from_quad(
@@ -113,14 +105,12 @@ def heading_degrees_from_keel_midpoints(
     *,
     stern_full: tuple[float, float] | None,
     bow_full: tuple[float, float] | None,
-    multitask_pred: dict[str, Any] | None,
 ) -> tuple[float, float, str]:
     """
     Returns ``(heading_deg, alt_deg, heading_source)``.
 
     * ``keel_quad_bow_stern`` — bow+stern flipped the keel ray to match stern→bow.
-    * ``keel_quad_multitask_heading_regression`` — ambiguous; multitask heading regression chose side.
-    * ``keel_quad_ambiguous`` — ambiguous; no usable multitask heading prediction.
+    * ``keel_quad_ambiguous`` — no bow/stern; keel axis has two opposite bearings (primary + alt).
     """
     path = Path(raster_path)
     ax0, ay0 = float(ma[0]), float(ma[1])
@@ -141,29 +131,6 @@ def heading_degrees_from_keel_midpoints(
     h0 = geodesic_bearing_deg(path, ax0, ay0, ax1, ay1)
     h0 = h0 % 360.0
     h1 = (h0 + 180.0) % 360.0
-
-    pred: float | None = None
-    if multitask_pred:
-        raw = multitask_pred.get("heading_deg_from_north")
-        if raw is not None:
-            try:
-                pred = float(raw)
-            except (TypeError, ValueError):
-                pred = None
-            if pred is not None:
-                import math
-
-                if not math.isfinite(pred):
-                    pred = None
-                else:
-                    pred = pred % 360.0
-    if pred is not None:
-        d0 = _angular_distance_deg(h0, pred)
-        d1 = _angular_distance_deg(h1, pred)
-        if d1 + 1e-9 < d0:
-            return h1, h0, "keel_quad_multitask_heading_regression"
-        return h0, h1, "keel_quad_multitask_heading_regression"
-
     return h0, h1, "keel_quad_ambiguous"
 
 
@@ -185,7 +152,6 @@ def merge_keel_heading_into_extra(
     row_off: int,
     raster_path: Path,
     markers: list[dict[str, Any]] | None,
-    multitask_pred: dict[str, Any] | None,
     hull2: bool = False,
     hull_index: int = 1,
 ) -> None:
@@ -212,7 +178,6 @@ def merge_keel_heading_into_extra(
             raster_path,
             stern_full=stern,
             bow_full=bow,
-            multitask_pred=multitask_pred,
         )
     except Exception:
         return

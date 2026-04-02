@@ -2,7 +2,7 @@
 Offline benchmarking: AquaForge detection and calibration on labeled review JSONL.
 
 Ground truth:
-  * Binary vessel labels on point rows (same filter as chip / multitask training rows).
+  * Binary vessel labels on point rows (same filter as chip-based agreement / eval rows).
   * ``vessel_size_feedback``: ``heading_deg_from_north``, human/graphic/estimated L×W,
     ``dimension_markers`` (bow/stern-derived heading when stored heading missing, hull quad vs AquaForge mask).
 
