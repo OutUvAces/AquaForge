@@ -13,7 +13,8 @@ Common ``extra`` keys written by the review UI include:
 - ``af_training_priority`` — optional float multiplier (Streamlit / tooling) for AquaForge **active-learning** oversampling (see :mod:`aquaforge.unified.distill`).
 - ``coastal_or_land_adjacent`` / ``near_coast_proxy`` — optional bool flags to up-weight hard **coastal** chips in training sampling.
 
-Vessel **detector** audit in ``extra`` uses ``pred_aquaforge_*`` only (no auxiliary model fields).
+Vessel **detector** audit in ``extra`` uses ``pred_aquaforge_*`` keys only (AquaForge snapshot on save;
+no ``pred_lr_proba``, ``pred_mlp_proba``, ``yolo_*``, or other legacy fusion fields).
 
 Static-sea persistence uses a separate JSONL (``record_type: "static_sea_witness"``), not point-classifier rows.
 """

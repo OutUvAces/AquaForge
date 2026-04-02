@@ -65,7 +65,7 @@ class TestReviewUIUncertaintySignal(unittest.TestCase):
 class TestLandmarksFromHeatmap(unittest.TestCase):
     def test_peak_center_maps_to_chip_center(self) -> None:
         from aquaforge.unified.constants import NUM_LANDMARKS
-        from aquaforge.unified.inference import _landmarks_from_kp_hm_logits
+        from aquaforge.unified._inference_impl import _landmarks_from_kp_hm_logits
 
         h, w = 3, 3
         logits = np.full((NUM_LANDMARKS, h, w), -20.0, dtype=np.float32)
@@ -85,14 +85,14 @@ class TestLandmarksFromHeatmap(unittest.TestCase):
 
 class TestTiledSceneHelpers(unittest.TestCase):
     def test_tile_axis_starts_covers_right_edge(self) -> None:
-        from aquaforge.unified.inference import _tile_axis_starts
+        from aquaforge.unified._inference_impl import _tile_axis_starts
 
         s = _tile_axis_starts(1000, 640, 320)
         self.assertIn(0, s)
         self.assertIn(360, s)
 
     def test_nms_suppresses_overlapping_boxes(self) -> None:
-        from aquaforge.unified.inference import (
+        from aquaforge.unified._inference_impl import (
             AquaForgeSpotResult,
             nms_aquaforge_spot_results,
         )
