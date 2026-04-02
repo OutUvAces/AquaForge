@@ -1,7 +1,7 @@
 """
 Spot-review visuals: contrast-stretched crops with optional detection overlays (PIL).
 
-The web UI turns layers on/off via ``draw_*`` flags on :func:`overlay_sota_on_spot_rgb`; default layers
+The web UI turns layers on/off via ``draw_*`` flags on :func:`overlay_aquaforge_on_spot_rgb`; default layers
 are all on (outline, direction, keypoints, wake) under **On image**.
 """
 
@@ -429,7 +429,7 @@ def vessel_quad_for_label(
     """
     Four crop-space corners and ``"markers"`` | ``"manual"`` | ``"pca"`` | ``"fallback"``.
 
-    **marker_quad_crop** (from dimension markers) takes precedence over legacy **manual_quad_crop**.
+    **marker_quad_crop** (from dimension markers) takes precedence over **manual_quad_crop**.
 
     Shared by the Streamlit review UI and batch PNG export.
     """
@@ -773,10 +773,10 @@ def _blend_conf_rgb(
     )
 
 
-def overlay_sota_on_spot_rgb(
+def overlay_aquaforge_on_spot_rgb(
     rgb: np.ndarray,
     *,
-    yolo_polygon_crop: list[tuple[float, float]] | None = None,
+    hull_polygon_crop: list[tuple[float, float]] | None = None,
     keypoints_crop: list[tuple[float, float]] | None = None,
     keypoints_xy_conf: list[tuple[float, float, float]] | None = None,
     bow_stern_segment_crop: tuple[tuple[float, float], tuple[float, float]]
@@ -803,12 +803,12 @@ def overlay_sota_on_spot_rgb(
 
     if (
         draw_hull_outline
-        and yolo_polygon_crop
-        and len(yolo_polygon_crop) >= 3
+        and hull_polygon_crop
+        and len(hull_polygon_crop) >= 3
     ):
         poly = [
             (float(np.clip(p[0], 0, w - 1)), float(np.clip(p[1], 0, h - 1)))
-            for p in yolo_polygon_crop
+            for p in hull_polygon_crop
         ]
         hull_w = max(lw, min(h, w) // 50)
         draw.polygon(poly, outline=(0, 255, 220), width=hull_w)

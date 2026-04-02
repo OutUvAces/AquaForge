@@ -345,8 +345,8 @@ def rank_score_at_point(
     settings: AquaForgeSettings,
 ) -> dict[str, Any]:
     """
-    Single-candidate scores for benchmarks: ``rank_score`` is AquaForge vessel probability (0–1).
-    ``clf`` / ``chip_bundle`` are ignored (API compatibility).
+    Single-candidate scores for benchmarks: ``aquaforge_confidence`` is vessel probability (0–1).
+    ``clf`` / ``chip_bundle`` are unused (reserved for callers).
     """
     _ = clf, chip_bundle
     from aquaforge.unified.inference import aquaforge_confidence_only
@@ -354,10 +354,7 @@ def rank_score_at_point(
 
     pred_af = get_cached_aquaforge_predictor(project_root, settings)
     py = float(aquaforge_confidence_only(pred_af, tci_path, cx, cy))
-    return {
-        "yolo_confidence": py,
-        "rank_score": py,
-    }
+    return {"aquaforge_confidence": py}
 
 
 @dataclass
@@ -454,18 +451,18 @@ def eval_result_to_jsonable(res: EvalRunResult) -> dict[str, Any]:
 
 def _append_heading_errors(
     bucket: HeadingErrorBucket,
-    sota: dict[str, Any],
+    spot: dict[str, Any],
     gt: float,
 ) -> None:
-    h_wake_combined = sota.get("heading_wake_deg")
-    h_heur = sota.get("heading_wake_heuristic_deg")
+    h_wake_combined = spot.get("aquaforge_heading_wake_deg")
+    h_heur = spot.get("aquaforge_heading_wake_heuristic_deg")
     h_wake_for_line = (
         float(h_wake_combined)
         if h_wake_combined is not None
         else (float(h_heur) if h_heur is not None else None)
     )
-    h_kp = sota.get("heading_keypoint_deg")
-    h_f = sota.get("heading_fused_deg")
+    h_kp = spot.get("aquaforge_heading_keypoint_deg")
+    h_f = spot.get("aquaforge_heading_fused_deg")
     bw = best_wake_line_error_deg(h_wake_for_line, gt)
     if bw is not None:
         bucket.wake_line.append(bw)
@@ -565,7 +562,7 @@ def run_detection_evaluation(
             None,
             aquaforge_settings,
         )
-        rs = ss.get("rank_score")
+        rs = ss.get("aquaforge_confidence")
         if rs is not None:
             pearson_rs.append(float(rs))
             pearson_ys.append(float(row.y))
@@ -601,7 +598,7 @@ def run_detection_evaluation(
             g.dimension_markers, g.cx, g.cy, chip_half
         )
 
-        sota = run_aquaforge_spot_decode(
+        af_spot = run_aquaforge_spot_decode(
             project_root,
             g.tci_path,
             g.cx,
@@ -612,39 +609,39 @@ def run_detection_evaluation(
             scl_path=scl_path,
         )
         if gt_h is not None:
-            _append_heading_errors(heading_bucket, sota, float(gt_h))
+            _append_heading_errors(heading_bucket, af_spot, float(gt_h))
 
         gl, gw = g.length_m, g.width_m
         if gl is not None:
-            e = _rel_dim_error(sota.get("yolo_length_m"), gl)
+            e = _rel_dim_error(af_spot.get("aquaforge_length_m"), gl)
             if e is not None:
                 rel_len_list.append(e)
         if gw is not None:
-            e = _rel_dim_error(sota.get("yolo_width_m"), gw)
+            e = _rel_dim_error(af_spot.get("aquaforge_width_m"), gw)
             if e is not None:
                 rel_wid_list.append(e)
-        yolo_full = sota.get("yolo_polygon_fullres")
+        hull_full = af_spot.get("aquaforge_hull_polygon_fullres")
         if (
-            isinstance(yolo_full, list)
-            and len(yolo_full) >= 3
+            isinstance(hull_full, list)
+            and len(hull_full) >= 3
             and gt_quad
             and len(gt_quad) >= 3
         ):
-            poly_y = [(float(p[0]), float(p[1])) for p in yolo_full]
+            poly_y = [(float(p[0]), float(p[1])) for p in hull_full]
             iou = mask_polygon_iou(gt_quad, poly_y)
             if iou is not None:
                 iou_list.append(iou)
 
         if gt_h is not None:
-            h_kp = sota.get("heading_keypoint_deg")
-            h_wake_combined = sota.get("heading_wake_deg")
-            h_heur = sota.get("heading_wake_heuristic_deg")
+            h_kp = af_spot.get("aquaforge_heading_keypoint_deg")
+            h_wake_combined = af_spot.get("aquaforge_heading_wake_deg")
+            h_heur = af_spot.get("aquaforge_heading_wake_heuristic_deg")
             h_wake_for_line = (
                 float(h_wake_combined)
                 if h_wake_combined is not None
                 else (float(h_heur) if h_heur is not None else None)
             )
-            h_f = sota.get("heading_fused_deg")
+            h_f = af_spot.get("aquaforge_heading_fused_deg")
             if h_kp is not None and h_wake_for_line is not None:
                 e_wake_best = best_wake_line_error_deg(h_wake_for_line, float(gt_h))
                 e_kp = angular_error_deg(float(h_kp), float(gt_h))
@@ -717,7 +714,7 @@ def format_eval_report(
     """
     Markdown tables with GFM-friendly alignment (text left, numbers right).
 
-    ``bold_best`` is accepted for API compatibility; single-column AquaForge reports do not bold.
+    ``bold_best`` is ignored; single-column AquaForge reports do not bold.
     """
     _ = bold_best
     aq = res.heading_errors

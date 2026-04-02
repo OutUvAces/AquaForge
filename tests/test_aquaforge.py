@@ -10,7 +10,7 @@ from aquaforge.unified.constants import LANDMARK_NAMES, NUM_LANDMARKS
 
 
 class TestAquaForgeIntegration(unittest.TestCase):
-    def test_missing_predictor_sets_ready_false_not_sota_code(self) -> None:
+    def test_missing_predictor_sets_ready_false_clean_warnings(self) -> None:
         from pathlib import Path
         from tempfile import TemporaryDirectory
         from unittest.mock import patch
@@ -36,7 +36,7 @@ class TestAquaForgeIntegration(unittest.TestCase):
                     spot_row_off=0,
                 )
         self.assertFalse(out.get("aquaforge_model_ready", True))
-        sw = out.get("sota_warnings") or []
+        sw = out.get("aquaforge_warnings") or []
         self.assertNotIn("aquaforge_weights_missing", sw)
 
 
@@ -47,7 +47,7 @@ class TestReviewUIUncertaintySignal(unittest.TestCase):
         self.assertEqual(coastal_scene_hint(None), 0.0)
         self.assertEqual(coastal_scene_hint({"coastal_or_land_adjacent": True}), 1.0)
         self.assertEqual(small_vessel_length_hint({}), 0.0)
-        self.assertGreater(small_vessel_length_hint({"pred_yolo_length_m": 30.0}), 0.5)
+        self.assertGreater(small_vessel_length_hint({"pred_aquaforge_length_m": 30.0}), 0.5)
 
     def test_uncertainty_signal_range(self) -> None:
         from aquaforge.unified.distill import review_ui_uncertainty_signal
@@ -256,7 +256,7 @@ class TestAquaForgeLosses(unittest.TestCase):
         p1 = review_ui_active_learning_priority({}, heading_labeled=False)
         self.assertGreaterEqual(p1, 0.45)
         p2 = review_ui_active_learning_priority(
-            {"pred_combined_proba": 0.5, "pred_yolo_length_m": 40.0},
+            {"pred_combined_proba": 0.5, "pred_aquaforge_length_m": 40.0},
             heading_labeled=True,
         )
         self.assertGreater(p2, p1)

@@ -363,8 +363,8 @@ def build_overview_composite(
     """
     Land-dimmed RGB + thick grid + AquaForge tiled detections / pending marks.
 
-    ``ds_factor`` / ``min_water_fraction`` are accepted for API compatibility; listing uses tiled
-    AquaForge only. Returns ``(rgb_uint8, meta)``.
+    ``ds_factor`` and ``min_water_fraction`` are unused (signature kept for callers); listing uses
+    tiled AquaForge only. Returns ``(rgb_uint8, meta)``.
     """
     _ = ds_factor, min_water_fraction
     tci_resolved = str(Path(tci_path).resolve())

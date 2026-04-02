@@ -112,7 +112,7 @@ from aquaforge.review_overlay import (
     footprint_width_length_m,
     fullres_xy_from_spot_red_outline_aabb_center,
     overlay_heading_arrow_north_on_letterbox,
-    overlay_sota_on_spot_rgb,
+    overlay_aquaforge_on_spot_rgb,
     read_locator_and_spot_rgb_matching_stretch,
     vessel_quad_for_label,
 )
@@ -1355,7 +1355,7 @@ def main() -> None:
             _render_retrain_aquaforge_section(ROOT, labels_path)
             _render_train_first_aquaforge_section(ROOT, labels_path)
             st.markdown("---")
-            if getattr(_det_adv, "ui_require_checkbox_for_sota", False):
+            if getattr(_det_adv, "ui_require_checkbox_for_aquaforge_overlays", False):
                 st.checkbox(
                     "Allow full AquaForge inference on spots (uses more CPU/GPU)",
                     key="vd_advanced_spot_hints",
@@ -1841,7 +1841,7 @@ def _render_hundred_cell_overview(
 
 def _render_spot_measurements_panel(
     *,
-    sota: dict,
+    af_spot: dict,
     det_settings: Any,
     clf_disp: Any,
     bundle_disp: Any,
@@ -1853,7 +1853,7 @@ def _render_spot_measurements_panel(
     cy: float,
     in_expander: bool = True,
 ) -> None:
-    """Helper readouts from detection (AquaForge by default) — expander or inline column."""
+    """AquaForge chip readouts — expander or inline column."""
 
     def _body() -> None:
         _ = clf_disp, bundle_disp, p_comb
@@ -1865,7 +1865,7 @@ def _render_spot_measurements_panel(
             float(cy),
             chip_half=int(det_settings.aquaforge.chip_half),
         )
-        if isinstance(sota, dict) and isinstance(_gt_hint, dict):
+        if isinstance(af_spot, dict) and isinstance(_gt_hint, dict):
             prov = str(_gt_hint.get("provenance", "") or "")
             _raw_h = _gt_hint.get("heading_deg")
             gth: float | None = None
@@ -1883,13 +1883,13 @@ def _render_spot_measurements_panel(
                 )
             else:
                 ef = (
-                    angular_error_deg(float(sota["heading_fused_deg"]), gth)
-                    if sota.get("heading_fused_deg") is not None
+                    angular_error_deg(float(af_spot["aquaforge_heading_fused_deg"]), gth)
+                    if af_spot.get("aquaforge_heading_fused_deg") is not None
                     else None
                 )
                 ek = (
-                    angular_error_deg(float(sota["heading_keypoint_deg"]), gth)
-                    if sota.get("heading_keypoint_deg") is not None
+                    angular_error_deg(float(af_spot["aquaforge_heading_keypoint_deg"]), gth)
+                    if af_spot.get("aquaforge_heading_keypoint_deg") is not None
                     else None
                 )
                 delta_improve = (ek - ef) if (ek is not None and ef is not None) else None
@@ -1918,43 +1918,43 @@ def _render_spot_measurements_panel(
                     st.caption(
                         "You have a saved heading here, but no overlay heading to compare."
                     )
-        if sota.get("yolo_confidence") is not None:
+        if af_spot.get("aquaforge_confidence") is not None:
             st.caption(
-                f"Vessel confidence: **{_probability_to_percent_str(float(sota['yolo_confidence']))}**"
+                f"Vessel confidence: **{_probability_to_percent_str(float(af_spot['aquaforge_confidence']))}**"
             )
-        if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:
+        if af_spot.get("aquaforge_length_m") is not None and af_spot.get("aquaforge_width_m") is not None:
             st.caption(
-                f"Mask size (length × width): **{sota['yolo_length_m']:.0f}** × "
-                f"**{sota['yolo_width_m']:.0f}** m"
+                f"Mask size (length × width): **{af_spot['aquaforge_length_m']:.0f}** × "
+                f"**{af_spot['aquaforge_width_m']:.0f}** m"
             )
-        if sota.get("heading_keypoint_deg") is not None:
+        if af_spot.get("aquaforge_heading_keypoint_deg") is not None:
             st.caption(
-                f"Keypoint heading: **{int(round(float(sota['heading_keypoint_deg'])))}°**"
+                f"Keypoint heading: **{int(round(float(af_spot['aquaforge_heading_keypoint_deg'])))}°**"
             )
-        if sota.get("keypoint_bow_confidence") is not None:
-            _bc = float(sota["keypoint_bow_confidence"])
-            _sc = float(sota.get("keypoint_stern_confidence") or 0.0)
+        if af_spot.get("aquaforge_landmark_bow_confidence") is not None:
+            _bc = float(af_spot["aquaforge_landmark_bow_confidence"])
+            _sc = float(af_spot.get("aquaforge_landmark_stern_confidence") or 0.0)
             st.caption(
                 f"Bow / stern confidence: **{_probability_to_percent_str(_bc)}** / "
                 f"**{_probability_to_percent_str(_sc)}**"
             )
-        if sota.get("heading_wake_heuristic_deg") is not None:
+        if af_spot.get("aquaforge_heading_wake_heuristic_deg") is not None:
             st.caption(
-                f"Wake line (simple): **{int(round(float(sota['heading_wake_heuristic_deg'])))}°**"
+                f"Wake line (simple): **{int(round(float(af_spot['aquaforge_heading_wake_heuristic_deg'])))}°**"
             )
-        if sota.get("heading_wake_onnx_deg") is not None:
+        if af_spot.get("aquaforge_heading_wake_model_deg") is not None:
             st.caption(
-                f"Wake model: **{int(round(float(sota['heading_wake_onnx_deg'])))}°**"
+                f"Wake model: **{int(round(float(af_spot['aquaforge_heading_wake_model_deg'])))}°**"
             )
-        if sota.get("heading_wake_deg") is not None:
+        if af_spot.get("aquaforge_heading_wake_deg") is not None:
             st.caption(
-                f"Wake heading: **{int(round(float(sota['heading_wake_deg'])))}°**"
+                f"Wake heading: **{int(round(float(af_spot['aquaforge_heading_wake_deg'])))}°**"
             )
-        if sota.get("heading_fused_deg") is not None:
+        if af_spot.get("aquaforge_heading_fused_deg") is not None:
             st.caption(
-                f"Shown heading: **{int(round(float(sota['heading_fused_deg'])))}°**"
+                f"Shown heading: **{int(round(float(af_spot['aquaforge_heading_fused_deg'])))}°**"
             )
-        sw = sota.get("sota_warnings") or []
+        sw = af_spot.get("aquaforge_warnings") or []
         if isinstance(sw, list):
             sw = [x for x in sw if str(x) != "aquaforge_weights_missing"]
         if isinstance(sw, list) and sw:
@@ -1963,7 +1963,7 @@ def _render_spot_measurements_panel(
                 + " — some geometry or heading cues may be missing or low quality on this chip."
             )
 
-    if not sota:
+    if not af_spot:
         return
     if in_expander:
         with st.expander("Lengths, angles, helper readouts", expanded=False):
@@ -2062,13 +2062,13 @@ def _render_review_deck(
             )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Optional consent: global toggle lives under sidebar **Advanced** when YAML requires it.
-    _sota_allow = True
-    if det_settings.ui_require_checkbox_for_sota:
-        _sota_allow = bool(st.session_state.get("vd_advanced_spot_hints", False))
+    # Optional consent: global toggle under **Advanced** when YAML requires it.
+    _af_overlay_allow = True
+    if det_settings.ui_require_checkbox_for_aquaforge_overlays:
+        _af_overlay_allow = bool(st.session_state.get("vd_advanced_spot_hints", False))
 
     # Performance: background warm — AquaForge off the main thread when inference may run soon.
-    _need_warm = not det_settings.ui_require_checkbox_for_sota or _sota_allow
+    _need_warm = not det_settings.ui_require_checkbox_for_aquaforge_overlays or _af_overlay_allow
     if _need_warm:
         _af_ck = resolve_aquaforge_checkpoint_path(ROOT, det_settings.aquaforge)
         _af_onx = resolve_aquaforge_onnx_path(ROOT, det_settings.aquaforge)
@@ -2077,7 +2077,7 @@ def _render_review_deck(
             str(_af_ck) if _af_ck is not None else "",
             str(_af_onx) if _af_onx is not None else "",
             bool(det_settings.aquaforge.use_onnx_inference),
-            bool(_sota_allow) if det_settings.ui_require_checkbox_for_sota else True,
+            bool(_af_overlay_allow) if det_settings.ui_require_checkbox_for_aquaforge_overlays else True,
         )
         if st.session_state.get("_vd_warm_bg_fp") != _warm_fp:
             st.session_state["_vd_warm_bg_fp"] = _warm_fp
@@ -2087,7 +2087,7 @@ def _render_review_deck(
         str(tci_p.resolve()), mt
     )
     # Review close-up uses REVIEW_CHIP_TARGET_SIDE_M (~1 km ground). Overlays reproject from
-    # full-res using this window (landmarks_xy_fullres, wake_segment_fullres, polygon).
+    # full-res using this window (aquaforge_landmarks_xy_fullres, aquaforge_wake_segment_fullres, hull).
     spot_px_read = int(chip_px)
     loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = (
         read_locator_and_spot_rgb_matching_stretch(
@@ -2095,11 +2095,11 @@ def _render_review_deck(
         )
     )
     _mscl = (meta or {}).get("scl_path")
-    _scl_sota = Path(str(_mscl)) if _mscl else None
-    if _scl_sota is not None and not _scl_sota.is_file():
-        _scl_sota = None
+    _scl_for_spot = Path(str(_mscl)) if _mscl else None
+    if _scl_for_spot is not None and not _scl_for_spot.is_file():
+        _scl_for_spot = None
     # Cache key: idx + fine coords so overlay inference never reuses another spot when windows round the same.
-    sota_sig = (
+    af_spot_sig = (
         _detection_yaml_mtime(ROOT),
         mt,
         int(idx),
@@ -2111,14 +2111,13 @@ def _render_review_deck(
         int(sr0),
         int(scw),
         int(sch),
-    ) + ((_sota_allow,) if det_settings.ui_require_checkbox_for_sota else ())
-    sota_k = f"vd_sota_{spot_k}"
-    sota: dict = {}
-    if det_settings.ui_require_checkbox_for_sota and not _sota_allow:
-        st.session_state[sota_k] = {}
-        st.session_state[sota_k + "_sig"] = sota_sig
-    elif st.session_state.get(sota_k + "_sig") != sota_sig:
-        st.session_state[sota_k] = run_aquaforge_spot_decode(
+    ) + ((_af_overlay_allow,) if det_settings.ui_require_checkbox_for_aquaforge_overlays else ())
+    af_spot_state_k = f"vd_aquaforge_spot_{spot_k}"
+    if det_settings.ui_require_checkbox_for_aquaforge_overlays and not _af_overlay_allow:
+        st.session_state[af_spot_state_k] = {}
+        st.session_state[af_spot_state_k + "_sig"] = af_spot_sig
+    elif st.session_state.get(af_spot_state_k + "_sig") != af_spot_sig:
+        st.session_state[af_spot_state_k] = run_aquaforge_spot_decode(
             ROOT,
             tci_p,
             cx,
@@ -2126,10 +2125,10 @@ def _render_review_deck(
             det_settings,
             spot_col_off=int(sc0),
             spot_row_off=int(sr0),
-            scl_path=_scl_sota,
+            scl_path=_scl_for_spot,
         )
-        st.session_state[sota_k + "_sig"] = sota_sig
-    sota = st.session_state.get(sota_k, {}) or {}
+        st.session_state[af_spot_state_k + "_sig"] = af_spot_sig
+    af_spot = st.session_state.get(af_spot_state_k, {}) or {}
 
     pool = st.session_state.get("detector_ranked_unlabeled_pool") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
@@ -2261,11 +2260,11 @@ def _render_review_deck(
         meters_per_pixel=gavg,
         draw_footprint_outline=False,
     )
-    if sota and (_show_hull or _show_mark or _show_wake):
+    if af_spot and (_show_hull or _show_mark or _show_wake):
         _sc0i = int(sc0)
         _sr0i = int(sr0)
         _poly = None
-        raw_full_poly = sota.get("yolo_polygon_fullres")
+        raw_full_poly = af_spot.get("aquaforge_hull_polygon_fullres")
         if isinstance(raw_full_poly, list) and len(raw_full_poly) >= 3:
             _fp = [
                 (float(t[0]), float(t[1]))
@@ -2275,12 +2274,12 @@ def _render_review_deck(
             if len(_fp) >= 3:
                 _poly = polygon_fullres_to_crop(_fp, _sc0i, _sr0i)
         if _poly is None:
-            raw_poly = sota.get("yolo_polygon_crop")
+            raw_poly = af_spot.get("aquaforge_hull_polygon_crop")
             if isinstance(raw_poly, list) and len(raw_poly) >= 3:
                 _poly = [(float(t[0]), float(t[1])) for t in raw_poly]
         _kpc = None
         _kxc = None
-        lm_full = sota.get("landmarks_xy_fullres")
+        lm_full = af_spot.get("aquaforge_landmarks_xy_fullres")
         if isinstance(lm_full, list) and lm_full:
             _kxc = []
             for p in lm_full:
@@ -2292,10 +2291,10 @@ def _render_review_deck(
             if not _kxc:
                 _kxc = None
         if _kxc is None:
-            raw_kp = sota.get("keypoints_crop")
+            raw_kp = af_spot.get("aquaforge_keypoints_crop")
             if isinstance(raw_kp, list) and raw_kp:
                 _kpc = [(float(t[0]), float(t[1])) for t in raw_kp]
-            raw_kxc = sota.get("keypoints_xy_conf_crop")
+            raw_kxc = af_spot.get("aquaforge_keypoints_xy_conf_crop")
             if isinstance(raw_kxc, list) and raw_kxc:
                 _kxc = [
                     (float(t[0]), float(t[1]), float(t[2]))
@@ -2303,8 +2302,8 @@ def _render_review_deck(
                     if isinstance(t, (list, tuple)) and len(t) >= 3
                 ]
         _bs_conf = None
-        if sota.get("keypoint_heading_trust") is not None:
-            _bs_conf = float(sota["keypoint_heading_trust"])
+        if af_spot.get("aquaforge_landmark_heading_trust") is not None:
+            _bs_conf = float(af_spot["aquaforge_landmark_heading_trust"])
         _bs = None
         _mbs_kp = 0.2
         if (
@@ -2326,12 +2325,12 @@ def _render_review_deck(
                 if _bs_conf is None:
                     _bs_conf = float(max(0.0, min(1.0, min(_bc, _stc))))
         if _bs is None:
-            raw_bs = sota.get("bow_stern_segment_crop")
+            raw_bs = af_spot.get("aquaforge_bow_stern_segment_crop")
             if isinstance(raw_bs, list) and len(raw_bs) == 2:
                 a0, a1 = raw_bs[0], raw_bs[1]
                 _bs = ((float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1])))
         _wk = None
-        wk_full = sota.get("wake_segment_fullres")
+        wk_full = af_spot.get("aquaforge_wake_segment_fullres")
         if isinstance(wk_full, list) and len(wk_full) == 2:
             w0, w1 = wk_full[0], wk_full[1]
             if (
@@ -2345,14 +2344,14 @@ def _render_review_deck(
                     (float(w1[0]) - sc0, float(w1[1]) - sr0),
                 )
         if _wk is None:
-            raw_wk = sota.get("wake_segment_crop")
+            raw_wk = af_spot.get("aquaforge_wake_segment_crop")
             if isinstance(raw_wk, list) and len(raw_wk) == 2:
                 w0, w1 = raw_wk[0], raw_wk[1]
                 _wk = ((float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1])))
         if _poly or _kxc or _kpc or _bs or _wk:
-            spot_vis = overlay_sota_on_spot_rgb(
+            spot_vis = overlay_aquaforge_on_spot_rgb(
                 spot_vis,
-                yolo_polygon_crop=_poly,
+                hull_polygon_crop=_poly,
                 keypoints_crop=None if _kxc else _kpc,
                 keypoints_xy_conf=_kxc,
                 bow_stern_segment_crop=_bs,
@@ -2379,17 +2378,17 @@ def _render_review_deck(
     else:
         extent_sq2 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
-    if _show_dir and isinstance(sota, dict) and sota:
+    if _show_dir and isinstance(af_spot, dict) and af_spot:
         _arrow_h: float | None = None
         for _hk in (
-            "heading_fused_deg",
-            "heading_keypoint_deg",
-            "heading_wake_heuristic_deg",
-            "heading_wake_deg",
-            "heading_wake_onnx_deg",
+            "aquaforge_heading_fused_deg",
+            "aquaforge_heading_keypoint_deg",
+            "aquaforge_heading_wake_heuristic_deg",
+            "aquaforge_heading_wake_deg",
+            "aquaforge_heading_wake_model_deg",
             "aquaforge_wake_aux_deg",
         ):
-            _raw = sota.get(_hk)
+            _raw = af_spot.get(_hk)
             if _raw is None:
                 continue
             try:
@@ -2505,9 +2504,9 @@ def _render_review_deck(
             use_column_width=False,
             cursor="crosshair",
         )
-        if sota:
+        if af_spot:
             _render_spot_measurements_panel(
-                sota=dict(sota) if isinstance(sota, dict) else {},
+                af_spot=dict(af_spot) if isinstance(af_spot, dict) else {},
                 det_settings=det_settings,
                 clf_disp=clf_disp,
                 bundle_disp=bundle_disp,
@@ -3216,28 +3215,32 @@ def _commit_review_label(
     )
     if ckey == "vessel" and st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin":
         extra[TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY] = True
-    sota_save = st.session_state.get(f"vd_sota_{spot_k}", {}) or {}
+    af_spot_save = st.session_state.get(f"vd_aquaforge_spot_{spot_k}", {}) or {}
     extra = enrich_extra_with_predictions(
         extra,
         lr_proba=None,
         mlp_proba=None,
         combined_proba=sv_comb,
         model_run_id=fpid,
-        yolo_confidence=sota_save.get("yolo_confidence"),
-        yolo_length_m=sota_save.get("yolo_length_m"),
-        yolo_width_m=sota_save.get("yolo_width_m"),
-        yolo_aspect=sota_save.get("yolo_aspect"),
-        heading_keypoint_deg=sota_save.get("heading_keypoint_deg"),
-        heading_wake_deg=sota_save.get("heading_wake_deg"),
-        heading_fused_deg=sota_save.get("heading_fused_deg"),
-        heading_fusion_source=sota_save.get("heading_fusion_source"),
-        detector_snapshot=sota_save.get("detector") or sota_save.get("backend"),
-        heading_wake_heuristic_deg=sota_save.get("heading_wake_heuristic_deg"),
-        heading_wake_onnx_deg=sota_save.get("heading_wake_onnx_deg"),
-        wake_combine_source=sota_save.get("heading_wake_combine_source"),
-        keypoint_bow_confidence=sota_save.get("keypoint_bow_confidence"),
-        keypoint_stern_confidence=sota_save.get("keypoint_stern_confidence"),
-        keypoint_heading_trust=sota_save.get("keypoint_heading_trust"),
+        aquaforge_confidence=af_spot_save.get("aquaforge_confidence"),
+        aquaforge_length_m=af_spot_save.get("aquaforge_length_m"),
+        aquaforge_width_m=af_spot_save.get("aquaforge_width_m"),
+        aquaforge_aspect_ratio=af_spot_save.get("aquaforge_aspect_ratio"),
+        aquaforge_heading_keypoint_deg=af_spot_save.get("aquaforge_heading_keypoint_deg"),
+        aquaforge_heading_wake_deg=af_spot_save.get("aquaforge_heading_wake_deg"),
+        aquaforge_heading_fused_deg=af_spot_save.get("aquaforge_heading_fused_deg"),
+        aquaforge_heading_fusion_source=af_spot_save.get("aquaforge_heading_fusion_source"),
+        aquaforge_detector_snapshot=af_spot_save.get("detector"),
+        aquaforge_heading_wake_heuristic_deg=af_spot_save.get(
+            "aquaforge_heading_wake_heuristic_deg"
+        ),
+        aquaforge_heading_wake_model_deg=af_spot_save.get("aquaforge_heading_wake_model_deg"),
+        aquaforge_wake_combine_source=af_spot_save.get("aquaforge_wake_combine_source"),
+        aquaforge_landmark_bow_confidence=af_spot_save.get("aquaforge_landmark_bow_confidence"),
+        aquaforge_landmark_stern_confidence=af_spot_save.get(
+            "aquaforge_landmark_stern_confidence"
+        ),
+        aquaforge_landmark_heading_trust=af_spot_save.get("aquaforge_landmark_heading_trust"),
     )
     append_review(
         labels_path,

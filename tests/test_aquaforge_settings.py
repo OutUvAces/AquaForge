@@ -59,13 +59,13 @@ class TestAquaForgeSettings(unittest.TestCase):
             cfg = root / "data" / "config"
             cfg.mkdir(parents=True)
             (cfg / "detection.yaml").write_text(
-                "ui_require_checkbox_for_sota: true\n"
-                "ui_lazy_sota_overlays: true\n",
+                "ui_require_checkbox_for_aquaforge_overlays: true\n"
+                "ui_lazy_aquaforge_overlays: true\n",
                 encoding="utf-8",
             )
             s = load_aquaforge_settings(root)
-            self.assertTrue(s.ui_require_checkbox_for_sota)
-            self.assertTrue(s.ui_lazy_sota_overlays)
+            self.assertTrue(s.ui_require_checkbox_for_aquaforge_overlays)
+            self.assertTrue(s.ui_lazy_aquaforge_overlays)
 
     def test_merged_onnx_providers_global_wins(self) -> None:
         s = AquaForgeSettings(

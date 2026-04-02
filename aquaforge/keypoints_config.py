@@ -23,4 +23,4 @@ class KeypointsSection:
     min_bow_stern_confidence: float = 0.25
     onnx_providers: list[str] | None = None
     quantize: bool = False
-    min_yolo_confidence: float = 0.0
+    min_aquaforge_vessel_confidence: float = 0.0

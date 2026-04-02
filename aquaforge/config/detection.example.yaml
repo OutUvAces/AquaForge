@@ -25,5 +25,5 @@
 #   graph_optimization_level: all
 
 # onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
-# ui_require_checkbox_for_sota: false
-# ui_lazy_sota_overlays: false
+# ui_require_checkbox_for_aquaforge_overlays: false
+# ui_lazy_aquaforge_overlays: false

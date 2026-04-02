@@ -1,10 +1,9 @@
 """
-Glue AquaForge outputs into the spot-overlay dict used by the review UI and evaluation.
+Map AquaForge chip inference into a single spot-overlay dict for the review UI and evaluation.
 
-Design: **heading_fused_deg** prefers the direct regression head when confident; otherwise falls
-back to geodesic bow→stern from landmark indices 0/1 (same convention as keypoint ONNX path).
-Wake auxiliary is exposed as a faint segment hint in crop space (optional overlay) without running
-heuristic wake segmentation (single-model path stays fast).
+All keys use an ``aquaforge_`` prefix — no legacy detector or YOLO field names.
+Heading fusion prefers the direct regression head when confident, else geodesic bow→stern from
+landmarks 0/1. Wake auxiliary is a segment hint from the model (no separate wake ONNX).
 """
 
 from __future__ import annotations
@@ -41,43 +40,39 @@ def run_aquaforge_spot_inference(
     spot_col_off: int,
     spot_row_off: int,
 ) -> dict[str, Any]:
-    # spot_col_off / spot_row_off kept for callers; crop geometry always uses the model chip
-    # (ar.chip_col_off / ar.chip_row_off) so landmarks and mask align with inference.
     from aquaforge.mask_measurements import mask_oriented_dimensions_m
     from aquaforge.unified.external_pose_onnx import heading_deg_bow_to_stern
     from aquaforge.chip_io import polygon_fullres_to_crop
 
     out: dict[str, Any] = {
         "detector": "aquaforge",
-        "yolo_confidence": None,
-        "yolo_polygon_crop": None,
-        "yolo_length_m": None,
-        "yolo_width_m": None,
-        "yolo_aspect": None,
-        "heading_keypoint_deg": None,
-        "heading_wake_deg": None,
-        "heading_wake_heuristic_deg": None,
-        "heading_wake_onnx_deg": None,
-        "heading_wake_combine_source": None,
-        "heading_fused_deg": None,
-        "heading_fusion_source": None,
-        "keypoints_json": None,
-        "keypoints_crop": None,
-        "keypoint_bow_confidence": None,
-        "keypoint_stern_confidence": None,
-        "keypoint_heading_trust": None,
-        "bow_stern_segment_crop": None,
-        "wake_segment_crop": None,
-        "heading_wake_combined_confidence": None,
-        "keypoints_xy_conf_crop": None,
-        "sota_warnings": [],
-        "yolo_polygon_fullres": None,
+        "aquaforge_confidence": None,
+        "aquaforge_hull_polygon_crop": None,
+        "aquaforge_length_m": None,
+        "aquaforge_width_m": None,
+        "aquaforge_aspect_ratio": None,
+        "aquaforge_heading_keypoint_deg": None,
+        "aquaforge_heading_wake_deg": None,
+        "aquaforge_heading_wake_heuristic_deg": None,
+        "aquaforge_heading_wake_model_deg": None,
+        "aquaforge_wake_combine_source": None,
+        "aquaforge_heading_fused_deg": None,
+        "aquaforge_heading_fusion_source": None,
+        "aquaforge_keypoints_json": None,
+        "aquaforge_keypoints_crop": None,
+        "aquaforge_landmark_bow_confidence": None,
+        "aquaforge_landmark_stern_confidence": None,
+        "aquaforge_landmark_heading_trust": None,
+        "aquaforge_bow_stern_segment_crop": None,
+        "aquaforge_wake_segment_crop": None,
+        "aquaforge_wake_heading_confidence": None,
+        "aquaforge_keypoints_xy_conf_crop": None,
+        "aquaforge_warnings": [],
+        "aquaforge_hull_polygon_fullres": None,
         "aquaforge_heading_direct_deg": None,
         "aquaforge_wake_aux_deg": None,
-        # Full-image geometry for UI: project with current spot (sc0,sr0) each render.
-        "landmarks_xy_fullres": None,
-        "wake_segment_fullres": None,
-        # False until a predictor loads; UI uses this for friendly setup (not sota_warnings codes).
+        "aquaforge_landmarks_xy_fullres": None,
+        "aquaforge_wake_segment_fullres": None,
         "aquaforge_model_ready": False,
     }
 
@@ -85,19 +80,18 @@ def run_aquaforge_spot_inference(
 
     pred = get_cached_aquaforge_predictor(project_root, settings)
     if pred is None:
-        # Do not push machine codes into sota_warnings — the main UI shows a one-time friendly banner.
         out["aquaforge_model_ready"] = False
-        out["sota_warnings"] = warnings
+        out["aquaforge_warnings"] = warnings
         return out
 
     ar = pred.predict_at_candidate(tci_path, cx, cy)
     if ar is None:
         warnings.append("aquaforge_empty_chip")
         out["aquaforge_model_ready"] = True
-        out["sota_warnings"] = warnings
+        out["aquaforge_warnings"] = warnings
         return out
 
-    out["yolo_confidence"] = float(ar.confidence)
+    out["aquaforge_confidence"] = float(ar.confidence)
     out["aquaforge_heading_direct_deg"] = ar.heading_direct_deg
 
     ic0 = int(ar.chip_col_off)
@@ -106,26 +100,26 @@ def run_aquaforge_spot_inference(
 
     poly_crop = polygon_fullres_to_crop(ar.polygon_fullres, ic0, ir0)
     if poly_crop:
-        out["yolo_polygon_crop"] = [[float(x), float(y)] for x, y in poly_crop]
+        out["aquaforge_hull_polygon_crop"] = [[float(x), float(y)] for x, y in poly_crop]
     if ar.polygon_fullres:
-        out["yolo_polygon_fullres"] = [
+        out["aquaforge_hull_polygon_fullres"] = [
             [float(x), float(y)] for x, y in ar.polygon_fullres
         ]
         dims = mask_oriented_dimensions_m(ar.polygon_fullres, tci_path)
         if dims is not None:
             lm, wm, ar_ = dims
-            out["yolo_length_m"] = float(lm)
-            out["yolo_width_m"] = float(wm)
-            out["yolo_aspect"] = float(ar_)
+            out["aquaforge_length_m"] = float(lm)
+            out["aquaforge_width_m"] = float(wm)
+            out["aquaforge_aspect_ratio"] = float(ar_)
 
     kp = _kp_result_from_aquaforge(ar)
-    out["keypoints_json"] = keypoints_to_jsonable(kp)
+    out["aquaforge_keypoints_json"] = keypoints_to_jsonable(kp)
     if ar.landmarks_fullres and len(ar.landmarks_fullres) > 0:
-        out["landmarks_xy_fullres"] = [
+        out["aquaforge_landmarks_xy_fullres"] = [
             [float(x), float(y), float(c)] for x, y, c in ar.landmarks_fullres
         ]
     if kp is not None and kp.xy_fullres:
-        out["keypoints_xy_conf_crop"] = [
+        out["aquaforge_keypoints_xy_conf_crop"] = [
             [
                 float(x) - float(ic0),
                 float(y) - float(ir0),
@@ -133,7 +127,7 @@ def run_aquaforge_spot_inference(
             ]
             for i, (x, y) in enumerate(kp.xy_fullres)
         ]
-        out["keypoints_crop"] = [
+        out["aquaforge_keypoints_crop"] = [
             [float(x) - float(ic0), float(y) - float(ir0)] for x, y in kp.xy_fullres
         ]
 
@@ -143,9 +137,9 @@ def run_aquaforge_spot_inference(
         bow, stern = kp.bow_stern(0, 1)
         bow_c, stern_c = kp.bow_stern_confidences(0, 1)
         if bow_c is not None:
-            out["keypoint_bow_confidence"] = float(bow_c)
+            out["aquaforge_landmark_bow_confidence"] = float(bow_c)
         if stern_c is not None:
-            out["keypoint_stern_confidence"] = float(stern_c)
+            out["aquaforge_landmark_stern_confidence"] = float(stern_c)
         mbs = 0.2
         if (
             bow is not None
@@ -157,12 +151,12 @@ def run_aquaforge_spot_inference(
         ):
             try:
                 h_kp = heading_deg_bow_to_stern(bow, stern, tci_path)
-                out["heading_keypoint_deg"] = float(h_kp)
+                out["aquaforge_heading_keypoint_deg"] = float(h_kp)
             except Exception:
                 h_kp = None
             kp_trust = float(max(0.0, min(1.0, min(bow_c, stern_c))))
-            out["keypoint_heading_trust"] = kp_trust
-            out["bow_stern_segment_crop"] = [
+            out["aquaforge_landmark_heading_trust"] = kp_trust
+            out["aquaforge_bow_stern_segment_crop"] = [
                 [float(bow[0]) - float(ic0), float(bow[1]) - float(ir0)],
                 [float(stern[0]) - float(ic0), float(stern[1]) - float(ir0)],
             ]
@@ -177,8 +171,8 @@ def run_aquaforge_spot_inference(
     elif h_kp is not None:
         fused = float(h_kp)
         src = "aquaforge_landmarks"
-    out["heading_fused_deg"] = fused
-    out["heading_fusion_source"] = src
+    out["aquaforge_heading_fused_deg"] = fused
+    out["aquaforge_heading_fusion_source"] = src
 
     if ar.wake_dxdy is not None:
         dx, dy = ar.wake_dxdy
@@ -189,18 +183,18 @@ def run_aquaforge_spot_inference(
         scale = float(max(ar.chip_w, ar.chip_h)) * 0.35
         x2 = cx_full + dx * scale
         y2 = cy_full + dy * scale
-        out["wake_segment_fullres"] = [
+        out["aquaforge_wake_segment_fullres"] = [
             [float(cx_full), float(cy_full)],
             [float(x2), float(y2)],
         ]
-        out["wake_segment_crop"] = [
+        out["aquaforge_wake_segment_crop"] = [
             [cx_full - float(ic0), cy_full - float(ir0)],
             [x2 - float(ic0), y2 - float(ir0)],
         ]
-        out["heading_wake_deg"] = float(aux_deg)
-        out["heading_wake_combined_confidence"] = 0.35
-        out["heading_wake_combine_source"] = "aquaforge_wake_aux"
+        out["aquaforge_heading_wake_deg"] = float(aux_deg)
+        out["aquaforge_wake_heading_confidence"] = 0.35
+        out["aquaforge_wake_combine_source"] = "aquaforge_wake_aux"
 
     out["aquaforge_model_ready"] = True
-    out["sota_warnings"] = warnings
+    out["aquaforge_warnings"] = warnings
     return out

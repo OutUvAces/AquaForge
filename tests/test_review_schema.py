@@ -47,31 +47,31 @@ class TestReviewSchema(unittest.TestCase):
     def test_enrich_spot_audit_fields(self) -> None:
         e = enrich_extra_with_predictions(
             {},
-            yolo_confidence=0.88,
-            yolo_length_m=120.0,
-            yolo_width_m=30.0,
-            heading_fused_deg=45.0,
-            heading_fusion_source="fused_keypoint_wake",
-            detector_snapshot="aquaforge",
+            aquaforge_confidence=0.88,
+            aquaforge_length_m=120.0,
+            aquaforge_width_m=30.0,
+            aquaforge_heading_fused_deg=45.0,
+            aquaforge_heading_fusion_source="fused_keypoint_wake",
+            aquaforge_detector_snapshot="aquaforge",
         )
-        self.assertAlmostEqual(e["pred_yolo_confidence"], 0.88)
-        self.assertAlmostEqual(e["pred_yolo_length_m"], 120.0)
-        self.assertAlmostEqual(e["pred_heading_fused_deg"], 45.0)
+        self.assertAlmostEqual(e["pred_aquaforge_confidence"], 0.88)
+        self.assertAlmostEqual(e["pred_aquaforge_length_m"], 120.0)
+        self.assertAlmostEqual(e["pred_aquaforge_heading_fused_deg"], 45.0)
         self.assertEqual(e["aquaforge_detector_snapshot"], "aquaforge")
 
     def test_enrich_wake_kp_audit(self) -> None:
         e = enrich_extra_with_predictions(
             {},
-            heading_wake_heuristic_deg=11.0,
-            heading_wake_onnx_deg=22.0,
-            wake_combine_source="wake_onnx",
-            keypoint_bow_confidence=0.9,
-            keypoint_stern_confidence=0.85,
-            keypoint_heading_trust=0.85,
+            aquaforge_heading_wake_heuristic_deg=11.0,
+            aquaforge_heading_wake_model_deg=22.0,
+            aquaforge_wake_combine_source="wake_onnx",
+            aquaforge_landmark_bow_confidence=0.9,
+            aquaforge_landmark_stern_confidence=0.85,
+            aquaforge_landmark_heading_trust=0.85,
         )
-        self.assertAlmostEqual(e["pred_heading_wake_heuristic_deg"], 11.0)
-        self.assertAlmostEqual(e["pred_heading_wake_onnx_deg"], 22.0)
-        self.assertEqual(e["pred_wake_combine_source"], "wake_onnx")
+        self.assertAlmostEqual(e["pred_aquaforge_heading_wake_heuristic_deg"], 11.0)
+        self.assertAlmostEqual(e["pred_aquaforge_heading_wake_model_deg"], 22.0)
+        self.assertEqual(e["pred_aquaforge_wake_combine_source"], "wake_onnx")
 
     def test_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as td:

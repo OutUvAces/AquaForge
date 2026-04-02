@@ -739,11 +739,7 @@ def run_aquaforge_spot_decode(
     spot_row_off: int,
     scl_path: Path | None = None,
 ) -> dict[str, Any]:
-    """
-    Single-location full AquaForge decode for review UI and offline eval.
-
-    Replaces the removed ``detection_backend.run_spot_inference`` shim — sole spot path.
-    """
+    """Single-location full AquaForge decode for review UI and offline eval (delegates to integration)."""
     from aquaforge.unified.integration import run_aquaforge_spot_inference
 
     _ = scl_path

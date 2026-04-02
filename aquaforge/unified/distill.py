@@ -2,7 +2,7 @@
 AquaForge teacher signal + active-learning hooks (our pipeline — not vendor distillation).
 
 The **teacher** is the current AquaForge forward pass (``heading_fused_deg`` and fallbacks in the
-same ``sota`` dict shape as the review UI). We distill **heading** as normalised (sin, cos) targets
+same spot dict shape as the review UI). We distill **heading** as normalised (sin, cos) targets
 into AquaForge's own heading head.
 
 **Active learning**: priority scores come from review-UI ``extra`` fields (model uncertainty, small
@@ -32,11 +32,11 @@ def coastal_scene_hint(extra: dict[str, Any] | None) -> float:
 
 def small_vessel_length_hint(extra: dict[str, Any] | None) -> float:
     """
-    0–1 from ``pred_yolo_length_m`` when present (smaller hull proxy → higher).
+    0–1 from ``pred_aquaforge_length_m`` when present (smaller hull proxy → higher).
     Used alongside :func:`review_ui_active_learning_priority` for the training sampler.
     """
     ex = extra or {}
-    ln = ex.get("pred_yolo_length_m")
+    ln = ex.get("pred_aquaforge_length_m")
     try:
         if ln is None:
             return 0.0
@@ -68,13 +68,13 @@ def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
         u += 0.2
     if ex.get("manual_locator") is True:
         u += 0.12
-    tr = ex.get("pred_keypoint_heading_trust")
+    tr = ex.get("pred_aquaforge_landmark_heading_trust")
     try:
         if tr is not None and float(tr) < 0.38:
             u += 0.16
     except (TypeError, ValueError):
         pass
-    ln = ex.get("pred_yolo_length_m")
+    ln = ex.get("pred_aquaforge_length_m")
     try:
         if ln is not None and float(ln) < 62.0:
             u += 0.14
@@ -191,7 +191,7 @@ def review_ui_active_learning_priority(
     except (TypeError, ValueError):
         pass
 
-    ln = ex.get("pred_yolo_length_m")
+    ln = ex.get("pred_aquaforge_length_m")
     try:
         if ln is not None:
             lnv = float(ln)
@@ -204,7 +204,7 @@ def review_ui_active_learning_priority(
     except (TypeError, ValueError):
         pass
 
-    tr = ex.get("pred_keypoint_heading_trust")
+    tr = ex.get("pred_aquaforge_landmark_heading_trust")
     try:
         if tr is not None and float(tr) < 0.42:
             p += 0.55
@@ -236,7 +236,7 @@ def review_ui_active_learning_priority(
     return float(max(0.45, min(p, 5.0)))
 
 
-def teacher_sota_dict(
+def teacher_aquaforge_spot_dict(
     project_root: Path,
     tci_path: Path,
     cx: float,
@@ -261,13 +261,13 @@ def teacher_sota_dict(
     )
 
 
-def teacher_heading_sin_cos(sota: dict[str, Any]) -> tuple[np.ndarray, float] | None:
+def teacher_heading_sin_cos(spot: dict[str, Any]) -> tuple[np.ndarray, float] | None:
     """Prefer fused heading, then keypoint, then wake-derived — same preference order as our UI."""
-    h = sota.get("heading_fused_deg")
+    h = spot.get("aquaforge_heading_fused_deg")
     if h is None:
-        h = sota.get("heading_keypoint_deg")
+        h = spot.get("aquaforge_heading_keypoint_deg")
     if h is None:
-        h = sota.get("heading_wake_deg")
+        h = spot.get("aquaforge_heading_wake_deg")
     if h is None:
         return None
     try:
@@ -277,11 +277,11 @@ def teacher_heading_sin_cos(sota: dict[str, Any]) -> tuple[np.ndarray, float] | 
     return np.array([np.sin(rad), np.cos(rad)], dtype=np.float32), 1.0
 
 
-def teacher_wake_unit_vector(sota: dict[str, Any]) -> tuple[np.ndarray, float] | None:
+def teacher_wake_unit_vector(spot: dict[str, Any]) -> tuple[np.ndarray, float] | None:
     """Weak auxiliary target from fused heading when wake geometry is unavailable."""
-    h = sota.get("heading_fused_deg")
+    h = spot.get("aquaforge_heading_fused_deg")
     if h is None:
-        h = sota.get("heading_keypoint_deg")
+        h = spot.get("aquaforge_heading_keypoint_deg")
     if h is None:
         return None
     try:
@@ -329,7 +329,7 @@ def hydrate_teacher_signals(
                 setattr(s, "teacher_heading_sc", None)
                 setattr(s, "teacher_valid", 0.0)
                 continue
-            sota = teacher_sota_dict(
+            af_spot = teacher_aquaforge_spot_dict(
                 project_root,
                 Path(getattr(s, "tci_path")),
                 float(getattr(s, "cx")),
@@ -337,7 +337,7 @@ def hydrate_teacher_signals(
                 spot_col_off=int(c0),
                 spot_row_off=int(r0),
             )
-            th = teacher_heading_sin_cos(sota)
+            th = teacher_heading_sin_cos(af_spot)
             if th is None:
                 setattr(s, "teacher_heading_sc", None)
                 setattr(s, "teacher_valid", 0.0)

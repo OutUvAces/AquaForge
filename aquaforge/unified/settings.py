@@ -4,7 +4,7 @@ AquaForge inference settings only — YAML + ORT tuning. No separate ``detection
 Default file: ``<project_root>/data/config/detection.yaml`` (filename kept for existing installs).
 Override with ``AF_DETECTION_CONFIG`` or ``VD_DETECTION_CONFIG`` (absolute path).
 
-Unknown top-level YAML keys (historical backend / hybrid / gating) are ignored.
+Unknown top-level YAML keys are ignored.
 """
 
 from __future__ import annotations
@@ -65,8 +65,8 @@ class AquaForgeSettings:
     aquaforge: AquaForgeSection = field(default_factory=AquaForgeSection)
     onnx_runtime: OnnxRuntimeSection = field(default_factory=OnnxRuntimeSection)
     onnx_providers: list[str] | None = None
-    ui_require_checkbox_for_sota: bool = False
-    ui_lazy_sota_overlays: bool = False
+    ui_require_checkbox_for_aquaforge_overlays: bool = False
+    ui_lazy_aquaforge_overlays: bool = False
 
 
 def merged_onnx_providers(
@@ -205,6 +205,8 @@ def load_aquaforge_settings(project_root: Path) -> AquaForgeSettings:
             else None
         ),
         onnx_providers=global_onnx_prov,
-        ui_require_checkbox_for_sota=bool(data.get("ui_require_checkbox_for_sota", False)),
-        ui_lazy_sota_overlays=bool(data.get("ui_lazy_sota_overlays", False)),
+        ui_require_checkbox_for_aquaforge_overlays=bool(
+            data.get("ui_require_checkbox_for_aquaforge_overlays", False)
+        ),
+        ui_lazy_aquaforge_overlays=bool(data.get("ui_lazy_aquaforge_overlays", False)),
     )

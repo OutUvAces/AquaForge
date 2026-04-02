@@ -1,7 +1,7 @@
 """
 Review JSONL schema version and documented ``extra`` keys for model–human feedback loops.
 
-v1: legacy rows without ``schema_version``.
+v1: rows without ``schema_version``.
 v2: adds optional model prediction audit fields on save.
 Tile-level overview QA rows use ``record_type: "overview_grid_tile"`` and are not point-training samples.
 
@@ -34,22 +34,22 @@ EXTRA_PRED_MLP_PROBA = "pred_mlp_proba"
 EXTRA_PRED_COMBINED_PROBA = "pred_combined_proba"
 EXTRA_MODEL_RUN_ID = "model_run_id"
 
-# Optional spot-overlay audit fields (historical ``yolo_*`` JSONL key names — values are AquaForge outputs).
-EXTRA_PRED_YOLO_CONF = "pred_yolo_confidence"
-EXTRA_PRED_YOLO_LENGTH_M = "pred_yolo_length_m"
-EXTRA_PRED_YOLO_WIDTH_M = "pred_yolo_width_m"
-EXTRA_PRED_YOLO_ASPECT = "pred_yolo_aspect"
-EXTRA_PRED_HEADING_KP_DEG = "pred_heading_keypoint_deg"
-EXTRA_PRED_HEADING_WAKE_DEG = "pred_heading_wake_deg"
-EXTRA_PRED_HEADING_FUSED_DEG = "pred_heading_fused_deg"
-EXTRA_PRED_HEADING_FUSION_SOURCE = "pred_heading_fusion_source"
+# AquaForge spot outputs copied into ``extra`` on save (audit / active learning).
+EXTRA_PRED_AQUAFORGE_CONFIDENCE = "pred_aquaforge_confidence"
+EXTRA_PRED_AQUAFORGE_LENGTH_M = "pred_aquaforge_length_m"
+EXTRA_PRED_AQUAFORGE_WIDTH_M = "pred_aquaforge_width_m"
+EXTRA_PRED_AQUAFORGE_ASPECT_RATIO = "pred_aquaforge_aspect_ratio"
+EXTRA_PRED_AQUAFORGE_HEADING_KEYPOINT_DEG = "pred_aquaforge_heading_keypoint_deg"
+EXTRA_PRED_AQUAFORGE_HEADING_WAKE_DEG = "pred_aquaforge_heading_wake_deg"
+EXTRA_PRED_AQUAFORGE_HEADING_FUSED_DEG = "pred_aquaforge_heading_fused_deg"
+EXTRA_PRED_AQUAFORGE_HEADING_FUSION_SOURCE = "pred_aquaforge_heading_fusion_source"
 EXTRA_AF_DETECTOR_SNAPSHOT = "aquaforge_detector_snapshot"
-EXTRA_PRED_HEADING_WAKE_HEURISTIC_DEG = "pred_heading_wake_heuristic_deg"
-EXTRA_PRED_HEADING_WAKE_ONNX_DEG = "pred_heading_wake_onnx_deg"
-EXTRA_PRED_WAKE_COMBINE_SOURCE = "pred_wake_combine_source"
-EXTRA_PRED_KP_BOW_CONF = "pred_keypoint_bow_confidence"
-EXTRA_PRED_KP_STERN_CONF = "pred_keypoint_stern_confidence"
-EXTRA_PRED_KP_HEADING_TRUST = "pred_keypoint_heading_trust"
+EXTRA_PRED_AQUAFORGE_HEADING_WAKE_HEURISTIC_DEG = "pred_aquaforge_heading_wake_heuristic_deg"
+EXTRA_PRED_AQUAFORGE_HEADING_WAKE_MODEL_DEG = "pred_aquaforge_heading_wake_model_deg"
+EXTRA_PRED_AQUAFORGE_WAKE_COMBINE_SOURCE = "pred_aquaforge_wake_combine_source"
+EXTRA_PRED_AQUAFORGE_LANDMARK_BOW_CONF = "pred_aquaforge_landmark_bow_confidence"
+EXTRA_PRED_AQUAFORGE_LANDMARK_STERN_CONF = "pred_aquaforge_landmark_stern_confidence"
+EXTRA_PRED_AQUAFORGE_LANDMARK_HEADING_TRUST = "pred_aquaforge_landmark_heading_trust"
 
 # Optional manual boost for AquaForge training sampler (see aquaforge.unified.distill).
 EXTRA_AF_TRAINING_PRIORITY = "af_training_priority"
@@ -94,21 +94,21 @@ def enrich_extra_with_predictions(
     mlp_proba: float | None = None,
     combined_proba: float | None = None,
     model_run_id: str | None = None,
-    yolo_confidence: float | None = None,
-    yolo_length_m: float | None = None,
-    yolo_width_m: float | None = None,
-    yolo_aspect: float | None = None,
-    heading_keypoint_deg: float | None = None,
-    heading_wake_deg: float | None = None,
-    heading_fused_deg: float | None = None,
-    heading_fusion_source: str | None = None,
-    detector_snapshot: str | None = None,
-    heading_wake_heuristic_deg: float | None = None,
-    heading_wake_onnx_deg: float | None = None,
-    wake_combine_source: str | None = None,
-    keypoint_bow_confidence: float | None = None,
-    keypoint_stern_confidence: float | None = None,
-    keypoint_heading_trust: float | None = None,
+    aquaforge_confidence: float | None = None,
+    aquaforge_length_m: float | None = None,
+    aquaforge_width_m: float | None = None,
+    aquaforge_aspect_ratio: float | None = None,
+    aquaforge_heading_keypoint_deg: float | None = None,
+    aquaforge_heading_wake_deg: float | None = None,
+    aquaforge_heading_fused_deg: float | None = None,
+    aquaforge_heading_fusion_source: str | None = None,
+    aquaforge_detector_snapshot: str | None = None,
+    aquaforge_heading_wake_heuristic_deg: float | None = None,
+    aquaforge_heading_wake_model_deg: float | None = None,
+    aquaforge_wake_combine_source: str | None = None,
+    aquaforge_landmark_bow_confidence: float | None = None,
+    aquaforge_landmark_stern_confidence: float | None = None,
+    aquaforge_landmark_heading_trust: float | None = None,
 ) -> dict[str, Any]:
     """Merge model scores into ``extra`` for training analysis (what the UI believed vs label)."""
     out = dict(extra or {})
@@ -120,36 +120,38 @@ def enrich_extra_with_predictions(
         out[EXTRA_PRED_COMBINED_PROBA] = float(combined_proba)
     if model_run_id:
         out[EXTRA_MODEL_RUN_ID] = str(model_run_id)
-    if yolo_confidence is not None:
-        out[EXTRA_PRED_YOLO_CONF] = float(yolo_confidence)
-    if yolo_length_m is not None:
-        out[EXTRA_PRED_YOLO_LENGTH_M] = float(yolo_length_m)
-    if yolo_width_m is not None:
-        out[EXTRA_PRED_YOLO_WIDTH_M] = float(yolo_width_m)
-    if yolo_aspect is not None:
-        out[EXTRA_PRED_YOLO_ASPECT] = float(yolo_aspect)
-    if heading_keypoint_deg is not None:
-        out[EXTRA_PRED_HEADING_KP_DEG] = float(heading_keypoint_deg)
-    if heading_wake_deg is not None:
-        out[EXTRA_PRED_HEADING_WAKE_DEG] = float(heading_wake_deg)
-    if heading_fused_deg is not None:
-        out[EXTRA_PRED_HEADING_FUSED_DEG] = float(heading_fused_deg)
-    if heading_fusion_source:
-        out[EXTRA_PRED_HEADING_FUSION_SOURCE] = str(heading_fusion_source)
-    if detector_snapshot:
-        out[EXTRA_AF_DETECTOR_SNAPSHOT] = str(detector_snapshot)
-    if heading_wake_heuristic_deg is not None:
-        out[EXTRA_PRED_HEADING_WAKE_HEURISTIC_DEG] = float(heading_wake_heuristic_deg)
-    if heading_wake_onnx_deg is not None:
-        out[EXTRA_PRED_HEADING_WAKE_ONNX_DEG] = float(heading_wake_onnx_deg)
-    if wake_combine_source:
-        out[EXTRA_PRED_WAKE_COMBINE_SOURCE] = str(wake_combine_source)
-    if keypoint_bow_confidence is not None:
-        out[EXTRA_PRED_KP_BOW_CONF] = float(keypoint_bow_confidence)
-    if keypoint_stern_confidence is not None:
-        out[EXTRA_PRED_KP_STERN_CONF] = float(keypoint_stern_confidence)
-    if keypoint_heading_trust is not None:
-        out[EXTRA_PRED_KP_HEADING_TRUST] = float(keypoint_heading_trust)
+    if aquaforge_confidence is not None:
+        out[EXTRA_PRED_AQUAFORGE_CONFIDENCE] = float(aquaforge_confidence)
+    if aquaforge_length_m is not None:
+        out[EXTRA_PRED_AQUAFORGE_LENGTH_M] = float(aquaforge_length_m)
+    if aquaforge_width_m is not None:
+        out[EXTRA_PRED_AQUAFORGE_WIDTH_M] = float(aquaforge_width_m)
+    if aquaforge_aspect_ratio is not None:
+        out[EXTRA_PRED_AQUAFORGE_ASPECT_RATIO] = float(aquaforge_aspect_ratio)
+    if aquaforge_heading_keypoint_deg is not None:
+        out[EXTRA_PRED_AQUAFORGE_HEADING_KEYPOINT_DEG] = float(aquaforge_heading_keypoint_deg)
+    if aquaforge_heading_wake_deg is not None:
+        out[EXTRA_PRED_AQUAFORGE_HEADING_WAKE_DEG] = float(aquaforge_heading_wake_deg)
+    if aquaforge_heading_fused_deg is not None:
+        out[EXTRA_PRED_AQUAFORGE_HEADING_FUSED_DEG] = float(aquaforge_heading_fused_deg)
+    if aquaforge_heading_fusion_source:
+        out[EXTRA_PRED_AQUAFORGE_HEADING_FUSION_SOURCE] = str(aquaforge_heading_fusion_source)
+    if aquaforge_detector_snapshot:
+        out[EXTRA_AF_DETECTOR_SNAPSHOT] = str(aquaforge_detector_snapshot)
+    if aquaforge_heading_wake_heuristic_deg is not None:
+        out[EXTRA_PRED_AQUAFORGE_HEADING_WAKE_HEURISTIC_DEG] = float(
+            aquaforge_heading_wake_heuristic_deg
+        )
+    if aquaforge_heading_wake_model_deg is not None:
+        out[EXTRA_PRED_AQUAFORGE_HEADING_WAKE_MODEL_DEG] = float(aquaforge_heading_wake_model_deg)
+    if aquaforge_wake_combine_source:
+        out[EXTRA_PRED_AQUAFORGE_WAKE_COMBINE_SOURCE] = str(aquaforge_wake_combine_source)
+    if aquaforge_landmark_bow_confidence is not None:
+        out[EXTRA_PRED_AQUAFORGE_LANDMARK_BOW_CONF] = float(aquaforge_landmark_bow_confidence)
+    if aquaforge_landmark_stern_confidence is not None:
+        out[EXTRA_PRED_AQUAFORGE_LANDMARK_STERN_CONF] = float(aquaforge_landmark_stern_confidence)
+    if aquaforge_landmark_heading_trust is not None:
+        out[EXTRA_PRED_AQUAFORGE_LANDMARK_HEADING_TRUST] = float(aquaforge_landmark_heading_trust)
     return out
 
 
