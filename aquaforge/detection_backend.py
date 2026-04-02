@@ -1,8 +1,8 @@
 """
-AquaForge-only detection: full-scene tiled candidate list and per-spot overlay diagnostics.
+Public detection API — **legacy paths removed**. All scene detection is tiled AquaForge only.
 
-No legacy candidate finders, ocean-mask pre-filters, or alternate backends — tiled unified
-inference is the only path that produces the review queue.
+Delegates to :mod:`aquaforge.unified.inference` (full-scene tiles + NMS) and
+:mod:`aquaforge.unified.integration` (per-spot decode). No bright-spot, ocean mask, hybrid, or gating.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from aquaforge.detection_config import DetectionSettings
+from aquaforge.unified.inference import run_aquaforge_tiled_scene_triples
 
 
 def aquaforge_tiled_scene_triples(
@@ -18,38 +19,8 @@ def aquaforge_tiled_scene_triples(
     tci_path: Path,
     settings: DetectionSettings,
 ) -> tuple[list[tuple[float, float, float]], dict[str, Any]]:
-    """
-    End-to-end AquaForge on the full raster: overlapping tiles → NMS → ``(cx, cy, conf)`` list.
-
-    ``cx, cy`` are hull centroids in full-image pixels; ``conf`` is the classifier score after NMS.
-    """
-    from aquaforge.model_manager import get_cached_aquaforge_predictor
-    from aquaforge.raster_rgb import raster_dimensions
-
-    meta: dict[str, Any] = {
-        # End-to-end tiled AquaForge produces the review-queue detections (not a separate candidate stage).
-        "detection_source": "aquaforge_tiled",
-        "downsample_factor": 1,
-        "mask": "full_scene_tiled",
-        "scl_path": None,
-        "ds_shape": None,
-        "water_fraction": None,
-        "scl_warped_to_tci_grid": False,
-    }
-    pred = get_cached_aquaforge_predictor(project_root, settings)
-    if pred is None:
-        meta["error"] = "aquaforge_weights_missing"
-        meta["full_shape"] = None
-        return [], meta
-    try:
-        w, h = raster_dimensions(tci_path)
-        meta["full_shape"] = (h, w)
-        triples = pred.run_tiled_scene_candidates(tci_path)
-        return triples, meta
-    except Exception as e:
-        meta["error"] = str(e)
-        meta["full_shape"] = None
-        return [], meta
+    """End-to-end tiled AquaForge on the full raster → ``(cx, cy, conf)`` after NMS."""
+    return run_aquaforge_tiled_scene_triples(project_root, tci_path, settings)
 
 
 def run_spot_inference(
@@ -63,7 +34,7 @@ def run_spot_inference(
     spot_row_off: int,
     scl_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Full AquaForge chip decode for the review UI (no probability gating or alternate paths)."""
+    """Full AquaForge chip decode for the review UI (single inference path, no gating)."""
     from aquaforge.unified.integration import run_aquaforge_spot_inference
 
     _ = scl_path

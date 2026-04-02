@@ -1,8 +1,8 @@
 """
-Multi-task sklearn heads for manually defined review ``extra`` fields (same chip/LR features as ranking).
+Multi-task sklearn heads for manually defined review ``extra`` fields (spectral + chip features).
 
 Trains separate estimators per target where enough labeled rows exist; saves one joblib bundle for inference.
-Does not replace vessel ranking LR/MLP — complements them after retrain.
+Does not replace AquaForge detection — auxiliary heads only.
 
 **Heading regression** (``heading_deg_from_north``): trained from saved labels; at inference it can
 break a ±180° tie for **keel-only** headings (see :mod:`aquaforge.vessel_heading`) when bow/stern
@@ -21,10 +21,7 @@ import numpy as np
 
 from aquaforge.labels import TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY
 from aquaforge.vessel_markers import MARKER_ROLES
-from aquaforge.ranking_label_agreement import (
-    RankingLabeledRow,
-    collect_ranking_labeled_rows,
-)
+from aquaforge.unified.labeled_rows import RankingLabeledRow, collect_ranking_labeled_rows
 from aquaforge.training_data import (
     RANKING_CHIP_MODEL_SIDE as DEFAULT_MODEL_SIDE,
     RANKING_CHIP_SRC_HALF as DEFAULT_SRC_HALF,

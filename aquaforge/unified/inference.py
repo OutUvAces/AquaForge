@@ -1,7 +1,8 @@
 """
 AquaForge inference — **only** path for vessel geometry in this app.
 
-* **Full scene:** :meth:`AquaForgePredictor.run_tiled_scene_candidates` (overlap grid, batching, NMS).
+* **Full scene:** :func:`run_aquaforge_tiled_scene_triples` and
+  :meth:`AquaForgePredictor.run_tiled_scene_candidates` (overlap grid, batching, NMS on decoded masks).
 * **Single location:** :meth:`AquaForgePredictor.predict_at_candidate` for review chips.
 
 PyTorch ``.pt`` or multi-output ONNX via ``aquaforge.onnx_session_cache`` (INT8 optional).
@@ -671,6 +672,44 @@ def build_aquaforge_predictor(
 
         logging.getLogger(__name__).warning("AquaForge checkpoint load failed: %s", e)
         return None
+
+
+def run_aquaforge_tiled_scene_triples(
+    project_root: Path,
+    tci_path: Path,
+    settings: DetectionSettings,
+) -> tuple[list[tuple[float, float, float]], dict[str, Any]]:
+    """
+    Sole full-scene vessel detection: overlapping tiles, batched forward, NMS on decoded masks.
+
+    No legacy candidate finders or alternate backends — AquaForge only.
+    """
+    from aquaforge.model_manager import get_cached_aquaforge_predictor
+    from aquaforge.raster_rgb import raster_dimensions
+
+    meta: dict[str, Any] = {
+        "detection_source": "aquaforge_tiled",
+        "downsample_factor": 1,
+        "mask": "full_scene_tiled",
+        "scl_path": None,
+        "ds_shape": None,
+        "water_fraction": None,
+        "scl_warped_to_tci_grid": False,
+    }
+    pred = get_cached_aquaforge_predictor(project_root, settings)
+    if pred is None:
+        meta["error"] = "aquaforge_weights_missing"
+        meta["full_shape"] = None
+        return [], meta
+    try:
+        w, h = raster_dimensions(tci_path)
+        meta["full_shape"] = (h, w)
+        triples = pred.run_tiled_scene_candidates(tci_path)
+        return triples, meta
+    except Exception as e:
+        meta["error"] = str(e)
+        meta["full_shape"] = None
+        return [], meta
 
 
 def aquaforge_confidence_only(

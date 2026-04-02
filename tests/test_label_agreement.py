@@ -1,4 +1,4 @@
-"""Binary label agreement: AquaForge (in_sample) vs spectral LR (cv)."""
+"""AquaForge vs binary labels; labeled row collection (no legacy CV / spectral ranking path)."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from aquaforge.ranking_label_agreement import (
+from aquaforge.unified.label_agreement import (
     _aggregate_metrics,
-    _choose_stratified_k,
+    evaluate_aquaforge_vs_binary_labels,
+)
+from aquaforge.unified.labeled_rows import (
     collect_ranking_labeled_points,
     collect_ranking_labeled_rows,
-    evaluate_ranking_binary_agreement,
 )
 
 
@@ -35,23 +36,9 @@ class TestAggregateMetrics(unittest.TestCase):
         self.assertEqual(m["n_scored"], 0)
 
 
-class TestChooseStratifiedK(unittest.TestCase):
-    def test_finds_k(self) -> None:
-        y = np.array([1] * 10 + [0] * 10, dtype=np.int64)
-        got = _choose_stratified_k(y, max_splits=5, min_train=8)
-        self.assertIsNotNone(got)
-        k, _skf = got
-        self.assertGreaterEqual(k, 2)
-
-    def test_none_when_too_small(self) -> None:
-        y = np.array([1, 1, 0, 0], dtype=np.int64)
-        got = _choose_stratified_k(y, max_splits=5, min_train=8)
-        self.assertIsNone(got)
-
-
 class TestCollectPoints(unittest.TestCase):
-    @patch("aquaforge.ranking_label_agreement.read_chip_square_rgb")
-    @patch("aquaforge.ranking_label_agreement.extract_crop_features")
+    @patch("aquaforge.unified.labeled_rows.read_chip_square_rgb")
+    @patch("aquaforge.unified.labeled_rows.extract_crop_features")
     def test_two_rows(self, mock_ex: object, mock_rgb: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         mock_rgb.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
@@ -86,8 +73,8 @@ class TestCollectPoints(unittest.TestCase):
             self.assertEqual(pts[0].y, 1)
             self.assertEqual(pts[1].y, 0)
 
-    @patch("aquaforge.ranking_label_agreement.read_chip_square_rgb")
-    @patch("aquaforge.ranking_label_agreement.extract_crop_features")
+    @patch("aquaforge.unified.labeled_rows.read_chip_square_rgb")
+    @patch("aquaforge.unified.labeled_rows.extract_crop_features")
     def test_rows_keep_extra(self, mock_ex: object, mock_rgb: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         mock_rgb.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
@@ -115,10 +102,10 @@ class TestCollectPoints(unittest.TestCase):
 
 
 class TestEvaluateInSample(unittest.TestCase):
-    @patch("aquaforge.unified.inference.aquaforge_confidence_only")
-    @patch("aquaforge.model_manager.get_cached_aquaforge_predictor")
-    @patch("aquaforge.ranking_label_agreement.read_chip_square_rgb")
-    @patch("aquaforge.ranking_label_agreement.extract_crop_features")
+    @patch("aquaforge.unified.label_agreement.aquaforge_confidence_only")
+    @patch("aquaforge.unified.label_agreement.get_cached_aquaforge_predictor")
+    @patch("aquaforge.unified.labeled_rows.read_chip_square_rgb")
+    @patch("aquaforge.unified.labeled_rows.extract_crop_features")
     def test_high_proba_matches_vessel(
         self,
         mock_ex: object,
@@ -151,12 +138,9 @@ class TestEvaluateInSample(unittest.TestCase):
                     )
                     + "\n"
                 )
-            out = evaluate_ranking_binary_agreement(
+            out = evaluate_aquaforge_vs_binary_labels(
                 jsonl,
                 project_root=root,
-                lr_model_path=None,
-                chip_mlp_path=None,
-                mode="in_sample",
             )
             self.assertEqual(out.get("error"), None)
             m = out["metrics"]

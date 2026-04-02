@@ -1,10 +1,11 @@
 """
-YAML-driven settings for **AquaForge** (the only detector) and ONNX runtime tuning.
+YAML-driven settings for **AquaForge** tiled detection and ONNX runtime tuning only.
 
 Default path: ``<project_root>/data/config/detection.yaml``.
 Override with env ``AF_DETECTION_CONFIG`` or ``VD_DETECTION_CONFIG`` (absolute path).
 
-Unknown top-level keys (e.g. historical ``backend``, ``yolo``) are ignored when loading YAML.
+Unknown top-level keys (historical ``backend``, ``yolo``, hybrid/gate fields, etc.) are ignored.
+External pose ONNX is configured via :mod:`aquaforge.keypoints_config` in tooling scripts, not here.
 """
 
 from __future__ import annotations
@@ -14,12 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from aquaforge.keypoints_config import KeypointsSection
-
 __all__ = [
     "AquaForgeSection",
     "DetectionSettings",
-    "KeypointsSection",
     "OnnxRuntimeSection",
     "default_detection_yaml_path",
     "example_detection_yaml_path",

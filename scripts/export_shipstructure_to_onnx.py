@@ -3,7 +3,7 @@
 ShipStructure / MMPose → ONNX helpers for AquaForge keypoint inference.
 
 This script does **not** vendor the ShipStructure repo. It provides:
-  * ``instructions`` — how to export and wire ONNX for :mod:`aquaforge.keypoint_onnx`
+  * ``instructions`` — how to export and wire ONNX for :mod:`aquaforge.unified.external_pose_onnx`
   * ``print-snippet`` — a **template** ``torch.onnx.export`` block you paste into your training env
   * ``validate-chip`` — run ONNX on one TCI chip and print joints + bow/stern heading (needs onnxruntime)
 
@@ -15,7 +15,7 @@ output order (0-based).
 
 References:
   * https://github.com/vsislab/ShipStructure
-  * ONNX I/O contract: :func:`aquaforge.keypoint_onnx.parse_pose_onnx_output`
+  * ONNX I/O contract: :func:`aquaforge.unified.external_pose_onnx.parse_pose_onnx_output`
 
 Examples:
   py -3 scripts/export_shipstructure_to_onnx.py instructions
@@ -119,8 +119,8 @@ def cmd_validate_chip(args: argparse.Namespace) -> int:
         print(f"Missing TCI: {tci_p}", file=sys.stderr)
         return 1
 
-    from aquaforge.detection_config import KeypointsSection
-    from aquaforge.keypoint_onnx import (
+    from aquaforge.keypoints_config import KeypointsSection
+    from aquaforge.unified.external_pose_onnx import (
         heading_deg_bow_to_stern,
         try_predict_keypoints_chip,
     )

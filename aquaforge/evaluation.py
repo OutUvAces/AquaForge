@@ -36,7 +36,7 @@ from aquaforge.labels import (
     paths_same_underlying_file,
     resolve_stored_asset_path,
 )
-from aquaforge.ranking_label_agreement import collect_ranking_labeled_rows
+from aquaforge.unified.labeled_rows import collect_ranking_labeled_rows
 from aquaforge.review_overlay import read_locator_and_spot_rgb_matching_stretch
 
 
@@ -181,7 +181,7 @@ def _heading_from_bow_stern_markers(
     cy: float,
     chip_half: int,
 ) -> float | None:
-    from aquaforge.keypoint_onnx import heading_deg_bow_to_stern
+    from aquaforge.unified.external_pose_onnx import heading_deg_bow_to_stern
     from aquaforge.vessel_markers import markers_by_role, markers_for_hull
 
     sub = markers_for_hull(dimension_markers, 1)
@@ -495,8 +495,6 @@ def run_tiled_recall_vs_ranking_labels(
     precision–recall (negatives are not scored per detection).
     """
     from collections import defaultdict
-
-    from aquaforge.ranking_label_agreement import collect_ranking_labeled_rows
 
     rows, n_skip = collect_ranking_labeled_rows(jsonl_path, project_root)
     by_tci: dict[Path, list[tuple[float, float, int]]] = defaultdict(list)

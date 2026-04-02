@@ -18,4 +18,4 @@ COPY scripts ./scripts
 
 ENV PYTHONPATH=/app
 
-CMD ["python", "scripts/train_all_models.py"]
+CMD ["python", "scripts/train_aquaforge.py", "--epochs", "4", "--batch-size", "2"]

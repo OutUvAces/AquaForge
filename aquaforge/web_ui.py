@@ -128,7 +128,7 @@ from aquaforge.scene_overview_100 import (
     shade_overview_grid_cells,
 )
 from aquaforge.s2_masks import find_scl_for_tci
-from aquaforge.ranking_label_agreement import evaluate_ranking_binary_agreement
+from aquaforge.unified.label_agreement import evaluate_aquaforge_vs_binary_labels
 from aquaforge.review_multitask_train import (
     default_multitask_path,
     load_review_multitask_bundle,
@@ -546,10 +546,9 @@ def _ranking_models_expander(labels_path: Path) -> None:
             multitask_report: dict[str, Any] | None = None
             with st.status("Training…", expanded=True) as status:
                 try:
-                    after_ag = evaluate_ranking_binary_agreement(
+                    after_ag = evaluate_aquaforge_vs_binary_labels(
                         labels_path,
                         project_root=ROOT,
-                        mode="in_sample",
                     )
                     for _ln in _af_agreement_summary_md(after_ag).split("\n"):
                         if _ln.strip():

@@ -1,7 +1,7 @@
 """
 ShipStructure / pose ONNX options (standalone — not part of :class:`DetectionSettings`).
 
-Used by :mod:`aquaforge.keypoint_onnx` and export/validation scripts.
+Used by :mod:`aquaforge.unified.external_pose_onnx` and export/validation scripts.
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
 - **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
 
-Core package: [`aquaforge/`](aquaforge/) — `detection_config.py`, `detection_backend.py`, `unified/inference.py`, `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, and packaged YAML under `aquaforge/config/`.
+Core package: [`aquaforge/`](aquaforge/) — `detection_config.py`, `detection_backend.py`, `unified/inference.py` (sole tiled scene path), `unified/external_pose_onnx.py` (optional third-party pose tooling only), `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, and packaged YAML under `aquaforge/config/`.
 
 ---
 
@@ -39,16 +39,15 @@ Optional **`onnx_runtime`** and **`ui_*`** flags adjust ORT threads and lazy ove
 
 ---
 
-## Training & baselines
+## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — CNN or YOLO backbone + unified heads; export with `scripts/export_aquaforge_onnx.py`.
-- **Spectral LR baseline (optional):** `py -3 scripts/train_all_models.py` — logistic regression on RGB patch stats (not used for detection or queue order).
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — CNN or YOLO backbone + unified heads; export with `scripts/export_aquaforge_onnx.py`. There is no separate ship-ranking or spectral baseline trainer in-repo; detection is AquaForge only.
 
 ---
 
 ## External pose ONNX (optional tooling)
 
-For validating a third-party pose ONNX on chips (not part of core detection), see `scripts/export_shipstructure_to_onnx.py` and [`aquaforge/keypoint_onnx.py`](aquaforge/keypoint_onnx.py).
+For validating a third-party pose ONNX on chips (not part of scene detection), see `scripts/export_shipstructure_to_onnx.py` and [`aquaforge/unified/external_pose_onnx.py`](aquaforge/unified/external_pose_onnx.py).
 
 ---
 
@@ -74,7 +73,7 @@ docker build -f docker/training/Dockerfile -t aquaforge-train .
 docker run --rm -v "%cd%/data:/app/data" aquaforge-train
 ```
 
-Default image command runs [`scripts/train_all_models.py`](scripts/train_all_models.py). Run the Streamlit UI on the host.
+Default image command runs a short [`scripts/train_aquaforge.py`](scripts/train_aquaforge.py) pass (`--epochs 4 --batch-size 2`). Override `CMD` for longer training. Run the Streamlit UI on the host.
 
 ---
 

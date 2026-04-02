@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 
-from aquaforge.keypoint_onnx import parse_pose_onnx_output
+from aquaforge.unified.external_pose_onnx import parse_pose_onnx_output
 
 
 class TestParsePoseOnnxOutput(unittest.TestCase):

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from aquaforge.ranking_label_agreement import RankingLabeledRow
+from aquaforge.unified.labeled_rows import RankingLabeledRow
 from aquaforge.review_multitask_train import (
     _binary_value,
     _float_value,

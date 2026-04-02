@@ -16,7 +16,7 @@ from typing import Any
 from aquaforge.unified.inference import AquaForgeSpotResult
 from aquaforge.model_manager import get_cached_aquaforge_predictor
 from aquaforge.detection_config import DetectionSettings
-from aquaforge.keypoint_onnx import KeypointResult, keypoints_to_jsonable
+from aquaforge.unified.external_pose_onnx import KeypointResult, keypoints_to_jsonable
 
 
 def _kp_result_from_aquaforge(ar: AquaForgeSpotResult) -> KeypointResult | None:
@@ -44,7 +44,7 @@ def run_aquaforge_spot_inference(
     # spot_col_off / spot_row_off kept for callers; crop geometry always uses the model chip
     # (ar.chip_col_off / ar.chip_row_off) so landmarks and mask align with inference.
     from aquaforge.mask_measurements import mask_oriented_dimensions_m
-    from aquaforge.keypoint_onnx import heading_deg_bow_to_stern
+    from aquaforge.unified.external_pose_onnx import heading_deg_bow_to_stern
     from aquaforge.chip_io import polygon_fullres_to_crop
 
     out: dict[str, Any] = {

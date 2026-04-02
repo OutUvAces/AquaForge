@@ -1,9 +1,8 @@
 """
 Optional **external** vessel keypoint ONNX (validation / tooling only).
 
-AquaForge is the sole detector; this module is **not** part of the main detection path.
-Export a pose checkpoint to ONNX (opset ≥ 11 recommended), set ``KeypointsSection.external_onnx_path``
-in scripts. Weights are not shipped in-repo.
+Lives under ``unified/`` with AquaForge; **not** part of tiled scene detection. Set
+``KeypointsSection.external_onnx_path`` in export/validation scripts. Weights are not shipped in-repo.
 
 Supported ``output_layout`` values:
 
@@ -24,10 +23,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+from aquaforge.chip_io import read_chip_bgr_centered
 from aquaforge.detection_config import OnnxRuntimeSection
 from aquaforge.keypoints_config import KeypointsSection
 from aquaforge.onnx_session_cache import get_ort_session
-from aquaforge.chip_io import read_chip_bgr_centered
 
 
 @dataclass
@@ -129,10 +128,8 @@ def parse_pose_onnx_output(
     if lay == "flat_xyc":
         return from_flat(a0)
 
-    # auto
     sa = a0.shape
     if a0.ndim == 3:
-        # (1, K, C)
         _, k, c = sa[0], sa[1], sa[2]
         if c == 3:
             return from_nk3(a0)
@@ -149,7 +146,6 @@ def parse_pose_onnx_output(
             return from_flat(a0)
         except ValueError:
             pass
-    # Second tensor: sometimes heatmaps — not supported in auto
     raise ValueError(
         f"Could not parse pose layout auto from shape {a0.shape}; "
         f"set keypoints.output_layout explicitly (nk2/nk3/flat_xyc)."
