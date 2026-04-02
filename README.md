@@ -46,9 +46,9 @@ Optional **`onnx_runtime`** and **`ui_*`** flags adjust ORT threads and lazy ove
 
 ---
 
-## ShipStructure ONNX (optional)
+## External pose ONNX (optional tooling)
 
-To bring an external pose ONNX into auxiliary tooling, see `scripts/export_shipstructure_to_onnx.py` and [`aquaforge/shipstructure_adapter.py`](aquaforge/shipstructure_adapter.py). This is separate from the main AquaForge detector path.
+For validating a third-party pose ONNX on chips (not part of core detection), see `scripts/export_shipstructure_to_onnx.py` and [`aquaforge/keypoint_onnx.py`](aquaforge/keypoint_onnx.py).
 
 ---
 

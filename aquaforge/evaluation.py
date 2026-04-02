@@ -25,7 +25,7 @@ from typing import Any, Iterator, Sequence
 
 from aquaforge.detection_backend import (
     aquaforge_tiled_scene_triples,
-    run_sota_spot_inference,
+    run_spot_inference,
 )
 from aquaforge.detection_config import (
     DetectionSettings,
@@ -181,7 +181,7 @@ def _heading_from_bow_stern_markers(
     cy: float,
     chip_half: int,
 ) -> float | None:
-    from aquaforge.shipstructure_adapter import heading_deg_bow_to_stern
+    from aquaforge.keypoint_onnx import heading_deg_bow_to_stern
     from aquaforge.vessel_markers import markers_by_role, markers_for_hull
 
     sub = markers_for_hull(dimension_markers, 1)
@@ -321,7 +321,7 @@ def spot_window_for_eval(
     cx: float,
     cy: float,
 ) -> tuple[int, int, Path | None]:
-    """Legacy window hint for :func:`run_sota_spot_inference`; AquaForge crop coords use the model chip."""
+    """Legacy window hint for spot eval layout; AquaForge crop coords use the model chip."""
     from aquaforge.raster_gsd import chip_pixels_for_ground_side_meters
 
     spot_px, _, _, _ = chip_pixels_for_ground_side_meters(
@@ -358,7 +358,7 @@ def rank_score_at_point(
     pred_af = get_cached_aquaforge_predictor(project_root, settings)
     py = float(aquaforge_confidence_only(pred_af, tci_path, cx, cy))
     return {
-        "hybrid_proba": None,
+        "vessel_gate_proba": None,
         "yolo_confidence": py,
         "rank_score": py,
     }
@@ -366,7 +366,7 @@ def rank_score_at_point(
 
 @dataclass
 class HeadingErrorBucket:
-    """Circular absolute errors (degrees) accumulated for one backend."""
+    """Circular absolute errors (degrees) for one AquaForge spot-evaluation pass."""
 
     wake_line: list[float] = field(default_factory=list)
     keypoint: list[float] = field(default_factory=list)
@@ -380,21 +380,20 @@ class EvalRunResult:
     n_labeled_points: int
     n_geometry_spots: int
     n_heading_gt: int
-    pearson_r_by_backend: dict[str, float | None]
+    pearson_r: float | None
     n_ranking_scored: int
-    n_scored_by_backend: dict[str, int]
-    heading_buckets: dict[str, HeadingErrorBucket]
-    rel_length_by_backend: dict[str, list[float]]
-    rel_width_by_backend: dict[str, list[float]]
-    mask_iou_by_backend: dict[str, list[float]]
+    heading_errors: HeadingErrorBucket
+    rel_length_errors: list[float]
+    rel_width_errors: list[float]
+    mask_ious: list[float]
     pct_keypoint_better_than_wake_line: float | None
     n_kp_vs_wake_pairs: int
     pct_fusion_better_than_wake_ambiguity: float | None
     n_fusion_vs_wake_pairs: int
     notes: list[str]
 
-    # Flat names kept for JSON/report consumers (AquaForge spot metrics).
-    mean_abs_heading_error_hybrid_wake: float | None = None
+    # Summary fields for tables / JSON (AquaForge spot metrics).
+    mean_abs_heading_error_wake_line: float | None = None
     mean_abs_heading_error_keypoint: float | None = None
     mean_abs_heading_error_fused: float | None = None
     median_abs_heading_error_keypoint: float | None = None
@@ -402,8 +401,7 @@ class EvalRunResult:
     mean_rel_width_error: float | None = None
     mean_mask_iou: float | None = None
     n_mask_iou: int = 0
-    corr_hybrid_vs_label: float | None = None
-    corr_rank_sota_vs_label: float | None = None
+    corr_rank_vs_label: float | None = None
     n_heading_eval: int = 0
     n_heading_wake_eval: int = 0
     n_dim_eval: int = 0
@@ -411,47 +409,47 @@ class EvalRunResult:
 
 def eval_result_to_jsonable(res: EvalRunResult) -> dict[str, Any]:
     """JSON-serializable dict (for ``--output-json``); omits long per-error lists."""
+    v = res.heading_errors
     hb = {
-        k: {
-            "wake_line_mae_deg": circular_mae_deg(v.wake_line),
-            "wake_line_n": len(v.wake_line),
-            "keypoint_mae_deg": circular_mae_deg(v.keypoint),
-            "keypoint_median_deg": circular_median_abs_error_deg(v.keypoint),
-            "keypoint_n": len(v.keypoint),
-            "fused_mae_deg": circular_mae_deg(v.fused),
-            "fused_n": len(v.fused),
-        }
-        for k, v in res.heading_buckets.items()
+        "wake_line_mae_deg": circular_mae_deg(v.wake_line),
+        "wake_line_n": len(v.wake_line),
+        "keypoint_mae_deg": circular_mae_deg(v.keypoint),
+        "keypoint_median_deg": circular_median_abs_error_deg(v.keypoint),
+        "keypoint_n": len(v.keypoint),
+        "fused_mae_deg": circular_mae_deg(v.fused),
+        "fused_n": len(v.fused),
     }
     return {
         "n_labeled_points": res.n_labeled_points,
         "n_geometry_spots": res.n_geometry_spots,
         "n_heading_gt": res.n_heading_gt,
-        "pearson_r_by_backend": dict(res.pearson_r_by_backend),
+        "pearson_r": res.pearson_r,
+        "detector": "aquaforge",
         "n_ranking_scored": res.n_ranking_scored,
-        "heading_bucket_summary": hb,
+        "heading_errors": hb,
         "mean_rel_length_error": res.mean_rel_length_error,
         "mean_rel_width_error": res.mean_rel_width_error,
-        "rel_length_by_backend": {
-            k: {"n": len(v), "mean": _mean_list(v)} for k, v in res.rel_length_by_backend.items()
+        "rel_length_errors": {
+            "n": len(res.rel_length_errors),
+            "mean": _mean_list(res.rel_length_errors),
         },
-        "rel_width_by_backend": {
-            k: {"n": len(v), "mean": _mean_list(v)} for k, v in res.rel_width_by_backend.items()
+        "rel_width_errors": {
+            "n": len(res.rel_width_errors),
+            "mean": _mean_list(res.rel_width_errors),
         },
-        "mask_iou_by_backend": {
-            k: {"n": len(v), "mean": _mean_list(v)} for k, v in res.mask_iou_by_backend.items()
+        "mask_ious": {
+            "n": len(res.mask_ious),
+            "mean": _mean_list(res.mask_ious),
         },
         "mean_mask_iou": res.mean_mask_iou,
         "n_mask_iou": res.n_mask_iou,
-        "n_scored_by_backend": dict(res.n_scored_by_backend),
         "pct_keypoint_better_than_wake_line": res.pct_keypoint_better_than_wake_line,
         "n_kp_vs_wake_pairs": res.n_kp_vs_wake_pairs,
         "pct_fusion_better_than_wake_ambiguity": res.pct_fusion_better_than_wake_ambiguity,
         "n_fusion_vs_wake_pairs": res.n_fusion_vs_wake_pairs,
         "notes": list(res.notes),
-        "legacy_compat": {
-            "corr_hybrid_vs_label": res.corr_hybrid_vs_label,
-            "corr_rank_sota_vs_label": res.corr_rank_sota_vs_label,
+        "summary": {
+            "corr_rank_vs_label": res.corr_rank_vs_label,
             "mean_abs_heading_error_keypoint": res.mean_abs_heading_error_keypoint,
             "mean_abs_heading_error_fused": res.mean_abs_heading_error_fused,
         },
@@ -579,8 +577,6 @@ def run_detection_evaluation(
             pearson_ys.append(float(row.y))
 
     pr_aq = _corrcoef_safe(pearson_rs, pearson_ys)
-    pearson_r: dict[str, float | None] = {"aquaforge": pr_aq}
-    n_scored_by_backend = {"aquaforge": len(pearson_rs)}
     n_rank = len(pearson_rs)
 
     geo = collect_vessel_geometry_ground_truth(
@@ -589,10 +585,10 @@ def run_detection_evaluation(
     if max_spots is not None:
         geo = geo[: max(0, int(max_spots))]
 
-    buckets = {"aquaforge": HeadingErrorBucket()}
-    rel_len_bb: dict[str, list[float]] = {"aquaforge": []}
-    rel_wid_bb: dict[str, list[float]] = {"aquaforge": []}
-    iou_bb: dict[str, list[float]] = {"aquaforge": []}
+    heading_bucket = HeadingErrorBucket()
+    rel_len_list: list[float] = []
+    rel_wid_list: list[float] = []
+    iou_list: list[float] = []
     kp_better = 0
     kp_pairs = 0
     fusion_better = 0
@@ -611,7 +607,7 @@ def run_detection_evaluation(
             g.dimension_markers, g.cx, g.cy, chip_half
         )
 
-        sota = run_sota_spot_inference(
+        sota = run_spot_inference(
             project_root,
             g.tci_path,
             g.cx,
@@ -621,19 +617,18 @@ def run_detection_evaluation(
             spot_row_off=int(sr0),
             scl_path=scl_path,
         )
-        bname = "aquaforge"
         if gt_h is not None:
-            _append_heading_errors(buckets[bname], sota, float(gt_h))
+            _append_heading_errors(heading_bucket, sota, float(gt_h))
 
         gl, gw = g.length_m, g.width_m
         if gl is not None:
             e = _rel_dim_error(sota.get("yolo_length_m"), gl)
             if e is not None:
-                rel_len_bb[bname].append(e)
+                rel_len_list.append(e)
         if gw is not None:
             e = _rel_dim_error(sota.get("yolo_width_m"), gw)
             if e is not None:
-                rel_wid_bb[bname].append(e)
+                rel_wid_list.append(e)
         yolo_full = sota.get("yolo_polygon_fullres")
         if (
             isinstance(yolo_full, list)
@@ -644,7 +639,7 @@ def run_detection_evaluation(
             poly_y = [(float(p[0]), float(p[1])) for p in yolo_full]
             iou = mask_polygon_iou(gt_quad, poly_y)
             if iou is not None:
-                iou_bb[bname].append(iou)
+                iou_list.append(iou)
 
         if gt_h is not None:
             h_kp = sota.get("heading_keypoint_deg")
@@ -671,7 +666,7 @@ def run_detection_evaluation(
                     if e_f + 5.0 < e_wake_best:
                         fusion_better += 1
 
-    aq = buckets["aquaforge"]
+    aq = heading_bucket
     pct_kp = (
         (100.0 * float(kp_better) / float(kp_pairs)) if kp_pairs else None
     )
@@ -683,31 +678,29 @@ def run_detection_evaluation(
         n_labeled_points=len(rows),
         n_geometry_spots=len(geo),
         n_heading_gt=n_heading_gt,
-        pearson_r_by_backend=pearson_r,
+        pearson_r=pr_aq,
         n_ranking_scored=n_rank,
-        n_scored_by_backend=n_scored_by_backend,
-        heading_buckets=buckets,
-        rel_length_by_backend=rel_len_bb,
-        rel_width_by_backend=rel_wid_bb,
-        mask_iou_by_backend=iou_bb,
+        heading_errors=heading_bucket,
+        rel_length_errors=rel_len_list,
+        rel_width_errors=rel_wid_list,
+        mask_ious=iou_list,
         pct_keypoint_better_than_wake_line=pct_kp,
         n_kp_vs_wake_pairs=kp_pairs,
         pct_fusion_better_than_wake_ambiguity=pct_fusion,
         n_fusion_vs_wake_pairs=fusion_pairs,
         notes=notes,
-        mean_abs_heading_error_hybrid_wake=circular_mae_deg(aq.wake_line),
+        mean_abs_heading_error_wake_line=circular_mae_deg(aq.wake_line),
         mean_abs_heading_error_keypoint=circular_mae_deg(aq.keypoint),
         mean_abs_heading_error_fused=circular_mae_deg(aq.fused),
         median_abs_heading_error_keypoint=circular_median_abs_error_deg(aq.keypoint),
-        mean_rel_length_error=_mean_list(rel_len_bb["aquaforge"]),
-        mean_rel_width_error=_mean_list(rel_wid_bb["aquaforge"]),
-        mean_mask_iou=_mean_list(iou_bb["aquaforge"]),
-        n_mask_iou=len(iou_bb["aquaforge"]),
-        corr_hybrid_vs_label=None,
-        corr_rank_sota_vs_label=pearson_r.get("aquaforge"),
+        mean_rel_length_error=_mean_list(rel_len_list),
+        mean_rel_width_error=_mean_list(rel_wid_list),
+        mean_mask_iou=_mean_list(iou_list),
+        n_mask_iou=len(iou_list),
+        corr_rank_vs_label=pr_aq,
         n_heading_eval=len(aq.keypoint),
         n_heading_wake_eval=len(aq.wake_line),
-        n_dim_eval=len(rel_len_bb["aquaforge"]),
+        n_dim_eval=len(rel_len_list),
     )
     return res
 
@@ -733,21 +726,15 @@ def format_eval_report(
     ``bold_best`` is accepted for API compatibility; single-column AquaForge reports do not bold.
     """
     _ = bold_best
-    aq = res.heading_buckets.get("aquaforge") or HeadingErrorBucket()
+    aq = res.heading_errors
     hdr = "| Metric | AquaForge |"
     sep = "| :--- | ---: |"
-    r_aq = fmt_eval_num(res.pearson_r_by_backend.get("aquaforge"), ndigits=4)
-    len_aq = fmt_eval_num(
-        _mean_list(res.rel_length_by_backend.get("aquaforge", [])), ndigits=4
-    )
-    wid_aq = fmt_eval_num(
-        _mean_list(res.rel_width_by_backend.get("aquaforge", [])), ndigits=4
-    )
-    iou_aq = fmt_eval_num(
-        _mean_list(res.mask_iou_by_backend.get("aquaforge", [])), ndigits=4
-    )
+    r_aq = fmt_eval_num(res.pearson_r, ndigits=4)
+    len_aq = fmt_eval_num(_mean_list(res.rel_length_errors), ndigits=4)
+    wid_aq = fmt_eval_num(_mean_list(res.rel_width_errors), ndigits=4)
+    iou_aq = fmt_eval_num(_mean_list(res.mask_ious), ndigits=4)
     lines: list[str] = [
-        "## AquaForge — detection / SOTA evaluation",
+        "## AquaForge — detection evaluation",
         f"**Chip half (px):** `{settings_sota.aquaforge.chip_half}`",
         "",
         f"Labeled points (binary): {res.n_labeled_points}",
@@ -759,7 +746,7 @@ def format_eval_report(
         hdr,
         sep,
         f"| Pearson r | {r_aq} |",
-        f"| N scored | {res.n_scored_by_backend.get('aquaforge', 0)} |",
+        f"| N scored | {res.n_ranking_scored} |",
         "",
         "### Heading — circular MAE (deg; wake uses min of two directions)",
         "",
@@ -785,14 +772,14 @@ def format_eval_report(
         sep,
         f"| Mean rel. length err | {len_aq} |",
         f"| Mean rel. width err | {wid_aq} |",
-        f"| N (length) | {len(res.rel_length_by_backend.get('aquaforge', []))} |",
+        f"| N (length) | {len(res.rel_length_errors)} |",
         "",
         "### Hull overlap — mean IoU (labeled quad vs model polygon)",
         "",
         hdr,
         sep,
         f"| Mean IoU | {iou_aq} |",
-        f"| N | {len(res.mask_iou_by_backend.get('aquaforge', []))} |",
+        f"| N | {len(res.mask_ious)} |",
         "",
         "### Notes",
     ]
@@ -800,10 +787,8 @@ def format_eval_report(
     return "\n".join(lines) + "\n"
 
 
-def _ranking_backends_with_scores(res: EvalRunResult) -> list[str]:
-    if res.n_scored_by_backend.get("aquaforge", 0) > 0:
-        return ["AquaForge"]
-    return []
+def _ranking_has_pearson(res: EvalRunResult) -> bool:
+    return res.n_ranking_scored > 0 and res.pearson_r is not None
 
 
 def _key_takeaways_and_summary_lines(
@@ -815,9 +800,8 @@ def _key_takeaways_and_summary_lines(
     """
     Return (key_takeaways_block, at_a_glance_table) markdown fragments without trailing double newline.
     """
-    scored = _ranking_backends_with_scores(res)
-    n_scored = len(scored)
-    scored_txt = ", ".join(scored) if scored else "(none)"
+    has_r = _ranking_has_pearson(res)
+    scored_txt = "AquaForge" if has_r else "(none)"
 
     takeaway_lines = [
         "### Key Takeaways",
@@ -844,7 +828,7 @@ def _key_takeaways_and_summary_lines(
             f"(n={res.n_kp_vs_wake_pairs}; AquaForge)."
         )
 
-    v = res.pearson_r_by_backend.get("aquaforge")
+    v = res.pearson_r
     if v is not None and math.isfinite(float(v)):
         takeaway_lines.append(f"- **Ranking:** Pearson **r** (AquaForge rank score): **{float(v):.4f}**.")
 
@@ -856,7 +840,7 @@ def _key_takeaways_and_summary_lines(
             f"- **Dataset:** {res.n_geometry_spots} geometry spot(s), "
             f"{res.n_labeled_points} binary-labeled point row(s), "
             f"{res.n_heading_gt} with heading GT.",
-            f"- **Backends scored (Pearson):** {n_scored} - {scored_txt}.",
+            f"- **Ranking (Pearson):** {scored_txt}.",
             "",
         ]
     )
@@ -878,7 +862,7 @@ def _key_takeaways_and_summary_lines(
         f"| Geometry spots | {res.n_geometry_spots} |",
         f"| Binary labeled points | {res.n_labeled_points} |",
         f"| Heading GT rows | {res.n_heading_gt} |",
-        f"| Backends with ranking scores | {n_scored} ({scored_txt}) |",
+        f"| Pearson ranking | {scored_txt} |",
         f"| % fused beats wake (AquaForge) | {fusion_cell} |",
         "",
         "_Wide tables scroll horizontally on narrow GitHub / mobile views._",
@@ -912,7 +896,7 @@ def format_demo_console_summary(
     max_spots: int,
 ) -> str:
     """Short plain-text lines for ``--demo`` (no markdown tables)."""
-    aq = res.heading_buckets.get("aquaforge") or HeadingErrorBucket()
+    aq = res.heading_errors
     lines = [
         "=== AquaForge quick eval demo ===",
         f"JSONL: {jsonl_path}",
@@ -921,7 +905,7 @@ def format_demo_console_summary(
         f"Geometry spots evaluated: {res.n_geometry_spots}",
         f"Binary labeled points: {res.n_labeled_points} | Heading GT rows: {res.n_heading_gt}",
         "Pearson r (AquaForge rank score): "
-        f"{fmt_eval_num(res.pearson_r_by_backend.get('aquaforge'), ndigits=4)}",
+        f"{fmt_eval_num(res.pearson_r, ndigits=4)}",
         "Heading MAE (deg): wake / keypoint / fused: "
         f"{fmt_eval_num(circular_mae_deg(aq.wake_line), ndigits=2)} / "
         f"{fmt_eval_num(circular_mae_deg(aq.keypoint), ndigits=2)} / "
@@ -1156,7 +1140,7 @@ def main_cli(argv: list[str] | None = None) -> int:
                 tr.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
             jd = eval_result_to_jsonable(res)
             jd["jsonl"] = str(jp)
-            jd["settings_backend"] = "aquaforge"
+            jd["detector"] = "aquaforge"
             jp_out.append(jd)
         return tr, jp_out
 

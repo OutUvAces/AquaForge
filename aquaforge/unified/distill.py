@@ -244,7 +244,7 @@ def teacher_sota_dict(
     *,
     spot_col_off: int,
     spot_row_off: int,
-    hybrid_proba: float | None = None,
+    vessel_gate_proba: float | None = None,
 ) -> dict[str, Any]:
     """Run AquaForge spot inference (same stack as the review UI) for teacher heading targets."""
     from aquaforge.detection_config import load_detection_settings
@@ -259,7 +259,7 @@ def teacher_sota_dict(
         settings,
         spot_col_off=int(spot_col_off),
         spot_row_off=int(spot_row_off),
-        hybrid_proba=hybrid_proba,
+        vessel_gate_proba=vessel_gate_proba,
     )
 
 
@@ -300,7 +300,7 @@ def hydrate_teacher_signals(
     budget: int,
     chip_half: int,
     *,
-    hybrid_proba_by_id: dict[str, float] | None = None,
+    vessel_gate_proba_by_id: dict[str, float] | None = None,
 ) -> int:
     """
     In-place: set ``teacher_heading_sc`` and ``teacher_valid`` on the first ``budget`` samples
@@ -310,7 +310,7 @@ def hydrate_teacher_signals(
     """
     if budget <= 0 or not samples:
         return 0
-    hybrid_proba_by_id = hybrid_proba_by_id or {}
+    vessel_gate_proba_by_id = vessel_gate_proba_by_id or {}
     ranked = sorted(samples, key=lambda s: float(getattr(s, "al_priority", 1.0)), reverse=True)
     seen: set[str] = set()
     n_ok = 0
@@ -334,7 +334,7 @@ def hydrate_teacher_signals(
                 setattr(s, "teacher_heading_sc", None)
                 setattr(s, "teacher_valid", 0.0)
                 continue
-            hp = hybrid_proba_by_id.get(rid)
+            hp = vessel_gate_proba_by_id.get(rid)
             sota = teacher_sota_dict(
                 project_root,
                 Path(getattr(s, "tci_path")),
@@ -342,7 +342,7 @@ def hydrate_teacher_signals(
                 float(getattr(s, "cy")),
                 spot_col_off=int(c0),
                 spot_row_off=int(r0),
-                hybrid_proba=hp,
+                vessel_gate_proba=hp,
             )
             th = teacher_heading_sin_cos(sota)
             if th is None:

@@ -34,7 +34,7 @@ EXTRA_PRED_MLP_PROBA = "pred_mlp_proba"
 EXTRA_PRED_COMBINED_PROBA = "pred_combined_proba"
 EXTRA_MODEL_RUN_ID = "model_run_id"
 
-# Optional SOTA audit fields (YOLO marine, keypoints, wake fusion) — see detection.yaml.
+# Optional spot-overlay audit fields (AquaForge mask metrics use yolo_* key names for schema stability).
 EXTRA_PRED_YOLO_CONF = "pred_yolo_confidence"
 EXTRA_PRED_YOLO_LENGTH_M = "pred_yolo_length_m"
 EXTRA_PRED_YOLO_WIDTH_M = "pred_yolo_width_m"
@@ -43,7 +43,7 @@ EXTRA_PRED_HEADING_KP_DEG = "pred_heading_keypoint_deg"
 EXTRA_PRED_HEADING_WAKE_DEG = "pred_heading_wake_deg"
 EXTRA_PRED_HEADING_FUSED_DEG = "pred_heading_fused_deg"
 EXTRA_PRED_HEADING_FUSION_SOURCE = "pred_heading_fusion_source"
-EXTRA_SOTA_BACKEND_SNAPSHOT = "sota_backend_snapshot"
+EXTRA_AF_DETECTOR_SNAPSHOT = "aquaforge_detector_snapshot"
 EXTRA_PRED_HEADING_WAKE_HEURISTIC_DEG = "pred_heading_wake_heuristic_deg"
 EXTRA_PRED_HEADING_WAKE_ONNX_DEG = "pred_heading_wake_onnx_deg"
 EXTRA_PRED_WAKE_COMBINE_SOURCE = "pred_wake_combine_source"
@@ -102,7 +102,7 @@ def enrich_extra_with_predictions(
     heading_wake_deg: float | None = None,
     heading_fused_deg: float | None = None,
     heading_fusion_source: str | None = None,
-    sota_backend: str | None = None,
+    detector_snapshot: str | None = None,
     heading_wake_heuristic_deg: float | None = None,
     heading_wake_onnx_deg: float | None = None,
     wake_combine_source: str | None = None,
@@ -136,8 +136,8 @@ def enrich_extra_with_predictions(
         out[EXTRA_PRED_HEADING_FUSED_DEG] = float(heading_fused_deg)
     if heading_fusion_source:
         out[EXTRA_PRED_HEADING_FUSION_SOURCE] = str(heading_fusion_source)
-    if sota_backend:
-        out[EXTRA_SOTA_BACKEND_SNAPSHOT] = str(sota_backend)
+    if detector_snapshot:
+        out[EXTRA_AF_DETECTOR_SNAPSHOT] = str(detector_snapshot)
     if heading_wake_heuristic_deg is not None:
         out[EXTRA_PRED_HEADING_WAKE_HEURISTIC_DEG] = float(heading_wake_heuristic_deg)
     if heading_wake_onnx_deg is not None:

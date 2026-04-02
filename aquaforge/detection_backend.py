@@ -1,8 +1,8 @@
 """
-AquaForge-only detection: full-scene tiled listing and per-spot SOTA diagnostics.
+AquaForge-only detection: full-scene tiled candidate list and per-spot overlay diagnostics.
 
-There is no alternate backend, bright-spot stage, or hybrid ranking — the unified model is the
-entire detection stack.
+No legacy candidate finders, ocean-mask pre-filters, or alternate backends — tiled unified
+inference is the only path that produces the review queue.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def aquaforge_tiled_scene_triples(
         return [], meta
 
 
-def run_sota_spot_inference(
+def run_spot_inference(
     project_root: Path,
     tci_path: Path,
     cx: float,
@@ -61,9 +61,9 @@ def run_sota_spot_inference(
     spot_col_off: int,
     spot_row_off: int,
     scl_path: Path | None = None,
-    hybrid_proba: float | None = None,
+    vessel_gate_proba: float | None = None,
 ) -> dict[str, Any]:
-    """Rich diagnostics for the review UI (AquaForge mask, heading, landmarks, wake hint)."""
+    """AquaForge-only spot diagnostics for the review UI (mask, heading, landmarks, wake hint)."""
     from aquaforge.unified.integration import run_aquaforge_spot_inference
 
     _ = scl_path
@@ -75,5 +75,5 @@ def run_sota_spot_inference(
         settings,
         spot_col_off=int(spot_col_off),
         spot_row_off=int(spot_row_off),
-        hybrid_proba=hybrid_proba,
+        vessel_gate_proba=vessel_gate_proba,
     )

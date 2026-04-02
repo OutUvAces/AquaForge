@@ -85,13 +85,13 @@ from aquaforge.review_schema import (
 )
 from aquaforge.detection_backend import (
     aquaforge_tiled_scene_triples,
-    run_sota_spot_inference,
+    run_spot_inference,
 )
 from aquaforge.detection_config import (
     default_detection_yaml_path,
     example_detection_yaml_path,
     load_detection_settings,
-    sota_inference_requested,
+    spot_overlays_enabled,
 )
 from aquaforge.model_manager import (
     clear_aquaforge_predictor_cache,
@@ -1359,7 +1359,7 @@ def main() -> None:
             _render_retrain_aquaforge_section(ROOT, labels_path)
             _render_train_first_aquaforge_section(ROOT, labels_path)
             st.markdown("---")
-            if sota_inference_requested(_det_adv) and getattr(
+            if spot_overlays_enabled(_det_adv) and getattr(
                 _det_adv, "ui_require_checkbox_for_sota", False
             ):
                 st.checkbox(
@@ -2047,7 +2047,7 @@ def _render_review_deck(
     with _hl:
         st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
     with _hr:
-        if sota_inference_requested(det_settings):
+        if spot_overlays_enabled(det_settings):
             # Default overlays: outline, heading, landmarks, wake (all on).
             for _xk, _dv in (
                 ("vd_ov_hull", True),
@@ -2071,11 +2071,11 @@ def _render_review_deck(
 
     # Optional consent: global toggle lives under sidebar **Advanced** when YAML requires it.
     _sota_allow = True
-    if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
+    if spot_overlays_enabled(det_settings) and det_settings.ui_require_checkbox_for_sota:
         _sota_allow = bool(st.session_state.get("vd_advanced_spot_hints", False))
 
     # Performance: background warm — AquaForge off the main thread when inference may run soon.
-    _need_warm = sota_inference_requested(det_settings) and (
+    _need_warm = spot_overlays_enabled(det_settings) and (
         not det_settings.ui_require_checkbox_for_sota or _sota_allow
     )
     if _need_warm:
@@ -2108,8 +2108,7 @@ def _render_review_deck(
     if _scl_sota is not None and not _scl_sota.is_file():
         _scl_sota = None
     _hyb_sig: tuple[float | None, ...] = ()
-    if det_settings.sota_min_hybrid_proba_for_expensive is not None:
-        # YAML name is historical; gate uses AquaForge vessel probability (0–1).
+    if det_settings.min_vessel_proba_for_full_decode is not None:
         _hyb_sig = (round(af_gate_prob, 6),)
     # Include idx + fine coords so SOTA cache never reuses another spot’s inference when
     # windows round the same (arrow/mask would look “stuck” across Next).
@@ -2130,12 +2129,12 @@ def _render_review_deck(
     )
     sota_k = f"vd_sota_{spot_k}"
     sota: dict = {}
-    if sota_inference_requested(det_settings):
+    if spot_overlays_enabled(det_settings):
         if det_settings.ui_require_checkbox_for_sota and not _sota_allow:
             st.session_state[sota_k] = {}
             st.session_state[sota_k + "_sig"] = sota_sig
         elif st.session_state.get(sota_k + "_sig") != sota_sig:
-            st.session_state[sota_k] = run_sota_spot_inference(
+            st.session_state[sota_k] = run_spot_inference(
                 ROOT,
                 tci_p,
                 cx,
@@ -2144,7 +2143,7 @@ def _render_review_deck(
                 spot_col_off=int(sc0),
                 spot_row_off=int(sr0),
                 scl_path=_scl_sota,
-                hybrid_proba=af_gate_prob,
+                vessel_gate_proba=af_gate_prob,
             )
             st.session_state[sota_k + "_sig"] = sota_sig
         sota = st.session_state.get(sota_k, {}) or {}
@@ -2279,7 +2278,7 @@ def _render_review_deck(
         meters_per_pixel=gavg,
         draw_footprint_outline=False,
     )
-    if sota_inference_requested(det_settings) and sota and (
+    if spot_overlays_enabled(det_settings) and sota and (
         _show_hull or _show_mark or _show_wake
     ):
         _sc0i = int(sc0)
@@ -2401,7 +2400,7 @@ def _render_review_deck(
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
     if (
         _show_dir
-        and sota_inference_requested(det_settings)
+        and spot_overlays_enabled(det_settings)
         and isinstance(sota, dict)
         and sota
     ):
@@ -2530,7 +2529,7 @@ def _render_review_deck(
             use_column_width=False,
             cursor="crosshair",
         )
-        if sota_inference_requested(det_settings) and sota:
+        if spot_overlays_enabled(det_settings) and sota:
             _render_spot_measurements_panel(
                 sota=dict(sota) if isinstance(sota, dict) else {},
                 det_settings=det_settings,
@@ -3256,7 +3255,7 @@ def _commit_review_label(
         heading_wake_deg=sota_save.get("heading_wake_deg"),
         heading_fused_deg=sota_save.get("heading_fused_deg"),
         heading_fusion_source=sota_save.get("heading_fusion_source"),
-        sota_backend=sota_save.get("backend"),
+        detector_snapshot=sota_save.get("detector") or sota_save.get("backend"),
         heading_wake_heuristic_deg=sota_save.get("heading_wake_heuristic_deg"),
         heading_wake_onnx_deg=sota_save.get("heading_wake_onnx_deg"),
         wake_combine_source=sota_save.get("heading_wake_combine_source"),

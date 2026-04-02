@@ -1,5 +1,5 @@
 """
-Glue AquaForge outputs into the ``sota`` dict shape used by the review UI and evaluation.
+Glue AquaForge outputs into the spot-overlay dict used by the review UI and evaluation.
 
 Design: **heading_fused_deg** prefers the direct regression head when confident; otherwise falls
 back to geodesic bow→stern from landmark indices 0/1 (same convention as keypoint ONNX path).
@@ -16,7 +16,7 @@ from typing import Any
 from aquaforge.unified.inference import AquaForgeSpotResult
 from aquaforge.model_manager import get_cached_aquaforge_predictor
 from aquaforge.detection_config import DetectionSettings
-from aquaforge.shipstructure_adapter import KeypointResult, keypoints_to_jsonable
+from aquaforge.keypoint_onnx import KeypointResult, keypoints_to_jsonable
 
 
 def _kp_result_from_aquaforge(ar: AquaForgeSpotResult) -> KeypointResult | None:
@@ -40,16 +40,16 @@ def run_aquaforge_spot_inference(
     *,
     spot_col_off: int,
     spot_row_off: int,
-    hybrid_proba: float | None = None,
+    vessel_gate_proba: float | None = None,
 ) -> dict[str, Any]:
     # spot_col_off / spot_row_off kept for callers; crop geometry always uses the model chip
     # (ar.chip_col_off / ar.chip_row_off) so landmarks and mask align with inference.
     from aquaforge.mask_measurements import mask_oriented_dimensions_m
-    from aquaforge.shipstructure_adapter import heading_deg_bow_to_stern
+    from aquaforge.keypoint_onnx import heading_deg_bow_to_stern
     from aquaforge.chip_io import polygon_fullres_to_crop
 
     out: dict[str, Any] = {
-        "backend": "aquaforge",
+        "detector": "aquaforge",
         "yolo_confidence": None,
         "yolo_polygon_crop": None,
         "yolo_length_m": None,
@@ -84,11 +84,11 @@ def run_aquaforge_spot_inference(
 
     warnings: list[str] = []
     skip_expensive = False
-    hp_thr = settings.sota_min_hybrid_proba_for_expensive
-    if hp_thr is not None and hybrid_proba is not None:
-        if float(hybrid_proba) < float(hp_thr):
+    hp_thr = settings.min_vessel_proba_for_full_decode
+    if hp_thr is not None and vessel_gate_proba is not None:
+        if float(vessel_gate_proba) < float(hp_thr):
             skip_expensive = True
-            warnings.append("skipped_aquaforge_low_hybrid_proba")
+            warnings.append("skipped_aquaforge_low_vessel_proba")
 
     pred = get_cached_aquaforge_predictor(project_root, settings)
     if pred is None:

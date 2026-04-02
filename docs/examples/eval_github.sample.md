@@ -25,7 +25,7 @@ Real runs append full metric tables after the `---` rule. The detector is **Aqua
 | Geometry spots | 120 |
 | Binary labeled points | 200 |
 | Heading GT rows | 95 |
-| Backends with ranking scores | 1 (AquaForge) |
+| Pearson ranking | AquaForge |
 | % fused beats wake (AquaForge) | 32.0% (n=50) |
 
 _Wide tables scroll horizontally on narrow GitHub / mobile views._

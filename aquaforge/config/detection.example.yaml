@@ -11,7 +11,6 @@
 #   imgsz: 512
 #   chip_half: 320
 #   conf_threshold: 0.15
-#   weight_vs_hybrid: 0.55
 #   chip_batch_size: 6
 #   min_direct_heading_confidence: 0.35
 #   tiled_overlap_fraction: 0.5
@@ -25,8 +24,9 @@
 #   execution_mode: parallel
 #   graph_optimization_level: all
 
-# Skip full chip decode when AquaForge vessel probability is below this (0–1). Name is historical.
-# sota_min_hybrid_proba_for_expensive: 0.2
+# Skip full mask/keypoint decode when AquaForge P(vessel) at the spot is below this (0–1).
+# min_vessel_proba_for_full_decode: 0.2
+# (Alias still accepted: sota_min_hybrid_proba_for_expensive.)
 # onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
 # ui_require_checkbox_for_sota: false
 # ui_lazy_sota_overlays: false

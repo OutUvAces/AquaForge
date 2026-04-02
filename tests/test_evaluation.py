@@ -99,11 +99,11 @@ class TestEvalReportJson(unittest.TestCase):
                 settings_sota=DetectionSettings(),
             )
             d = eval_result_to_jsonable(res)
-            self.assertIn("pearson_r_by_backend", d)
-            self.assertIn("heading_bucket_summary", d)
-            self.assertIn("aquaforge", d["pearson_r_by_backend"])
+            self.assertIn("pearson_r", d)
+            self.assertIn("heading_errors", d)
+            self.assertEqual(d.get("detector"), "aquaforge")
             self.assertIn("pct_fusion_better_than_wake_ambiguity", d)
-            self.assertIn("n_scored_by_backend", d)
+            self.assertIn("n_ranking_scored", d)
         finally:
             jp.unlink(missing_ok=True)
 
@@ -184,18 +184,17 @@ class TestSummaryMarkdown(unittest.TestCase):
             jp.unlink(missing_ok=True)
 
     def test_format_eval_summary_markdown_lists_aquaforge_pearson(self) -> None:
-        hb = {"aquaforge": HeadingErrorBucket()}
+        hb = HeadingErrorBucket()
         res = EvalRunResult(
             n_labeled_points=4,
             n_geometry_spots=3,
             n_heading_gt=2,
-            pearson_r_by_backend={"aquaforge": 0.9},
+            pearson_r=0.9,
             n_ranking_scored=12,
-            n_scored_by_backend={"aquaforge": 4},
-            heading_buckets=hb,
-            rel_length_by_backend={"aquaforge": [0.08]},
-            rel_width_by_backend={"aquaforge": []},
-            mask_iou_by_backend={"aquaforge": [0.55]},
+            heading_errors=hb,
+            rel_length_errors=[0.08],
+            rel_width_errors=[],
+            mask_ious=[0.55],
             pct_keypoint_better_than_wake_line=10.0,
             n_kp_vs_wake_pairs=5,
             pct_fusion_better_than_wake_ambiguity=25.0,

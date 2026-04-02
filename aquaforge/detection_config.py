@@ -25,7 +25,7 @@ __all__ = [
     "example_detection_yaml_path",
     "load_detection_settings",
     "merged_onnx_providers",
-    "sota_inference_requested",
+    "spot_overlays_enabled",
 ]
 
 
@@ -57,7 +57,6 @@ class AquaForgeSection:
     imgsz: int = 512
     chip_half: int = 320
     conf_threshold: float = 0.15
-    weight_vs_hybrid: float = 0.55
     chip_batch_size: int = 6
     min_direct_heading_confidence: float = 0.35
     tiled_overlap_fraction: float = 0.5
@@ -70,7 +69,8 @@ class AquaForgeSection:
 class DetectionSettings:
     aquaforge: AquaForgeSection = field(default_factory=AquaForgeSection)
     onnx_runtime: OnnxRuntimeSection = field(default_factory=OnnxRuntimeSection)
-    sota_min_hybrid_proba_for_expensive: float | None = None
+    # Skip full mask/keypoint decode when AquaForge P(vessel) at the spot is below this (0–1).
+    min_vessel_proba_for_full_decode: float | None = None
     onnx_providers: list[str] | None = None
     ui_require_checkbox_for_sota: bool = False
     ui_lazy_sota_overlays: bool = False
@@ -106,9 +106,6 @@ def _parse_aquaforge(d: dict[str, Any] | None) -> AquaForgeSection:
         imgsz=int(d.get("imgsz", AquaForgeSection.imgsz)),
         chip_half=int(d.get("chip_half", AquaForgeSection.chip_half)),
         conf_threshold=float(d.get("conf_threshold", AquaForgeSection.conf_threshold)),
-        weight_vs_hybrid=float(
-            d.get("weight_vs_hybrid", AquaForgeSection.weight_vs_hybrid)
-        ),
         chip_batch_size=max(
             1,
             min(
@@ -201,15 +198,17 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
     if not isinstance(data, dict):
         return DetectionSettings()
 
-    sh = data.get("sota_min_hybrid_proba_for_expensive")
-    sota_hybrid: float | None
+    sh = data.get("min_vessel_proba_for_full_decode")
     if sh is None or sh == "":
-        sota_hybrid = None
+        sh = data.get("sota_min_hybrid_proba_for_expensive")
+    gate_proba: float | None
+    if sh is None or sh == "":
+        gate_proba = None
     else:
         try:
-            sota_hybrid = float(sh)
+            gate_proba = float(sh)
         except (TypeError, ValueError):
-            sota_hybrid = None
+            gate_proba = None
 
     gop = data.get("onnx_providers")
     global_onnx_prov: list[str] | None = None
@@ -225,13 +224,13 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
             if isinstance(data.get("onnx_runtime"), dict)
             else None
         ),
-        sota_min_hybrid_proba_for_expensive=sota_hybrid,
+        min_vessel_proba_for_full_decode=gate_proba,
         onnx_providers=global_onnx_prov,
         ui_require_checkbox_for_sota=bool(data.get("ui_require_checkbox_for_sota", False)),
         ui_lazy_sota_overlays=bool(data.get("ui_lazy_sota_overlays", False)),
     )
 
 
-def sota_inference_requested(_settings: DetectionSettings) -> bool:
-    """Spot-level AquaForge overlays are always available when the model loads."""
+def spot_overlays_enabled(_settings: DetectionSettings) -> bool:
+    """True when the review UI may draw AquaForge-derived spot overlays (single-detector app)."""
     return True

@@ -1,18 +1,16 @@
 """
-ShipStructure / SLAD-style vessel keypoints via ONNX Runtime.
+Optional **external** vessel keypoint ONNX (validation / tooling only).
 
-Export your MMPose / ShipStructure checkpoint to ONNX (opset ≥ 11 recommended), then pass
-``KeypointsSection.external_onnx_path`` when calling the adapter from scripts. This module does **not** ship weights.
+AquaForge is the sole detector; this module is **not** part of the main detection path.
+Export a pose checkpoint to ONNX (opset ≥ 11 recommended), set ``KeypointsSection.external_onnx_path``
+in scripts. Weights are not shipped in-repo.
 
-Supported output layouts (``output_layout`` in YAML):
+Supported ``output_layout`` values:
 
 - ``auto`` — infer from tensor rank/shape (see :func:`parse_pose_onnx_output`).
-- ``nk2`` — ``(1, K, 2)`` or ``(K, 2)`` coordinates in **model input pixel space** (square chip).
-- ``nk3`` — ``(1, K, 3)`` as ``x, y, visibility_or_conf`` (last channel used as confidence).
-- ``flat_xyc`` — ``(1, 3*K)`` interleaved ``x, y, c`` per joint.
+- ``nk2`` / ``nk3`` / ``flat_xyc`` — fixed layouts (see implementation).
 
-Coordinates are mapped back to **full-raster** pixels using the same chip window as YOLO
-(``read_chip_bgr_centered`` geometry).
+Coordinates map to **full-raster** pixels using :func:`aquaforge.chip_io.read_chip_bgr_centered` geometry.
 """
 
 from __future__ import annotations

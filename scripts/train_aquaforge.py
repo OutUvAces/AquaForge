@@ -341,7 +341,7 @@ def main() -> None:
                 teacher_budget,
                 int(args.chip_half),
             )
-            print(f"epoch {epoch + 1}: ensemble teacher targets filled for {n_t} sample(s)", flush=True)
+            print(f"epoch {epoch + 1}: optional teacher targets filled for {n_t} sample(s)", flush=True)
 
         distill_cap = distill_w if teacher_budget > 0 else 0.0
         base_sw = curriculum_base_weights(epoch, int(args.epochs), distill_cap=distill_cap)
