@@ -106,6 +106,37 @@ def read_rgba_downsampled(
         return rgba, w, h, w_full, h_full
 
 
+def ds_xy_from_fullres(
+    cx_full: float,
+    cy_full: float,
+    ds_shape: tuple[int, int],
+    w_full: int,
+    h_full: int,
+) -> tuple[float, float]:
+    """Map full-res (column, row) to downsample grid indices; inverse of :func:`fullres_xy_from_ds`."""
+    h, w = ds_shape
+    wf = max(int(w_full), 1)
+    hf = max(int(h_full), 1)
+    sx = float(cx_full) / wf * w
+    sy = float(cy_full) / hf * h
+    return (
+        float(np.clip(sx, 0, max(w - 1, 0))),
+        float(np.clip(sy, 0, max(h - 1, 0))),
+    )
+
+
+def fullres_xy_from_ds(
+    sx: float,
+    sy: float,
+    ds_shape: tuple[int, int],
+    w_full: int,
+    h_full: int,
+) -> tuple[float, float]:
+    """Map downsample grid indices to full-raster pixel coordinates."""
+    h, w = ds_shape
+    return sx / w * w_full, sy / h * h_full
+
+
 def is_raster_file(path: str | Path) -> bool:
     return Path(path).suffix.lower() in (
         ".jp2",

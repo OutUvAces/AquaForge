@@ -1,10 +1,10 @@
-"""Round-trip full-res ↔ downsample coordinates for anchored wake detection."""
+"""Round-trip full-res ↔ downsample coordinates (raster helpers; used by overview / masks)."""
 
 from __future__ import annotations
 
 import unittest
 
-from aquaforge.auto_wake import ds_xy_from_fullres, fullres_xy_from_ds
+from aquaforge.raster_rgb import ds_xy_from_fullres, fullres_xy_from_ds
 
 
 class TestDsXyRoundTrip(unittest.TestCase):

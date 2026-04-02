@@ -1,9 +1,9 @@
 """
-Binary agreement between fused ranking models and human labels at each labeled point.
+Binary agreement between **AquaForge** vessel probability and human labels at each labeled point.
 
-Uses the same row filter as LR / chip MLP training (all images in JSONL). ``in_sample`` scores
-the on-disk models on those points (optimistic if they were trained on the same rows).
-``cv`` retrains LR + MLP per fold on training folds only, then scores held-out points.
+``in_sample`` scores the loaded AquaForge checkpoint on every collected point.
+``cv`` fits a small **spectral** logistic regression (6-D radiometry from :func:`extract_crop_features`)
+per fold — a lightweight baseline, not the main detector.
 """
 
 from __future__ import annotations
@@ -15,26 +15,16 @@ from typing import Any, Literal
 import numpy as np
 
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
-from aquaforge.review_schema import (
-    DEFAULT_COMBINED_WEIGHT_LR,
-    DEFAULT_COMBINED_WEIGHT_MLP,
-    combined_vessel_proba,
-    decision_threshold_from_chip_bundle,
-    fused_weights_from_chip_bundle,
-)
-from aquaforge.ship_chip_mlp import (
-    DEFAULT_MODEL_SIDE,
-    DEFAULT_SRC_HALF,
-    chip_to_vector,
-    load_chip_mlp_bundle,
-    proba_pair_at,
-    read_chip_square_rgb,
-)
-from aquaforge.ship_model import load_ship_classifier
 from aquaforge.training_data import (
+    RANKING_CHIP_MODEL_SIDE,
+    RANKING_CHIP_SRC_HALF,
     _binary_training_label,
     extract_crop_features,
+    read_chip_square_rgb,
 )
+
+DEFAULT_MODEL_SIDE = RANKING_CHIP_MODEL_SIDE
+DEFAULT_SRC_HALF = RANKING_CHIP_SRC_HALF
 
 
 @dataclass(frozen=True)
@@ -123,11 +113,6 @@ def collect_ranking_labeled_points(
     model_side: int = DEFAULT_MODEL_SIDE,
     src_half: int = DEFAULT_SRC_HALF,
 ) -> tuple[list[RankingLabeledPoint], int]:
-    """
-    Same points that both trainers can use: binary label, resolvable TCI, LR crop + chip readable.
-
-    Returns ``(points, n_skipped)`` where ``n_skipped`` counts rows skipped (missing path, I/O, etc.).
-    """
     rows, n_skip = collect_ranking_labeled_rows(
         jsonl_path,
         project_root,
@@ -135,18 +120,6 @@ def collect_ranking_labeled_points(
         src_half=src_half,
     )
     return [r.as_point() for r in rows], n_skip
-
-
-def _fused_proba_at(
-    lr_clf: Any | None,
-    chip_bundle: dict[str, Any] | None,
-    row: RankingLabeledPoint,
-    *,
-    w_lr: float = DEFAULT_COMBINED_WEIGHT_LR,
-    w_mlp: float = DEFAULT_COMBINED_WEIGHT_MLP,
-) -> float | None:
-    p_lr, p_mlp = proba_pair_at(lr_clf, chip_bundle, row.tci_path, row.cx, row.cy)
-    return combined_vessel_proba(p_lr, p_mlp, w_lr=w_lr, w_mlp=w_mlp)
 
 
 def _binary_pred_from_proba(p: float | None, *, threshold: float) -> int | None:
@@ -188,52 +161,12 @@ def _make_lr() -> Any:
     return LogisticRegression(max_iter=2000, class_weight="balanced")
 
 
-def _make_mlp() -> Any:
-    from sklearn.neural_network import MLPClassifier
-
-    # Keep in sync with ship_chip_mlp.train_chip_mlp_joblib
-    return MLPClassifier(
-        hidden_layer_sizes=(512, 128),
-        max_iter=800,
-        early_stopping=True,
-        validation_fraction=0.2,
-        n_iter_no_change=30,
-        random_state=42,
-        alpha=1e-4,
-    )
-
-
-def _matrices_from_rows(
-    rows: list[RankingLabeledPoint] | list[RankingLabeledRow],
-    *,
-    model_side: int,
-    src_half: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    xs_lr: list[np.ndarray] = []
-    xs_mlp: list[np.ndarray] = []
-    ys: list[int] = []
-    for r in rows:
-        feat = extract_crop_features(r.tci_path, r.cx, r.cy)
-        rgb = read_chip_square_rgb(
-            r.tci_path, r.cx, r.cy, model_side=model_side, src_half=src_half
-        )
-        xs_lr.append(feat)
-        xs_mlp.append(chip_to_vector(rgb))
-        ys.append(int(r.y))
-    return (
-        np.stack(xs_lr),
-        np.stack(xs_mlp),
-        np.array(ys, dtype=np.int64),
-    )
-
-
 def _choose_stratified_k(
     y: np.ndarray,
     max_splits: int,
     *,
     min_train: int,
 ) -> tuple[int, Any] | None:
-    """Return ``(k, StratifiedKFold)`` or ``None`` if no split satisfies train constraints."""
     from sklearn.model_selection import StratifiedKFold
 
     n = int(y.shape[0])
@@ -257,6 +190,18 @@ def _choose_stratified_k(
     return None
 
 
+def _matrices_lr_only(
+    rows: list[RankingLabeledPoint] | list[RankingLabeledRow],
+) -> tuple[np.ndarray, np.ndarray]:
+    xs: list[np.ndarray] = []
+    ys: list[int] = []
+    for r in rows:
+        feat = extract_crop_features(r.tci_path, r.cx, r.cy)
+        xs.append(feat)
+        ys.append(int(r.y))
+    return np.stack(xs), np.array(ys, dtype=np.int64)
+
+
 def evaluate_ranking_binary_agreement(
     jsonl_path: Path,
     *,
@@ -272,16 +217,18 @@ def evaluate_ranking_binary_agreement(
     src_half: int = DEFAULT_SRC_HALF,
 ) -> dict[str, Any]:
     """
-    Compare fused P(vessel) (LR + chip MLP, same rule as ranking) to binary labels at each point.
+    Compare model scores to binary labels. **AquaForge-only** for ``in_sample``; ``cv`` uses spectral LR.
 
-    - ``in_sample``: load models from ``lr_model_path`` / ``chip_mlp_path`` and score every collected
-      point (typically right after saving those checkpoints).
-    - ``cv``: stratified folds; fit fresh LR + MLP on each train fold, predict on that fold's test
-      points. Every point is scored exactly once.
+    ``lr_model_path`` / ``chip_mlp_path`` / fusion weights are **ignored** (kept for call-site compatibility).
     """
+    _ = lr_model_path, chip_mlp_path, w_lr, w_mlp
     root = project_root or jsonl_path.resolve().parent.parent.parent
     if not root.joinpath("aquaforge").is_dir():
         root = jsonl_path.resolve().parents[2]
+
+    from aquaforge.detection_config import load_detection_settings
+    from aquaforge.model_manager import get_cached_aquaforge_predictor
+    from aquaforge.unified.inference import aquaforge_confidence_only
 
     points, n_skipped_collect = collect_ranking_labeled_points(
         jsonl_path,
@@ -289,15 +236,16 @@ def evaluate_ranking_binary_agreement(
         model_side=model_side,
         src_half=src_half,
     )
+    settings = load_detection_settings(root)
+    thr_af = float(threshold) if threshold is not None else float(settings.aquaforge.conf_threshold)
     thr_cv = float(threshold) if threshold is not None else 0.5
-    w_lr_cv = float(w_lr) if w_lr is not None else DEFAULT_COMBINED_WEIGHT_LR
-    w_mlp_cv = float(w_mlp) if w_mlp is not None else DEFAULT_COMBINED_WEIGHT_MLP
 
     base: dict[str, Any] = {
         "mode": mode,
         "n_labeled_points": len(points),
         "n_skipped_collect": int(n_skipped_collect),
-        "threshold": thr_cv,
+        "threshold": thr_af if mode == "in_sample" else thr_cv,
+        "scorer": "aquaforge" if mode == "in_sample" else "spectral_logistic_cv",
     }
 
     if not points:
@@ -306,33 +254,22 @@ def evaluate_ranking_binary_agreement(
         return base
 
     if mode == "in_sample":
-        lr_clf = load_ship_classifier(lr_model_path) if lr_model_path and lr_model_path.is_file() else None
-        bundle = load_chip_mlp_bundle(chip_mlp_path) if chip_mlp_path and chip_mlp_path.is_file() else None
-        if lr_clf is None and (not bundle or bundle.get("model") is None):
-            base["error"] = "no_ranking_models"
+        pred_af = get_cached_aquaforge_predictor(root, settings)
+        if pred_af is None:
+            base["error"] = "no_aquaforge_weights"
             base["metrics"] = _aggregate_metrics(np.array([], dtype=np.int64), np.array([], dtype=np.int64))
-            base["cv_splits_used"] = None
             return base
-        w_lr_u, w_mlp_u = fused_weights_from_chip_bundle(bundle)
-        if w_lr is not None:
-            w_lr_u = float(w_lr)
-        if w_mlp is not None:
-            w_mlp_u = float(w_mlp)
-        thr_u = float(threshold) if threshold is not None else decision_threshold_from_chip_bundle(bundle)
-        base["threshold"] = thr_u
-        base["w_lr"] = w_lr_u
-        base["w_mlp"] = w_mlp_u
         scored_true: list[int] = []
         scored_pred: list[int] = []
         n_unscored = 0
         for row in points:
-            p = _fused_proba_at(lr_clf, bundle, row, w_lr=w_lr_u, w_mlp=w_mlp_u)
-            pred = _binary_pred_from_proba(p, threshold=thr_u)
-            if pred is None:
+            py = aquaforge_confidence_only(pred_af, row.tci_path, row.cx, row.cy)
+            pr = _binary_pred_from_proba(py, threshold=thr_af)
+            if pr is None:
                 n_unscored += 1
                 continue
             scored_true.append(row.y)
-            scored_pred.append(pred)
+            scored_pred.append(pr)
         metrics = _aggregate_metrics(
             np.array(scored_true, dtype=np.int64),
             np.array(scored_pred, dtype=np.int64),
@@ -342,7 +279,6 @@ def evaluate_ranking_binary_agreement(
         base["cv_splits_used"] = None
         return base
 
-    # cv
     y_true_arr = np.array([p.y for p in points], dtype=np.int64)
     chosen = _choose_stratified_k(y_true_arr, cv_max_splits, min_train=8)
     if chosen is None:
@@ -350,8 +286,8 @@ def evaluate_ranking_binary_agreement(
         base["metrics"] = _aggregate_metrics(np.array([], dtype=np.int64), np.array([], dtype=np.int64))
         base["cv_splits_used"] = None
         base["cv_message"] = (
-            "Need at least two of each class and enough rows per fold to train the chip MLP (≥8 train "
-            "samples per fold with both classes). Try more labels or use in_sample."
+            "Need stratified folds with ≥8 train rows per fold and both classes. "
+            "Try more labels or use in_sample."
         )
         return base
 
@@ -362,35 +298,25 @@ def evaluate_ranking_binary_agreement(
     for train_idx, test_idx in skf.split(np.zeros((len(points), 1)), y_true_arr):
         train_rows = [points[i] for i in train_idx]
         test_rows = [points[i] for i in test_idx]
-        X_lr_tr, X_mlp_tr, y_tr = _matrices_from_rows(
-            train_rows, model_side=model_side, src_half=src_half
-        )
+        X_tr, y_tr = _matrices_lr_only(train_rows)
         lr = _make_lr()
-        mlp = _make_mlp()
-        lr.fit(X_lr_tr, y_tr)
-        mlp.fit(X_mlp_tr, y_tr)
-        bundle = {
-            "model": mlp,
-            "feature": "rgb_flat_chip_mlp",
-            "model_side": model_side,
-            "src_half": src_half,
-        }
+        lr.fit(X_tr, y_tr)
         fold_true: list[int] = []
         fold_pred: list[int] = []
         for row in test_rows:
-            p = _fused_proba_at(lr, bundle, row, w_lr=w_lr_cv, w_mlp=w_mlp_cv)
-            pred = _binary_pred_from_proba(p, threshold=thr_cv)
-            if pred is None:
+            x = extract_crop_features(row.tci_path, row.cx, row.cy).reshape(1, -1)
+            p = float(lr.predict_proba(x)[0, 1])
+            pr = _binary_pred_from_proba(p, threshold=thr_cv)
+            if pr is None:
                 continue
             fold_true.append(row.y)
-            fold_pred.append(pred)
+            fold_pred.append(pr)
         y_true_parts.append(np.array(fold_true, dtype=np.int64))
         y_pred_parts.append(np.array(fold_pred, dtype=np.int64))
 
     y_t = np.concatenate(y_true_parts)
     y_p = np.concatenate(y_pred_parts)
-    metrics = _aggregate_metrics(y_t, y_p)
-    base["metrics"] = metrics
+    base["metrics"] = _aggregate_metrics(y_t, y_p)
     base["cv_splits_used"] = int(k)
     base["cv_message"] = ""
     return base

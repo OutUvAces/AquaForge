@@ -1,7 +1,7 @@
 """
 Ship / non-ship baseline classifier (logistic regression on RGB patch statistics).
 
-Training consumes ``ship_reviews.jsonl``; the web UI reorders bright-spot candidates by P(vessel).
+Training consumes ``ship_reviews.jsonl``. Detection order is AquaForge-only; this LR is optional analytics / CV.
 """
 
 from __future__ import annotations

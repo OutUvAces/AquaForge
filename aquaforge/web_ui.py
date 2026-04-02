@@ -48,7 +48,6 @@ def _percentile_stretch_u8_rgb(rgb: np.ndarray) -> np.ndarray:
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-from aquaforge.auto_wake import AutoWakeError, ship_candidates_fullres
 from aquaforge.cdse import get_access_token, load_env
 from aquaforge.labels import (
     LOCATOR_MANUAL_SCORE,
@@ -81,13 +80,11 @@ from aquaforge.locator_coords import (
     letterbox_rgb_to_square,
 )
 from aquaforge.review_schema import (
-    combined_vessel_proba_with_bundle,
     enrich_extra_with_predictions,
     model_run_fingerprint,
 )
 from aquaforge.detection_backend import (
     aquaforge_tiled_scene_triples,
-    rank_candidates_from_config,
     run_sota_spot_inference,
 )
 from aquaforge.detection_config import (
@@ -95,7 +92,6 @@ from aquaforge.detection_config import (
     example_detection_yaml_path,
     load_detection_settings,
     sota_inference_requested,
-    use_legacy_candidate_pipeline,
 )
 from aquaforge.model_manager import (
     clear_aquaforge_predictor_cache,
@@ -133,23 +129,12 @@ from aquaforge.scene_overview_100 import (
     shade_overview_grid_cells,
 )
 from aquaforge.s2_masks import find_scl_for_tci
-from aquaforge.ranking_hpo import train_ranking_models_hpo
 from aquaforge.ranking_label_agreement import evaluate_ranking_binary_agreement
 from aquaforge.review_multitask_train import (
     default_multitask_path,
     load_review_multitask_bundle,
     predict_review_multitask_at,
     train_review_multitask_joblib,
-)
-from aquaforge.ship_chip_mlp import (
-    default_chip_mlp_path,
-    load_chip_mlp_bundle,
-    proba_pair_at,
-    rank_candidates_hybrid,
-)
-from aquaforge.ship_model import (
-    default_model_path,
-    rank_candidates_by_vessel_proba,
 )
 from aquaforge.s2_download import (
     cdse_download_ready,
@@ -177,7 +162,7 @@ from aquaforge.vessel_markers import (
     quad_crop_from_dimension_markers,
     serialize_markers_for_json,
 )
-from aquaforge.yolo_marine_backend import polygon_fullres_to_crop
+from aquaforge.chip_io import polygon_fullres_to_crop
 from aquaforge.vessel_heading import merge_keel_heading_into_extra
 from aquaforge.hull_aspect import enrich_extra_hull_aspect_ratio
 from aquaforge.label_identity import attach_label_identity_extra
@@ -187,7 +172,6 @@ from aquaforge.review_card_export import (
 )
 from aquaforge.static_sea_witness import (
     default_static_sea_witness_path,
-    filter_candidates_by_static_sea_witness,
     summarize_static_sea_cells,
 )
 
@@ -222,20 +206,6 @@ def _detector_fetch_pool_size(max_k: int) -> int:
         int(max_k),
         _detection_pool_size(int(max_k)),
     )
-
-
-@st.cache_resource(show_spinner=False)
-def _load_classifier_cached(model_path_str: str, file_mtime: float):
-    from pathlib import Path
-
-    from aquaforge.ship_model import load_ship_classifier
-
-    return load_ship_classifier(Path(model_path_str))
-
-
-@st.cache_resource(show_spinner=False)
-def _load_chip_mlp_bundle_cached(path_str: str, file_mtime: float):
-    return load_chip_mlp_bundle(Path(path_str))
 
 
 def _detection_yaml_mtime(project_root: Path) -> float:
@@ -525,131 +495,70 @@ def _render_catalog_panel() -> None:
 
 
 def _ranking_models_expander(labels_path: Path) -> None:
-    """Optional LR + chip MLP used only to rank/sort candidates (not raw detection)."""
-    with st.expander("Sort order (optional)", expanded=False):
+    """Optional sklearn heads on review ``extra`` fields; vessel listing is always AquaForge tiled."""
+    with st.expander("Extra-field models (optional)", expanded=False):
         try:
             rel = str(labels_path.relative_to(ROOT))
         except ValueError:
             rel = str(labels_path)
         st.caption(f"Labels: `{rel}`")
         st.caption(
-            "**Retrain** changes **which spots float to the top** — not where the app looks. "
-            "Also refreshes small helpers that guess extra fields from past saves."
-        )
-        p_lr = default_model_path(ROOT)
-        p_mlp = default_chip_mlp_path(ROOT)
-        lr_ok = p_lr.is_file()
-        mlp_ok = p_mlp.is_file()
-        st.caption(
-            f"{'●' if lr_ok else '○'} Logistic regression · `{p_lr.name}`\n\n"
-            f"{'●' if mlp_ok else '○'} Chip MLP · `{p_mlp.name}`"
+            "**Multi-task** trains small helpers that predict manual fields you saved in `extra` "
+            "(wake, cloud, lengths, heading, etc.). It does **not** replace AquaForge detection."
         )
         n_lab, n_v, n_neg = count_human_verified_point_reviews(labels_path)
         st.markdown(
-            f"**Human-verified detections in labels (ranking training pool):** **{n_lab}** total — "
-            f"**{n_v}** vessel, **{n_neg}** non-vessel. "
-            "*Excludes ambiguous saves, size-only rows, and 100-cell tile feedback.*"
+            f"**Human-verified point reviews:** **{n_lab}** total — **{n_v}** vessel, **{n_neg}** non-vessel."
         )
-        if not lr_ok and not mlp_ok:
-            st.info("Train from your labels to rank candidates by P(vessel).")
 
-        def _agreement_summary_md(ag: dict) -> str:
+        def _af_agreement_summary_md(ag: dict) -> str:
             m = ag.get("metrics") or {}
             n = int(m.get("n_scored") or 0)
             if ag.get("error") == "no_labeled_points":
-                return "No labeled points with readable TCI for both LR and chip windows."
-            if ag.get("error") == "no_ranking_models":
-                return "Need at least one saved ranking model (LR and/or chip MLP) to score agreement."
+                return "No labeled points with readable TCI."
+            if ag.get("error") == "no_aquaforge_weights":
+                return "Load AquaForge weights to score P(vessel) vs labels."
             if ag.get("error") and n <= 0:
-                return f"Could not score agreement: {ag['error']}"
+                return f"Could not score: {ag['error']}"
             if n <= 0:
-                return "No points received a fused score (check rasters and model files)."
+                return "No points scored (check rasters and checkpoint)."
             acc = m.get("accuracy")
             f1 = m.get("f1")
-            lines = [
-                f"- **{m.get('n_correct', 0)}/{n}** labeled points match fused prediction "
-                f"(threshold {ag.get('threshold', 0.5):.2f})",
-                f"- Accuracy **{acc:.3f}**, F1 **{f1:.3f}** (vessel **{m.get('n_vessel', 0)}**, "
-                f"non-vessel **{m.get('n_negative', 0)}**)",
-                "- *In-sample:* models were fit on these same rows, so this can look optimistic.",
-            ]
-            if ag.get("w_lr") is not None and ag.get("w_mlp") is not None:
-                lines.append(
-                    f"- Fusion weights (LR:MLP) **{ag['w_lr']:.2f}:{ag['w_mlp']:.2f}** (from saved chip bundle)."
-                )
-            nu = int(m.get("n_unscored_fused") or 0)
-            if nu:
-                lines.append(f"- {nu} point(s) had no fused score (skipped in tally).")
-            return "\n".join(lines)
+            return "\n".join(
+                [
+                    f"- **{m.get('n_correct', 0)}/{n}** points vs AquaForge threshold **{ag.get('threshold', 0):.2f}**",
+                    f"- Accuracy **{acc:.3f}**, F1 **{f1:.3f}**",
+                ]
+            )
 
         last_rep = st.session_state.get("last_ranking_retrain_report")
         if last_rep and isinstance(last_rep, dict) and last_rep.get("markdown"):
             with st.container():
-                st.markdown("**Last retrain**")
+                st.markdown("**Last train**")
                 st.markdown(last_rep["markdown"])
 
         if st.button(
-            "Retrain ranking models",
+            "Train multi-task + check AquaForge vs labels",
             use_container_width=True,
             key="retrain_rankers",
-            help="Hyperparameter search for max out-of-fold label agreement, then save LR + chip MLP.",
+            help="Refresh sklearn heads on extra fields; report AquaForge binary agreement on labeled points.",
         ):
-            before_ag: dict | None = None
-            if p_lr.is_file() or p_mlp.is_file():
-                try:
-                    before_ag = evaluate_ranking_binary_agreement(
-                        labels_path,
-                        project_root=ROOT,
-                        lr_model_path=p_lr,
-                        chip_mlp_path=p_mlp,
-                        mode="in_sample",
-                    )
-                except Exception:
-                    before_ag = None
-
-            hpo_report: dict | None = None
             after_ag: dict | None = None
-            after_ag_err: str | None = None
-            top_err: str | None = None
             multitask_report: dict[str, Any] | None = None
-
-            with st.status("Retraining ranking models…", expanded=True) as status:
-                try:
-                    hpo_report = train_ranking_models_hpo(
-                        labels_path,
-                        p_lr,
-                        p_mlp,
-                        project_root=ROOT,
-                        progress=status.write,
-                    )
-                except Exception as e:
-                    top_err = str(e)
-                    status.write(f"Training failed: `{top_err}`")
-
-                status.write("**Agreement check** — fused scores using saved weights & threshold…")
+            with st.status("Training…", expanded=True) as status:
                 try:
                     after_ag = evaluate_ranking_binary_agreement(
                         labels_path,
                         project_root=ROOT,
-                        lr_model_path=p_lr,
-                        chip_mlp_path=p_mlp,
                         mode="in_sample",
-                        threshold=None,
-                        w_lr=None,
-                        w_mlp=None,
                     )
-                    for _ln in _agreement_summary_md(after_ag).split("\n"):
+                    for _ln in _af_agreement_summary_md(after_ag).split("\n"):
                         if _ln.strip():
                             status.write(_ln)
                 except Exception as ex:
-                    after_ag_err = str(ex)
-                    status.write(f"Agreement step failed: `{after_ag_err}`")
+                    status.write(f"AquaForge agreement failed: `{ex}`")
 
-                status.write(
-                    "**Multi-task** — training heads for manual fields in `extra` "
-                    "(wake, cloud, footprint/graphic L×W, heading, aspect ratio, hull2 fields, "
-                    "marker roles bow/stern/side/bridge, transhipment, locator, categorical sources)…"
-                )
+                status.write("**Multi-task** on `extra` fields…")
                 try:
                     multitask_report = train_review_multitask_joblib(
                         labels_path,
@@ -659,99 +568,22 @@ def _ranking_models_expander(labels_path: Path) -> None:
                     )
                 except Exception as ex:
                     multitask_report = {"error": str(ex)}
-                    status.write(f"Multi-task training failed: `{ex}`")
+                    status.write(f"Multi-task failed: `{ex}`")
+                status.update(label="Finished", state="complete")
 
-                status.update(label="Retrain finished", state="complete")
-
-            md_parts: list[str] = []
-            md_parts.append("### What ran")
-            if top_err:
-                md_parts.append(f"- Training error: `{top_err}`")
-            elif hpo_report and hpo_report.get("hpo_applied"):
-                md_parts.append(
-                    "- **Hyperparameter search** over logistic **C**, MLP **hidden layers / α / max_iter**, "
-                    "**LR↔MLP fusion**, and **decision threshold**, maximizing **out-of-fold** agreement; "
-                    "then refit the winner on all collected points (rows usable for both LR patch and chip)."
-                )
-                b = hpo_report.get("best") or {}
-                md_parts.append(
-                    f"- Best out-of-fold: **accuracy {float(b.get('oof_accuracy', 0)):.3f}**, "
-                    f"F1 **{float(b.get('oof_f1', 0)):.3f}** "
-                    f"({hpo_report.get('cv_splits_used', '?')}-fold CV)."
-                )
-                md_parts.append(
-                    f"- Chosen: LR C **{b.get('lr_C')}**, MLP **{b.get('hidden_layer_sizes')}**, "
-                    f"α **{b.get('mlp_alpha')}**, max_iter **{b.get('mlp_max_iter')}**, "
-                    f"fusion **{b.get('w_lr', 0):.2f}:{b.get('w_mlp', 0):.2f}**, "
-                    f"threshold **{b.get('decision_threshold', 0):.2f}**."
-                )
-            elif hpo_report:
-                md_parts.append(
-                    f"- **Default training** (no search): {hpo_report.get('fallback_reason', 'fallback')}."
-                )
-            else:
-                md_parts.append("- No report produced.")
-
-            md_parts.append("### What changed on disk")
-            if hpo_report and not top_err:
-                lr_s = hpo_report.get("lr_stats")
-                mlp_s = hpo_report.get("mlp_stats")
-                if isinstance(lr_s, dict):
-                    md_parts.append(
-                        f"- **`{p_lr.name}`** — **{lr_s.get('n', '?')}** rows, "
-                        f"LR C **{lr_s.get('hpo_lr_C', '—')}**."
-                    )
-                if isinstance(mlp_s, dict):
-                    md_parts.append(
-                        f"- **`{p_mlp.name}`** — **{mlp_s.get('n', '?')}** rows, "
-                        f"MLP **{mlp_s.get('hpo_hidden_layer_sizes', '—')}**."
-                    )
-                if hpo_report.get("mlp_error"):
-                    md_parts.append(f"- Chip MLP note: `{hpo_report['mlp_error']}`")
-
-            md_parts.append("### Result vs your labels (fused, in-sample, saved weights)")
-            if after_ag is not None:
-                md_parts.append(_agreement_summary_md(after_ag))
-                if before_ag is not None and not before_ag.get("error"):
-                    bm = before_ag.get("metrics") or {}
-                    am = after_ag.get("metrics") or {}
-                    nb, na = int(bm.get("n_scored") or 0), int(am.get("n_scored") or 0)
-                    if nb > 0 and na > 0:
-                        cb, ca = int(bm.get("n_correct", 0)), int(am.get("n_correct", 0))
-                        ab, aa = bm.get("accuracy"), am.get("accuracy")
-                        if ab is not None and aa is not None:
-                            md_parts.append(
-                                f"- *Before this run:* **{cb}/{nb}** correct, accuracy **{ab:.3f}**."
-                            )
-                            md_parts.append(
-                                f"- *After this run:* **{ca}/{na}** correct, accuracy **{aa:.3f}**."
-                            )
-            elif after_ag_err:
-                md_parts.append(f"Agreement could not be computed: `{after_ag_err}`")
-
-            md_parts.append("### Multi-task (manual `extra` fields)")
+            md_parts: list[str] = ["### AquaForge vs binary labels", _af_agreement_summary_md(after_ag or {})]
+            md_parts.append("### Multi-task")
             if multitask_report and multitask_report.get("error"):
                 md_parts.append(f"- Error: `{multitask_report['error']}`")
             elif multitask_report:
                 n_h = len(multitask_report.get("heads_trained") or [])
                 md_parts.append(
-                    f"- Saved **`{default_multitask_path(ROOT).name}`** with **{n_h}** head(s) "
-                    f"on **{multitask_report.get('n_rows', '?')}** rows."
+                    f"- **`{default_multitask_path(ROOT).name}`** — **{n_h}** head(s), "
+                    f"**{multitask_report.get('n_rows', '?')}** rows."
                 )
-            else:
-                md_parts.append("- No multi-task report.")
-
-            md_parts.append(
-                "\nPress **Refresh** so the new sort order is used."
-            )
             full_md = "\n\n".join(md_parts)
             st.session_state["last_ranking_retrain_report"] = {"markdown": full_md}
             st.markdown(full_md)
-
-        st.caption(
-            "Search needs enough labels for stratified CV (both classes, ≥8 train rows per fold). "
-            "Otherwise training uses simple defaults. Then press **Refresh**."
-        )
 
 
 def _exports_and_analytics_expander(labels_path: Path) -> None:
@@ -1386,18 +1218,18 @@ def _sidebar_spot_finding_settings() -> None:
     Detector queue limits and mask path — lives in the sidebar so the main column stays calm.
     Widget keys must stay stable for ``Refresh`` / overview logic.
     """
-    with st.expander("Finding bright spots", expanded=False):
+    with st.expander("Scene overview & spot list", expanded=False):
         st.caption(
-            "Looks for bright patches on **open water** using your land/water mask. "
-            "You usually do not need to change this."
+            "**Refresh** runs AquaForge tiled detection on the full scene. "
+            "These sliders only affect the **overview map** resolution and how many hits you see in the queue."
         )
         st.slider(
-            "Scan: faster ↔ more detail (higher = faster)",
+            "Overview map: faster ↔ finer (higher = faster, coarser mosaic)",
             4,
             12,
             4,
             key="webui_ds_factor",
-            help="Lower number = slower, may catch fainter spots.",
+            help="Lower = sharper 10×10 overview, more work to build the mosaic.",
         )
         st.slider(
             "How many spots to list at once",
@@ -1581,11 +1413,10 @@ def main() -> None:
     scl_found = find_scl_for_tci(tci_path_sel)
     ready_dl, _ = cdse_download_ready()
 
-    _det_for_scl = load_detection_settings(ROOT)
-    if scl_found is None and use_legacy_candidate_pipeline(_det_for_scl):
-        st.warning(
-            "This scene needs a **land/water mask** file next to the image (name contains **SCL**). "
-            "Without it we cannot limit spots to open water."
+    if scl_found is None:
+        st.caption(
+            "**SCL** beside the TCI is optional for vessel detection; it only improves **whole-scene map** land dimming. "
+            "You can add it for clearer coastlines."
         )
         if ready_dl:
             if st.button("Download mask for this scene", key="workbench_dl_scl"):
@@ -1600,11 +1431,6 @@ def main() -> None:
                         st.error(str(e))
         else:
             st.caption("Sign in via **.env** (see **.env.example**) or copy the mask JP2 next to your image.")
-    elif scl_found is None:
-        st.caption(
-            "**SCL** mask is optional for **AquaForge tiled** detection (full scene). "
-            "It is still required if you switch to legacy hybrid / ensemble in `detection.yaml`."
-        )
 
     tci_path = Path(choice)
     ds_factor = int(st.session_state.get("webui_ds_factor", 4))
@@ -1626,42 +1452,26 @@ def main() -> None:
             try:
                 det_cfg = load_detection_settings(ROOT)
                 pool = _detector_fetch_pool_size(max_k)
-                if use_legacy_candidate_pipeline(det_cfg):
-                    with st.spinner(
-                        "Scanning this scene (legacy): JP2 + water mask, bright-spot candidates, "
-                        "filtering saved labels… Large images can take 30s–a few minutes."
-                    ):
-                        raw, meta = ship_candidates_fullres(
-                            tci_path,
-                            ds_factor=ds_factor,
-                            scl_path=scl_opt,
-                            max_candidates=pool,
-                            require_scl=True,
-                            min_water_fraction=MIN_OPEN_WATER_FRACTION,
+                with st.spinner(
+                    "AquaForge full-scene tiled detection: overlapping windows, NMS merge, "
+                    "confidence filter. Large JP2s can take several minutes — the app is still working."
+                ):
+                    raw, meta = aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
+                    if meta.get("error") == "aquaforge_weights_missing":
+                        try:
+                            _af_rel = expected_aquaforge_checkpoint_path(
+                                ROOT
+                            ).relative_to(ROOT)
+                        except ValueError:
+                            _af_rel = expected_aquaforge_checkpoint_path(ROOT)
+                        st.error(
+                            "Full-scene detection needs a trained AquaForge checkpoint. "
+                            f"Expected e.g. `{_af_rel}` — save reviews then **Advanced → Train first AquaForge model**, "
+                            "or set `aquaforge.weights_path` in `detection.yaml`."
                         )
-                else:
-                    with st.spinner(
-                        "AquaForge full-scene tiled detection: overlapping windows, NMS merge, "
-                        "confidence filter. Large JP2s can take several minutes — the app is still working."
-                    ):
-                        raw, meta = aquaforge_tiled_scene_triples(
-                            ROOT, tci_path, det_cfg
-                        )
-                        if meta.get("error") == "aquaforge_weights_missing":
-                            try:
-                                _af_rel = expected_aquaforge_checkpoint_path(
-                                    ROOT
-                                ).relative_to(ROOT)
-                            except ValueError:
-                                _af_rel = expected_aquaforge_checkpoint_path(ROOT)
-                            st.error(
-                                "Full-scene detection needs a trained AquaForge checkpoint. "
-                                f"Expected e.g. `{_af_rel}` — save reviews then **Advanced → Train first AquaForge model**, "
-                                "or set `aquaforge.weights_path` in `detection.yaml`."
-                            )
-                            raw = []
-                        elif raw:
-                            raw = raw[:pool]
+                        raw = []
+                    elif raw:
+                        raw = raw[:pool]
                 cands = filter_unlabeled_candidates(
                     raw,
                     labels_path,
@@ -1669,54 +1479,6 @@ def main() -> None:
                     tolerance_px=2.0,
                     project_root=ROOT,
                 )
-                if st.session_state.get("webui_static_sea_suppress", True):
-                    cands = filter_candidates_by_static_sea_witness(
-                        cands,
-                        tci_path,
-                        default_static_sea_witness_path(ROOT),
-                        project_root=ROOT,
-                        min_cell_hits=int(
-                            st.session_state.get("webui_static_sea_min", 3)
-                        ),
-                    )
-                if use_legacy_candidate_pipeline(det_cfg):
-                    mp = default_model_path(ROOT)
-                    mt_mod = mp.stat().st_mtime if mp.is_file() else 0.0
-                    clf = (
-                        _load_classifier_cached(str(mp.resolve()), mt_mod)
-                        if mt_mod
-                        else None
-                    )
-                    mlp_p = default_chip_mlp_path(ROOT)
-                    mlp_mod = mlp_p.stat().st_mtime if mlp_p.is_file() else 0.0
-                    chip_bundle = (
-                        _load_chip_mlp_bundle_cached(str(mlp_p.resolve()), mlp_mod)
-                        if mlp_mod
-                        else None
-                    )
-                    if cands:
-                        try:
-                            cands = rank_candidates_from_config(
-                                cands,
-                                tci_path,
-                                clf,
-                                chip_bundle,
-                                det_cfg,
-                                ROOT,
-                            )
-                        except Exception:
-                            try:
-                                cands = rank_candidates_hybrid(
-                                    cands, tci_path, clf, chip_bundle
-                                )
-                            except Exception:
-                                if clf is not None:
-                                    try:
-                                        cands = rank_candidates_by_vessel_proba(
-                                            cands, tci_path, clf
-                                        )
-                                    except Exception:
-                                        pass
                 st.session_state.detector_ranked_unlabeled_pool = list(cands)
                 cands = cands[:max_k]
                 st.session_state.detector_candidates = cands
@@ -1743,9 +1505,9 @@ def main() -> None:
                             )
                     else:
                         st.warning(
-                            "No bright spots on open water. Try another image or relax detector settings."
+                            "No candidates: try another scene or adjust `detection.yaml` thresholds."
                         )
-            except AutoWakeError as e:
+            except Exception as e:
                 st.error(str(e))
                 st.session_state.last_scene_key = scene_key
 
@@ -1830,7 +1592,7 @@ def _render_hundred_cell_overview(
 
         cb1, cb2 = st.columns(2)
         with cb1:
-            st.caption("Uses **Finding spots** settings and the same mask as **Refresh**.")
+            st.caption("Uses **Scene overview & spot list** settings and the same optional SCL path as **Refresh**.")
         with cb2:
             if st.button(
                 "Clear overview cache",
@@ -1847,8 +1609,10 @@ def _render_hundred_cell_overview(
 
         try:
             mtime_ns = tci_p.stat().st_mtime_ns
+            det_ov = load_detection_settings(ROOT)
             ov_rgb, ov_meta = build_overview_composite(
                 tci_p,
+                project_root=ROOT,
                 file_mtime_ns=mtime_ns,
                 ds_factor=ds_factor,
                 scl_path=scl_opt,
@@ -1856,8 +1620,9 @@ def _render_hundred_cell_overview(
                 max_overview_dim=DEFAULT_OVERVIEW_MAX_DIM,
                 max_candidates=DEFAULT_OVERVIEW_MAX_CANDIDATES,
                 min_water_fraction=MIN_OPEN_WATER_FRACTION,
+                detection_settings=det_ov,
             )
-        except AutoWakeError as e:
+        except Exception as e:
             st.warning(str(e))
             return
 
@@ -1895,7 +1660,7 @@ def _render_hundred_cell_overview(
             "For “false picks on land”, also add **Land** point labels at each detector center in that tile",
             value=True,
             key=f"og_bulk_{ov_key_fb}",
-            help="Trains baseline + chip MLP away from those bright spots. Skips positions already in labels.",
+            help="Adds land witness points so the spectral LR baseline learns away from those tiles. Skips positions already in labels.",
         )
         st.caption(
             "1 · Choose a tile action below  2 · **Click the matching cell** on the overview image below."
@@ -2256,20 +2021,8 @@ def _render_review_deck(
     if flash_loc:
         st.success(str(flash_loc))
 
-    mp_disp = default_model_path(ROOT)
-    mt_disp = mp_disp.stat().st_mtime if mp_disp.is_file() else 0.0
-    clf_disp = (
-        _load_classifier_cached(str(mp_disp.resolve()), mt_disp) if mt_disp else None
-    )
-    mlp_disp_p = default_chip_mlp_path(ROOT)
-    mlp_disp_mod = mlp_disp_p.stat().st_mtime if mlp_disp_p.is_file() else 0.0
-    bundle_disp = (
-        _load_chip_mlp_bundle_cached(str(mlp_disp_p.resolve()), mlp_disp_mod)
-        if mlp_disp_mod
-        else None
-    )
-    p_lr, p_mlp = proba_pair_at(clf_disp, bundle_disp, Path(tci_loaded), cx, cy)
-    p_comb = combined_vessel_proba_with_bundle(p_lr, p_mlp, bundle_disp)
+    clf_disp = None
+    bundle_disp = None
 
     mt_path = default_multitask_path(ROOT)
     mt_bundle = load_review_multitask_bundle(mt_path)
@@ -2285,6 +2038,7 @@ def _render_review_deck(
     det_settings = load_detection_settings(ROOT)
     _af_pred_gate = get_cached_aquaforge_predictor(ROOT, det_settings)
     af_gate_prob = float(aquaforge_confidence_only(_af_pred_gate, tci_p, cx, cy))
+    p_comb = af_gate_prob
 
     # Minimal header + top-right overlay toggles (defaults: all layers on).
     _sc_prev_hdr = cands[idx][2]
@@ -2763,7 +2517,7 @@ def _render_review_deck(
             cursor="crosshair",
         )
     with _cside:
-        st.caption("Locator — queue another bright spot")
+        st.caption("Locator — add another detection to the queue")
         st.markdown(
             '<p class="vd-deck-foot">Orange = suggestions · green = queued · purple = saved · yellow = here</p>',
             unsafe_allow_html=True,
@@ -3259,9 +3013,9 @@ def _render_review_deck(
         st.divider()
         st.markdown("**Queue / AquaForge**")
         st.caption(
-            "Candidates are sorted by **AquaForge vessel confidence**, then bright-spot brightness. "
+            "Queue order is **AquaForge vessel confidence** (highest first). "
             "**Vessel confidence** (as a %) is in the captions next to the locator above. "
-            "LR / chip-MLP “ranking” models are not used for queue order."
+            "Optional spectral LR is for analytics only, not queue order."
         )
 
         if mt_pred:
@@ -3354,27 +3108,15 @@ def _commit_review_label(
             cx_save = float(cx)
             cy_save = float(cy)
 
-    mp_save = default_model_path(ROOT)
-    mt_save = mp_save.stat().st_mtime if mp_save.is_file() else 0.0
-    clf_save = (
-        _load_classifier_cached(str(mp_save.resolve()), mt_save) if mt_save else None
+    _dset_fp = load_detection_settings(ROOT)
+    _af_pred_sv = get_cached_aquaforge_predictor(ROOT, _dset_fp)
+    sv_comb = float(
+        aquaforge_confidence_only(_af_pred_sv, Path(tci_loaded), cx_save, cy_save)
     )
-    mlp_save_p = default_chip_mlp_path(ROOT)
-    mlp_save_mod = mlp_save_p.stat().st_mtime if mlp_save_p.is_file() else 0.0
-    bundle_save = (
-        _load_chip_mlp_bundle_cached(str(mlp_save_p.resolve()), mlp_save_mod)
-        if mlp_save_mod
-        else None
-    )
-    sv_lr, sv_mlp = proba_pair_at(
-        clf_save, bundle_save, Path(tci_loaded), cx_save, cy_save
-    )
-    sv_comb = combined_vessel_proba_with_bundle(sv_lr, sv_mlp, bundle_save)
-    _fp_paths: list[Path] = [mp_save, mlp_save_p]
+    _fp_paths: list[Path] = []
     _cfg_fp = default_detection_yaml_path(ROOT)
     if _cfg_fp.is_file():
         _fp_paths.append(_cfg_fp)
-    _dset_fp = load_detection_settings(ROOT)
     _af_ck_save = resolve_aquaforge_checkpoint_path(ROOT, _dset_fp.aquaforge)
     if _af_ck_save is not None and _af_ck_save.is_file():
         _fp_paths.append(_af_ck_save)
@@ -3502,8 +3244,8 @@ def _commit_review_label(
     sota_save = st.session_state.get(f"vd_sota_{spot_k}", {}) or {}
     extra = enrich_extra_with_predictions(
         extra,
-        lr_proba=sv_lr,
-        mlp_proba=sv_mlp,
+        lr_proba=None,
+        mlp_proba=None,
         combined_proba=sv_comb,
         model_run_id=fpid,
         yolo_confidence=sota_save.get("yolo_confidence"),

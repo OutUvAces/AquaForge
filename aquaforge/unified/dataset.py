@@ -362,9 +362,9 @@ def build_training_row(
     ]
     | None
 ):
-    from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+    from aquaforge.chip_io import read_chip_bgr_centered
 
-    bgr, c0, r0, cw, ch = read_yolo_chip_bgr(
+    bgr, c0, r0, cw, ch = read_chip_bgr_centered(
         sample.tci_path, sample.cx, sample.cy, chip_half
     )
     if bgr.size == 0 or cw < 8 or ch < 8:
@@ -476,7 +476,7 @@ def prepare_pseudo_self_training_batch(
         aquaforge_uncertainty_from_outputs,
         self_training_trust_from_outputs,
     )
-    from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+    from aquaforge.chip_io import read_chip_bgr_centered
 
     if not candidates:
         return None
@@ -489,7 +489,7 @@ def prepare_pseudo_self_training_batch(
     model.eval()
     with torch.no_grad():
         for c in probe:
-            bgr, _, _, cw, ch = read_yolo_chip_bgr(c.tci_path, c.cx, c.cy, chip_half)
+            bgr, _, _, cw, ch = read_chip_bgr_centered(c.tci_path, c.cx, c.cy, chip_half)
             if bgr.size == 0 or cw < 8 or ch < 8:
                 continue
             img = chip_bgr_to_tensor(bgr, imgsz)

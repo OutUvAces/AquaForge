@@ -1,5 +1,5 @@
 """
-Train LR baseline and chip MLP from the same review JSONL.
+Train spectral logistic regression baseline from review JSONL (AquaForge is the detector).
 
 Run from project root:
   py -3 scripts/train_all_models.py
@@ -16,18 +16,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from aquaforge.labels import default_labels_path
-from aquaforge.ship_chip_mlp import default_chip_mlp_path, train_chip_mlp_joblib
 from aquaforge.ship_model import default_model_path, train_ship_baseline_joblib
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Train LR + chip MLP ship classifiers.")
+    p = argparse.ArgumentParser(description="Train spectral LR ship baseline from labels.")
     p.add_argument("--jsonl", type=Path, default=None)
-    p.add_argument(
-        "--write-cache",
-        action="store_true",
-        help="Chip MLP: write NPZ cache under data/chips/ during training.",
-    )
     args = p.parse_args()
     jsonl = args.jsonl or default_labels_path(ROOT)
     if not jsonl.is_file():
@@ -35,7 +29,6 @@ def main() -> None:
         raise SystemExit(1)
 
     lr_out = default_model_path(ROOT)
-    mlp_out = default_chip_mlp_path(ROOT)
 
     print("=== Logistic regression (RGB stats) ===")
     try:
@@ -45,23 +38,6 @@ def main() -> None:
             print(f"  {s['cv_msg']}")
     except ValueError as e:
         print(f"  skipped: {e}", file=sys.stderr)
-
-    print("=== Chip MLP ===")
-    try:
-        s2 = train_chip_mlp_joblib(
-            jsonl, mlp_out, project_root=ROOT, write_cache=args.write_cache
-        )
-        print(f"  samples={s2['n']} vessels={s2['n_pos']} path={s2['path']}")
-        if s2.get("cv_msg"):
-            print(f"  {s2['cv_msg']}")
-    except ValueError as e:
-        print(f"  skipped: {e}", file=sys.stderr)
-
-    print(
-        "=== Optional: YOLO marine fine-tune ===\n"
-        "  After exporting chips to YOLO format, run:\n"
-        "  py -3 scripts/train_yolo_marine_finetune.py --data-yaml <your_data.yaml>"
-    )
 
 
 if __name__ == "__main__":

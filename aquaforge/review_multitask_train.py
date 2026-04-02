@@ -25,9 +25,16 @@ from aquaforge.ranking_label_agreement import (
     RankingLabeledRow,
     collect_ranking_labeled_rows,
 )
-from aquaforge.ship_chip_mlp import DEFAULT_MODEL_SIDE, DEFAULT_SRC_HALF, read_chip_square_rgb
-from aquaforge.training_data import extract_crop_features, marker_role_bits_from_extra
-from aquaforge.ship_chip_mlp import chip_to_vector as _chip_to_vector
+from aquaforge.training_data import (
+    RANKING_CHIP_MODEL_SIDE as DEFAULT_MODEL_SIDE,
+    RANKING_CHIP_SRC_HALF as DEFAULT_SRC_HALF,
+)
+from aquaforge.training_data import (
+    chip_to_vector as _chip_to_vector,
+    extract_crop_features,
+    marker_role_bits_from_extra,
+    read_chip_square_rgb,
+)
 
 BINARY_EXTRA_KEYS: tuple[str, ...] = (
     "wake_present",

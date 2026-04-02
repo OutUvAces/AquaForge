@@ -104,7 +104,7 @@ def scl_resampled_to_tci_grid(
     ``downsample_scl(..., height, width)`` scales the SCL JP2 alone; the 20 m grid then does
     not line up with the 10 m TCI after both are decimated — bright spots land on the wrong
     SCL classes (land vs water). This helper uses :func:`rasterio.warp.reproject` so each
-    (row, col) matches the downsampled TCI stack from ``auto_wake``.
+    (row, col) matches the downsampled TCI stack used for coarse overlays.
     """
     import rasterio
     from rasterio.warp import reproject, Resampling

@@ -322,9 +322,9 @@ def hydrate_teacher_signals(
             continue
         seen.add(rid)
         try:
-            from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+            from aquaforge.chip_io import read_chip_bgr_centered
 
-            bgr, c0, r0, _, _ = read_yolo_chip_bgr(
+            bgr, c0, r0, _, _ = read_chip_bgr_centered(
                 getattr(s, "tci_path"),
                 float(getattr(s, "cx")),
                 float(getattr(s, "cy")),

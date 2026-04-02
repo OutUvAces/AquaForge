@@ -1,4 +1,4 @@
-"""Binary label agreement for fused ranking models (all images)."""
+"""Binary label agreement: AquaForge (in_sample) vs spectral LR (cv)."""
 
 from __future__ import annotations
 
@@ -115,27 +115,21 @@ class TestCollectPoints(unittest.TestCase):
 
 
 class TestEvaluateInSample(unittest.TestCase):
-    @patch("aquaforge.ranking_label_agreement.proba_pair_at")
-    @patch("aquaforge.ranking_label_agreement.load_chip_mlp_bundle")
-    @patch("aquaforge.ranking_label_agreement.load_ship_classifier")
+    @patch("aquaforge.unified.inference.aquaforge_confidence_only")
+    @patch("aquaforge.model_manager.get_cached_aquaforge_predictor")
     @patch("aquaforge.ranking_label_agreement.read_chip_square_rgb")
     @patch("aquaforge.ranking_label_agreement.extract_crop_features")
     def test_high_proba_matches_vessel(
         self,
         mock_ex: object,
         mock_rgb: object,
-        mock_lr_load: object,
-        mock_mlp_load: object,
-        mock_pair: object,
+        mock_get_pred: object,
+        mock_af_conf: object,
     ) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         mock_rgb.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
-        mock_pair.return_value = (0.99, 0.99)
-
-        lr = MagicMock()
-        mock_lr_load.return_value = lr
-        mlp = MagicMock()
-        mock_mlp_load.return_value = {"model": mlp, "model_side": 48, "src_half": 64}
+        mock_get_pred.return_value = MagicMock()
+        mock_af_conf.return_value = 0.99
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -157,15 +151,11 @@ class TestEvaluateInSample(unittest.TestCase):
                     )
                     + "\n"
                 )
-            lr_path = root / "lr.joblib"
-            mlp_path = root / "mlp.joblib"
-            lr_path.write_text("x")
-            mlp_path.write_text("y")
             out = evaluate_ranking_binary_agreement(
                 jsonl,
                 project_root=root,
-                lr_model_path=lr_path,
-                chip_mlp_path=mlp_path,
+                lr_model_path=None,
+                chip_mlp_path=None,
                 mode="in_sample",
             )
             self.assertEqual(out.get("error"), None)

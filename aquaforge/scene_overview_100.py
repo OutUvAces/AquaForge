@@ -13,9 +13,17 @@ from typing import Any
 
 import numpy as np
 
-from aquaforge.auto_wake import ship_candidates_fullres
-from aquaforge.ne_ocean_mask import ocean_bool_for_tci_window
+from aquaforge.detection_backend import aquaforge_tiled_scene_triples
+from aquaforge.detection_config import (
+    DetectionSettings,
+    default_detection_yaml_path,
+    load_detection_settings,
+)
 from aquaforge.raster_rgb import read_rgba_downsampled
+from aquaforge.unified.inference import (
+    resolve_aquaforge_checkpoint_path,
+    resolve_aquaforge_onnx_path,
+)
 from aquaforge.s2_masks import ocean_clear_mask, scl_resampled_to_tci_grid
 
 GRID_DIVISIONS = 10
@@ -261,23 +269,34 @@ def paint_detection_marks(
     rgb[:] = np.asarray(im)
 
 
-def run_overview_detections(
-    tci_path: str | Path,
-    *,
-    ds_factor: int,
-    scl_path: str | Path | None,
-    max_candidates: int,
-    require_scl: bool,
-    min_water_fraction: float,
-) -> tuple[list[tuple[float, float, float]], dict]:
-    """Same detector as the workbench, with a large candidate cap for the overview."""
-    return ship_candidates_fullres(
-        tci_path,
-        ds_factor=ds_factor,
-        scl_path=scl_path,
-        max_candidates=max_candidates,
-        require_scl=require_scl,
-        min_water_fraction=min_water_fraction,
+def _aquaforge_fingerprint(project_root: Path, settings: DetectionSettings) -> tuple[Any, ...]:
+    """Invalidate overview detection cache when weights or detection YAML change."""
+    af = settings.aquaforge
+    w_path = resolve_aquaforge_checkpoint_path(project_root, af)
+    onx_path = resolve_aquaforge_onnx_path(project_root, af)
+    try:
+        wm = int(w_path.stat().st_mtime_ns) if w_path is not None else 0
+    except OSError:
+        wm = 0
+    try:
+        om = int(onx_path.stat().st_mtime_ns) if onx_path is not None else 0
+    except OSError:
+        om = 0
+    yp = default_detection_yaml_path(project_root)
+    try:
+        ym = int(yp.stat().st_mtime_ns) if yp.is_file() else 0
+    except OSError:
+        ym = 0
+    return (
+        ym,
+        str(w_path.resolve()) if w_path else "",
+        wm,
+        str(onx_path.resolve()) if onx_path else "",
+        om,
+        bool(af.use_onnx_inference),
+        float(af.tiled_overlap_fraction),
+        float(af.tiled_nms_iou),
+        float(af.conf_threshold),
     )
 
 
@@ -309,9 +328,6 @@ def _cached_overview_base_layers(
             )
     else:
         water = np.ones((h_m, w_m), dtype=bool)
-    ne = ocean_bool_for_tci_window(tci, h_m, w_m)
-    if ne is not None and ne.shape == water.shape:
-        water = water & ne
     wu8 = water.astype(np.uint8)
     return rgb.tobytes(), wu8.tobytes(), w_m, h_m, w_full, h_full
 
@@ -320,41 +336,37 @@ def _cached_overview_base_layers(
 def _cached_overview_detections(
     tci_resolved: str,
     tci_mtime_ns: int,
-    ds_factor: int,
-    scl_key: str,
-    scl_mtime_ns: int,
+    project_root_resolved: str,
+    fp: tuple[Any, ...],
     max_candidates: int,
-    min_water_fraction_int: int,
 ) -> tuple[tuple, ...]:
-    scl_p = Path(scl_key) if scl_key else None
-    raw, _meta = ship_candidates_fullres(
-        Path(tci_resolved),
-        ds_factor=ds_factor,
-        scl_path=scl_p,
-        max_candidates=max_candidates,
-        require_scl=True,
-        min_water_fraction=min_water_fraction_int / 10000.0,
-    )
+    root = Path(project_root_resolved)
+    settings = load_detection_settings(root)
+    raw, _meta = aquaforge_tiled_scene_triples(root, Path(tci_resolved), settings)
+    raw = raw[: int(max_candidates)]
     return tuple((float(a), float(b), float(c)) for a, b, c in raw)
 
 
 def build_overview_composite(
     tci_path: str | Path,
     *,
+    project_root: Path,
     file_mtime_ns: int,
-    ds_factor: int,
     scl_path: str | Path | None,
     pending_fullres: list[tuple[float, float, float]] | None,
     max_overview_dim: int = DEFAULT_OVERVIEW_MAX_DIM,
     max_candidates: int = DEFAULT_OVERVIEW_MAX_CANDIDATES,
     min_water_fraction: float = 0.01,
+    detection_settings: DetectionSettings | None = None,
+    ds_factor: int = 4,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
-    Land-dimmed RGB + thick grid + detector / pending marks.
+    Land-dimmed RGB + thick grid + AquaForge tiled detections / pending marks.
 
-    Returns ``(rgb_uint8, meta)`` with geometry, counts, and ``scl_water_overlay`` when SCL was
-    used to dim land (otherwise the mosaic stays raw RGB brightness).
+    ``ds_factor`` / ``min_water_fraction`` are accepted for API compatibility; listing uses tiled
+    AquaForge only. Returns ``(rgb_uint8, meta)``.
     """
+    _ = ds_factor, min_water_fraction
     tci_resolved = str(Path(tci_path).resolve())
     scl_key = str(Path(scl_path).resolve()) if scl_path and Path(scl_path).is_file() else ""
     sm = _scl_mtime_ns(scl_key)
@@ -369,15 +381,14 @@ def build_overview_composite(
     apply_land_dimming(rgb, water)
     draw_grid_on_rgb(rgb)
 
-    mw_int = int(round(min_water_fraction * 10000))
+    settings = detection_settings or load_detection_settings(project_root)
+    fp = _aquaforge_fingerprint(project_root, settings)
     det_tuple = _cached_overview_detections(
         tci_resolved,
         file_mtime_ns,
-        int(ds_factor),
-        scl_key,
-        sm,
+        str(project_root.resolve()),
+        fp,
         int(max_candidates),
-        mw_int,
     )
     detections = [(float(a), float(b), float(c)) for a, b, c in det_tuple]
 

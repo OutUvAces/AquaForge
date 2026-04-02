@@ -303,9 +303,9 @@ class AquaForgePredictor:
         cx: float,
         cy: float,
     ) -> AquaForgeSpotResult | None:
-        from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+        from aquaforge.chip_io import read_chip_bgr_centered
 
-        bgr, c0, r0, cw, ch = read_yolo_chip_bgr(
+        bgr, c0, r0, cw, ch = read_chip_bgr_centered(
             tci_path, cx, cy, int(self._af.chip_half)
         )
         if bgr.size == 0 or cw < 8 or ch < 8:
@@ -317,7 +317,7 @@ class AquaForgePredictor:
         tci_path: str | Path,
         centers: Sequence[tuple[float, float]],
     ) -> list[AquaForgeSpotResult | None]:
-        from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+        from aquaforge.chip_io import read_chip_bgr_centered
 
         n = len(centers)
         out: list[AquaForgeSpotResult | None] = [None] * n
@@ -325,7 +325,7 @@ class AquaForgePredictor:
         chips: list[tuple[np.ndarray, int, int, int, int]] = []
         idx_map: list[int] = []
         for i, (cx, cy) in enumerate(centers):
-            bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, half)
+            bgr, c0, r0, cw, ch = read_chip_bgr_centered(tci_path, cx, cy, half)
             if bgr.size == 0 or cw < 8 or ch < 8:
                 continue
             idx_map.append(i)

@@ -17,8 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from aquaforge.labels import default_labels_path, iter_reviews
-from aquaforge.ship_chip_mlp import ensure_chip_cached
-from aquaforge.training_data import _binary_training_label
+from aquaforge.training_data import _binary_training_label, ensure_chip_cached
 
 
 def main() -> None:

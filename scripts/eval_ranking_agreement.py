@@ -1,5 +1,5 @@
 """
-Report binary agreement between fused ranking models and labels at each labeled point (all images).
+Report binary agreement between AquaForge (and optional spectral LR in cv mode) and labels.
 
 Examples (from project root):
   py -3 scripts/eval_ranking_agreement.py
@@ -19,13 +19,12 @@ if str(ROOT) not in sys.path:
 
 from aquaforge.labels import default_labels_path
 from aquaforge.ranking_label_agreement import evaluate_ranking_binary_agreement
-from aquaforge.ship_chip_mlp import default_chip_mlp_path
 from aquaforge.ship_model import default_model_path
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Fused LR+chip-MLP vs human labels at each training-eligible point."
+        description="AquaForge vs human labels at each training-eligible point."
     )
     p.add_argument("--jsonl", type=Path, default=None, help="Defaults to data/labels/ship_reviews.jsonl")
     p.add_argument(
@@ -45,13 +44,12 @@ def main() -> None:
         raise SystemExit(1)
 
     lr_p = default_model_path(ROOT)
-    mlp_p = default_chip_mlp_path(ROOT)
 
     out = evaluate_ranking_binary_agreement(
         jsonl,
         project_root=ROOT,
         lr_model_path=lr_p,
-        chip_mlp_path=mlp_p,
+        chip_mlp_path=None,
         mode=args.mode,
         threshold=float(args.threshold),
         cv_max_splits=int(args.cv_splits),

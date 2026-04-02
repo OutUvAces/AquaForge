@@ -1,5 +1,5 @@
 """
-Glue AquaForge outputs into the same ``sota`` dict shape as ensemble / YOLO (review UI + eval).
+Glue AquaForge outputs into the ``sota`` dict shape used by the review UI and evaluation.
 
 Design: **heading_fused_deg** prefers the direct regression head when confident; otherwise falls
 back to geodesic bow→stern from landmark indices 0/1 (same convention as keypoint ONNX path).
@@ -46,7 +46,7 @@ def run_aquaforge_spot_inference(
     # (ar.chip_col_off / ar.chip_row_off) so landmarks and mask align with inference.
     from aquaforge.mask_measurements import mask_oriented_dimensions_m
     from aquaforge.shipstructure_adapter import heading_deg_bow_to_stern
-    from aquaforge.yolo_marine_backend import polygon_fullres_to_crop
+    from aquaforge.chip_io import polygon_fullres_to_crop
 
     out: dict[str, Any] = {
         "backend": "aquaforge",

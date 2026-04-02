@@ -25,7 +25,6 @@ from typing import Any, Iterator, Sequence
 
 from aquaforge.detection_backend import (
     aquaforge_tiled_scene_triples,
-    hybrid_vessel_proba_at,
     run_sota_spot_inference,
 )
 from aquaforge.detection_config import (
@@ -39,8 +38,6 @@ from aquaforge.labels import (
 )
 from aquaforge.ranking_label_agreement import collect_ranking_labeled_rows
 from aquaforge.review_overlay import read_locator_and_spot_rgb_matching_stretch
-from aquaforge.ship_chip_mlp import load_chip_mlp_bundle
-from aquaforge.ship_model import load_ship_classifier
 
 
 _EVAL_CHIP_TARGET_SIDE_M = 1000.0
@@ -351,18 +348,17 @@ def rank_score_at_point(
     settings: DetectionSettings,
 ) -> dict[str, Any]:
     """
-    Single-candidate scores for benchmarks: ``rank_score`` and ``yolo_confidence`` are AquaForge
-    vessel probability (0–1, sigmoid). ``hybrid_proba`` is still computed for optional analysis.
+    Single-candidate scores for benchmarks: ``rank_score`` is AquaForge vessel probability (0–1).
+    ``clf`` / ``chip_bundle`` are ignored (API compatibility).
     """
     _ = clf, chip_bundle
-    ph = hybrid_vessel_proba_at(tci_path, cx, cy, clf, chip_bundle)
     from aquaforge.unified.inference import aquaforge_confidence_only
     from aquaforge.model_manager import get_cached_aquaforge_predictor
 
     pred_af = get_cached_aquaforge_predictor(project_root, settings)
     py = float(aquaforge_confidence_only(pred_af, tci_path, cx, cy))
     return {
-        "hybrid_proba": ph,
+        "hybrid_proba": None,
         "yolo_confidence": py,
         "rank_score": py,
     }
@@ -397,7 +393,7 @@ class EvalRunResult:
     n_fusion_vs_wake_pairs: int
     notes: list[str]
 
-    # Backward-compatible flat names (ensemble / primary SOTA run when applicable)
+    # Flat names kept for JSON/report consumers (AquaForge spot metrics).
     mean_abs_heading_error_hybrid_wake: float | None = None
     mean_abs_heading_error_keypoint: float | None = None
     mean_abs_heading_error_fused: float | None = None
@@ -561,20 +557,6 @@ def run_detection_evaluation(
     notes: list[str] = []
     chip_half = int(settings_sota.aquaforge.chip_half)
 
-    mp = project_root / "data" / "models" / "ship_baseline.joblib"
-    clf = load_ship_classifier(mp) if mp.is_file() else None
-    if mp.is_file() and clf is None:
-        notes.append("lr_model_unreadable")
-    elif not mp.is_file():
-        notes.append("lr_model_missing")
-
-    mlp_p = project_root / "data" / "models" / "ship_chip_mlp.joblib"
-    chip_bundle = load_chip_mlp_bundle(mlp_p) if mlp_p.is_file() else None
-    if mlp_p.is_file() and chip_bundle is None:
-        notes.append("mlp_bundle_unreadable")
-    elif not mlp_p.is_file():
-        notes.append("mlp_bundle_missing")
-
     rows, n_skip = collect_ranking_labeled_rows(jsonl_path, project_root)
     if n_skip:
         notes.append(f"ranking_rows_skipped:{n_skip}")
@@ -587,8 +569,8 @@ def run_detection_evaluation(
             row.tci_path,
             row.cx,
             row.cy,
-            clf,
-            chip_bundle,
+            None,
+            None,
             settings_sota,
         )
         rs = ss.get("rank_score")
@@ -1174,7 +1156,7 @@ def main_cli(argv: list[str] | None = None) -> int:
                 tr.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
             jd = eval_result_to_jsonable(res)
             jd["jsonl"] = str(jp)
-            jd["settings_backend"] = str(settings_sota.backend)
+            jd["settings_backend"] = "aquaforge"
             jp_out.append(jd)
         return tr, jp_out
 

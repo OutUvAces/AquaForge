@@ -12,7 +12,7 @@ Supported output layouts (``output_layout`` in YAML):
 - ``flat_xyc`` — ``(1, 3*K)`` interleaved ``x, y, c`` per joint.
 
 Coordinates are mapped back to **full-raster** pixels using the same chip window as YOLO
-(``read_yolo_chip_bgr`` geometry).
+(``read_chip_bgr_centered`` geometry).
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 from aquaforge.detection_config import OnnxRuntimeSection
 from aquaforge.keypoints_config import KeypointsSection
 from aquaforge.onnx_session_cache import get_ort_session
-from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+from aquaforge.chip_io import read_chip_bgr_centered
 
 
 @dataclass
@@ -231,7 +231,7 @@ def try_predict_keypoints_chip(
         )
         return None, notes
 
-    bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx_full, cy_full, chip_half)
+    bgr, c0, r0, cw, ch = read_chip_bgr_centered(tci_path, cx_full, cy_full, chip_half)
     if bgr.size == 0 or cw < 2 or ch < 2:
         notes.append("keypoints_empty_chip")
         logger.warning("Keypoint inference skipped: empty or tiny chip at (%.1f, %.1f).", cx_full, cy_full)
