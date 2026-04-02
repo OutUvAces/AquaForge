@@ -4,7 +4,7 @@ Offline benchmarking: AquaForge detection / ranking on labeled JSONL.
 Ground truth:
   * Binary vessel labels on point rows (same filter as ranking training).
   * ``vessel_size_feedback``: ``heading_deg_from_north``, human/graphic/estimated L×W,
-    ``dimension_markers`` (bow/stern-derived heading when stored heading missing, hull quad vs YOLO mask).
+    ``dimension_markers`` (bow/stern-derived heading when stored heading missing, hull quad vs AquaForge mask).
 
 Heading errors use **circular** metrics on [0°, 360°): the smallest arc length to ground truth,
 reported in [0°, 180°] (same as :func:`angular_error_deg`). Wake axis uses the better of two
@@ -204,7 +204,7 @@ def gt_quad_fullres_from_markers(
     cy: float,
     chip_half: int,
 ) -> list[tuple[float, float]] | None:
-    """Hull quad from JSONL markers -> full-raster vertices (for IoU vs YOLO polygon)."""
+    """Hull quad from JSONL markers -> full-raster vertices (for IoU vs predicted hull polygon)."""
     if not dimension_markers:
         return None
     from aquaforge.vessel_markers import quad_crop_from_dimension_markers

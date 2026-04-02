@@ -1,7 +1,7 @@
 """
 Raster chip I/O for AquaForge (BGR windows and polygon reprojection).
 
-All vessel detection is AquaForge end-to-end; this module replaces the old marine-YOLO chip helpers.
+All vessel detection is AquaForge end-to-end; this module holds chip read helpers for TCIs.
 """
 
 from __future__ import annotations

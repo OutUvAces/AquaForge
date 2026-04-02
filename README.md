@@ -6,7 +6,7 @@
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
 - **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
 
-Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** (end-to-end tiled scene + `run_aquaforge_spot_decode` for chips), **`unified/settings.py`** (YAML: `data/config/detection.yaml`), `unified/external_pose_onnx.py` (optional third-party pose tooling only), `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, and packaged YAML under `aquaforge/config/`. There is **no** alternate detector path or `detection_backend` layer. Vessel **detector** audit fields in `extra` use **`pred_aquaforge_*`** only; in-memory spots use **`aquaforge_*`** only (e.g. `aquaforge_confidence`, `aquaforge_mask`, `aquaforge_keypoints`, `aquaforge_heading_deg`). Optional chip review-classifier audit (`pred_lr_proba`, `pred_mlp_proba`, `pred_combined_proba`) is separate from detection.
+Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** (end-to-end tiled scene + `run_aquaforge_spot_decode` for chips), **`unified/settings.py`** (YAML: `data/config/detection.yaml`), `unified/external_pose_onnx.py` (optional third-party pose tooling only), `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, and packaged YAML under `aquaforge/config/`. There is **no** alternate detector path or `detection_backend` layer. Saved **`extra`** vessel audit keys are **`pred_aquaforge_*`** (and `aquaforge_detector_snapshot`); in-memory spots use **`aquaforge_*`**. Optional **review_multitask** sklearn models are separate from the detector.
 
 ---
 
@@ -41,7 +41,7 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder, or **`--architecture yolo_unified`** with **`--ultralytics-weights`** (Ultralytics `.pt` for backbone+neck only; AquaForge heads on top). New checkpoints store **`meta["ultralytics_init_path"]`** for that graph. If you have an older `.pt` whose meta only contains a prior init-path key, set **`ultralytics_init_path`** in `meta` to that same filesystem path before loading, or retrain once. Export with `scripts/export_aquaforge_onnx.py`. Inference always uses AquaForge tiled scene + per-spot decode.
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder (**`--architecture cnn`**, default), or **`--architecture aquaforge_ultralytics`** with **`--ultralytics-weights`** (vendor `.pt` for backbone+neck only; AquaForge heads on top). Checkpoints store **`meta["model_arch"]`** (`cnn` or `aquaforge_ultralytics`) and **`meta["ultralytics_init_path"]`** when applicable. Very old checkpoints may still say `model_arch: yolo_unified`; loaders normalize that to `aquaforge_ultralytics`. Export with `scripts/export_aquaforge_onnx.py`. Inference always uses AquaForge tiled scene + per-spot decode.
 
 ---
 
@@ -86,7 +86,7 @@ Default image command runs a short [`scripts/train_aquaforge.py`](scripts/train_
 
 ## License / upstream
 
-Third-party weights (e.g. Ultralytics YOLO backbones) follow their licenses. This application code is provided as-is for research and operational labeling.
+Third-party weights (e.g. Ultralytics `.pt` checkpoints used as backbone seeds) follow their licenses. This application code is provided as-is for research and operational labeling.
 
 ---
 

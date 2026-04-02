@@ -23,7 +23,7 @@ stabiliser, not GradNorm/DWA source dumps.
 **Hull–exterior coherence** — suppresses segmentation mass **outside a dilated GT hull**, a
 proxy for “open water” on centred S2 chips when no SCL band is in the batch.
 
-**Delta-neck** (see :mod:`aquaforge.unified.model`) fuses YOLO scales via **cross-scale
+**Delta-neck** (see :mod:`aquaforge.unified.model`) fuses Ultralytics multi-scale features via **cross-scale
 difference maps**, not a softmax gate or classic FPN top-down add.
 """
 

@@ -19,7 +19,10 @@ from typing import Any
 
 import numpy as np
 
-from aquaforge.review_schema import EXTRA_AF_TRAINING_PRIORITY
+from aquaforge.review_schema import (
+    EXTRA_AF_TRAINING_PRIORITY,
+    EXTRA_PRED_AQUAFORGE_CONFIDENCE,
+)
 
 
 def coastal_scene_hint(extra: dict[str, Any] | None) -> float:
@@ -50,13 +53,13 @@ def small_vessel_length_hint(extra: dict[str, Any] | None) -> float:
 
 def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
     """
-    0–1 score from **review-export** fields only (no forward pass): borderline combined proba, clouds,
+    0–1 score from **review-export** fields only (no forward pass): borderline AquaForge confidence, clouds,
     hand-placed locator, weak heading trust, tiny length proxy — aligns training weight with what the
     operator already saw in the UI.
     """
     ex = extra or {}
     u = 0.0
-    comb = ex.get("pred_combined_proba")
+    comb = ex.get(EXTRA_PRED_AQUAFORGE_CONFIDENCE)
     try:
         if comb is not None:
             c = float(comb)
@@ -167,7 +170,7 @@ def review_ui_active_learning_priority(
     review_category: str | None = None,
 ) -> float:
     """
-    Score ≥ 1.0 for oversampling: uncertain fused scores, small saved length proxies, weak keypoint
+    Score ≥ 1.0 for oversampling: uncertain vessel confidence, small saved length proxies, weak keypoint
     trust, obscuration — tuned for **Sentinel-2 small/medium vessels** and ambiguous coastlines.
 
     This is a heuristic **sampling** prior, not a loss; it does not appear in published MT schedules.
@@ -182,7 +185,7 @@ def review_ui_active_learning_priority(
     except (TypeError, ValueError):
         pass
 
-    comb = ex.get("pred_combined_proba")
+    comb = ex.get(EXTRA_PRED_AQUAFORGE_CONFIDENCE)
     try:
         if comb is not None:
             c = float(comb)

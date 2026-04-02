@@ -1,19 +1,16 @@
 """
 AquaForge unified multi-task models.
 
-Naming: only ``model_arch == "yolo_unified"`` retains a ``yolo_*`` token (Ultralytics vendor graph);
-checkpoint paths and helpers use ``ultralytics_*`` / :class:`AquaForgeUltralyticsBackbone`.
+Canonical training architectures (``meta["model_arch"]``):
 
-We provide two architectures (checkpoint ``meta["model_arch"]`` selects at load time):
+1. **cnn** — :class:`AquaForgeMultiTask` (in-repo encoder).
+2. **aquaforge_ultralytics** — :class:`AquaForgeUltralyticsBackbone`: vendor Ultralytics **backbone+neck**
+   only, then AquaForge **delta-neck** + heads. Checkpoint init path: ``ultralytics_init_path``.
 
-1. **cnn** — ``AquaForgeMultiTask``: lightweight in-repo CNN (default for CPU-only dev, no Ultralytics).
-2. **yolo_unified** — ``AquaForgeUltralyticsBackbone``: Ultralytics YOLO11/12 **backbone+neck** tensors taken *just before*
-   the vendor detection head, passed through our **delta-neck** mixer: aligned scales are concatenated
-   with **cross-scale difference maps** (coarser−fine), then depthwise-refined — not a softmax gate or
-   classic FPN top-down sum. **custom** heads: hull mask, landmark heatmaps, global keypoint readout,
-   sin/cos heading, wake — trained with ``aquaforge.unified.losses`` and ``scripts/train_aquaforge.py``.
+Checkpoint meta may still use the deprecated tag ``model_arch: "yolo_unified"``; :func:`normalize_training_arch` maps
+that to ``aquaforge_ultralytics`` on load. New training runs write ``aquaforge_ultralytics`` only.
 
-We do **not** reuse Ultralytics detect/segment losses; only early graph features feed AquaForge.
+We do **not** reuse vendor detect/segment losses; only early features feed AquaForge.
 """
 
 from __future__ import annotations
@@ -26,6 +23,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from aquaforge.unified.constants import NUM_LANDMARKS
+
+ARCH_CNN = "cnn"
+ARCH_AQUAFORGE_ULTRALYTICS = "aquaforge_ultralytics"
+# Deprecated checkpoint meta only; normalized in :func:`normalize_training_arch`.
+_ARCH_DEPRECATED_ULTRALYTICS_ALIASES = frozenset({"yolo_unified"})
+
+
+def normalize_training_arch(name: str) -> str:
+    a = str(name).strip().lower()
+    if a in _ARCH_DEPRECATED_ULTRALYTICS_ALIASES:
+        return ARCH_AQUAFORGE_ULTRALYTICS
+    return a
+
 
 # Ultralytics ``module.type`` strings for heads we stop before (vendor detect/segment/pose, etc.).
 _ULTRALYTICS_VENDOR_HEAD_TYPES: frozenset[str] = frozenset(
@@ -78,7 +88,7 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
     raise RuntimeError("AquaForge Ultralytics backbone produced no 4D feature maps")
 
 
-# --- AquaForge **delta-neck** (YOLO neck → our tensor) ---
+# --- AquaForge **delta-neck** (Ultralytics neck tensors → AquaForge mixer) ---
 # Cross-scale **difference tensors** (ReLU(coarse−fine)) expose disagreements the mixer can explain;
 # stem is 1×1 compress + 3×3 depthwise, then additive fine/mid injections and channel calibration.
 
@@ -133,7 +143,7 @@ class AquaForgeMultiTask(nn.Module):
 
     def __init__(self, imgsz: int = 512, n_landmarks: int = NUM_LANDMARKS) -> None:
         super().__init__()
-        self.model_arch = "cnn"
+        self.model_arch = ARCH_CNN
         self.imgsz = int(imgsz)
         self.n_landmarks = int(n_landmarks)
         self.encoder = _EncoderTower()
@@ -221,7 +231,7 @@ class AquaForgeUltralyticsBackbone(nn.Module):
                 "AquaForgeUltralyticsBackbone requires ultralytics (pip install -r requirements-ml.txt)"
             ) from e
 
-        self.model_arch = "yolo_unified"
+        self.model_arch = ARCH_AQUAFORGE_ULTRALYTICS
         self.imgsz = int(imgsz)
         self.n_landmarks = int(n_landmarks)
         self.hidden = int(hidden)
@@ -289,11 +299,11 @@ def build_model(
     model_arch: str = "cnn",
     ultralytics_checkpoint: str | Path | None = None,
 ) -> nn.Module:
-    arch = str(model_arch).strip().lower()
-    if arch == "yolo_unified":
+    arch = normalize_training_arch(model_arch)
+    if arch == ARCH_AQUAFORGE_ULTRALYTICS:
         if not ultralytics_checkpoint:
             raise ValueError(
-                "model_arch yolo_unified requires ultralytics_checkpoint= path to a vendor .pt file"
+                f"model_arch {ARCH_AQUAFORGE_ULTRALYTICS!r} requires ultralytics_checkpoint= path to a vendor .pt file"
             )
         return AquaForgeUltralyticsBackbone(
             imgsz=imgsz, n_landmarks=n_landmarks, ultralytics_checkpoint=ultralytics_checkpoint
@@ -316,9 +326,10 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     meta = dict(ckpt.get("meta") or {})
     imgsz = int(meta.get("imgsz", 512))
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
-    arch = str(meta.get("model_arch", "cnn")).strip().lower()
+    arch = normalize_training_arch(str(meta.get("model_arch", ARCH_CNN)))
+    meta["model_arch"] = arch
     upath = meta.get("ultralytics_init_path")
-    if arch == "yolo_unified":
+    if arch == ARCH_AQUAFORGE_ULTRALYTICS:
         if not upath:
             upath = "yolo11n.pt"
         m = AquaForgeUltralyticsBackbone(
@@ -328,7 +339,7 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
         m = AquaForgeMultiTask(imgsz=imgsz, n_landmarks=nl)
     fv = int(meta.get("format_version", 1))
     # format_version < 3: delta-neck layout; state_dict keys differ — load non-strict.
-    if arch == "yolo_unified" and fv < 3:
+    if arch == ARCH_AQUAFORGE_ULTRALYTICS and fv < 3:
         m.load_state_dict(ckpt["state_dict"], strict=False)
     else:
         m.load_state_dict(ckpt["state_dict"], strict=(fv >= 2))
@@ -339,7 +350,7 @@ def seed_cnn_encoder_from_ultralytics(model: AquaForgeMultiTask, ultralytics_pt:
     """
     Best-effort: copy weights from early Ultralytics conv/BN layers into the **CNN** encoder only.
 
-    For full ``yolo_unified`` training use :class:`AquaForgeUltralyticsBackbone` instead.
+    For full ``aquaforge_ultralytics`` training use :class:`AquaForgeUltralyticsBackbone` instead.
     """
     try:
         from ultralytics import YOLO

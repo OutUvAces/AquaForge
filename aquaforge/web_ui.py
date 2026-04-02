@@ -3216,13 +3216,13 @@ def _commit_review_label(
     if ckey == "vessel" and st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin":
         extra[TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY] = True
     af_spot_save = st.session_state.get(f"vd_aquaforge_spot_{spot_k}", {}) or {}
+    _af_conf_save = af_spot_save.get("aquaforge_confidence")
+    if _af_conf_save is None:
+        _af_conf_save = float(sv_comb)
     extra = enrich_extra_with_predictions(
         extra,
-        lr_proba=None,
-        mlp_proba=None,
-        combined_proba=sv_comb,
         model_run_id=fpid,
-        aquaforge_confidence=af_spot_save.get("aquaforge_confidence"),
+        aquaforge_confidence=_af_conf_save,
         aquaforge_length_m=af_spot_save.get("aquaforge_length_m"),
         aquaforge_width_m=af_spot_save.get("aquaforge_width_m"),
         aquaforge_aspect_ratio=af_spot_save.get("aquaforge_aspect_ratio"),

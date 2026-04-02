@@ -15,13 +15,13 @@ teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation.
 ``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
 want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).
 
-Ultralytics backbone: ``--architecture yolo_unified`` (vendor graph for backbone+neck only), ``--freeze-backbone-epochs``.
+Ultralytics backbone: ``--architecture aquaforge_ultralytics`` (vendor graph for backbone+neck only), ``--freeze-backbone-epochs``.
 
-Requires: pip install -r requirements-ml.txt (``ultralytics`` for ``yolo_unified``).
+Requires: pip install -r requirements-ml.txt (``ultralytics`` for ``aquaforge_ultralytics``).
 
 Examples:
   py -3 scripts/train_aquaforge.py --project-root . --epochs 12 --batch-size 4
-  py -3 scripts/train_aquaforge.py --architecture yolo_unified --ultralytics-weights yolo11n.pt \\
+  py -3 scripts/train_aquaforge.py --architecture aquaforge_ultralytics --ultralytics-weights yolo11n.pt \\
       --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
   py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
       --no-dynamic-balance
@@ -62,7 +62,7 @@ def main() -> None:
         "--lr-backbone",
         type=float,
         default=None,
-        help="LR for embedded Ultralytics graph when using yolo_unified (default: lr/4).",
+        help="LR for embedded Ultralytics graph when using aquaforge_ultralytics (default: lr/4).",
     )
     ap.add_argument("--imgsz", type=int, default=512)
     ap.add_argument("--chip-half", type=int, default=320)
@@ -70,20 +70,20 @@ def main() -> None:
         "--architecture",
         type=str,
         default="cnn",
-        choices=("cnn", "yolo_unified"),
-        help="cnn = in-repo encoder; yolo_unified = Ultralytics backbone+neck + AquaForge heads.",
+        choices=("cnn", "aquaforge_ultralytics"),
+        help="cnn = in-repo encoder; aquaforge_ultralytics = Ultralytics backbone+neck + AquaForge heads.",
     )
     ap.add_argument(
         "--ultralytics-weights",
         type=str,
         default="yolo11n.pt",
-        help="Ultralytics .pt used to build the inner graph when model_arch is yolo_unified.",
+        help="Ultralytics .pt used to build the inner graph when model_arch is aquaforge_ultralytics.",
     )
     ap.add_argument(
         "--freeze-backbone-epochs",
         type=int,
         default=0,
-        help="For yolo_unified: freeze embedded Ultralytics graph for this many epochs; then train e2e.",
+        help="For aquaforge_ultralytics: freeze embedded Ultralytics graph for this many epochs; then train e2e.",
     )
     ap.add_argument(
         "--output",
@@ -287,11 +287,11 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     arch = str(args.architecture).strip().lower()
     ultra_ckpt = Path(args.ultralytics_weights)
-    if arch == "yolo_unified":
+    if arch == "aquaforge_ultralytics":
         model = build_model(
             imgsz=int(args.imgsz),
             n_landmarks=NUM_LANDMARKS,
-            model_arch="yolo_unified",
+            model_arch="aquaforge_ultralytics",
             ultralytics_checkpoint=ultra_ckpt if ultra_ckpt.is_file() else args.ultralytics_weights,
         ).to(device)
     else:
@@ -302,7 +302,7 @@ def main() -> None:
 
     lr_head = float(args.lr)
     lr_bb = float(args.lr_backbone) if args.lr_backbone is not None else lr_head * 0.25
-    if arch == "yolo_unified":
+    if arch == "aquaforge_ultralytics":
         head_params: list[torch.nn.Parameter] = []
         ultra_params: list[torch.nn.Parameter] = []
         for name, p in model.named_parameters():
@@ -327,7 +327,7 @@ def main() -> None:
 
     for epoch in range(int(args.epochs)):
         model.train()
-        if arch == "yolo_unified":
+        if arch == "aquaforge_ultralytics":
             frozen = epoch < freeze_n
             set_ultra_requires_grad(model.ultra, not frozen)
             if frozen:
@@ -426,7 +426,7 @@ def main() -> None:
                 )
 
         avg = total_loss / max(n_batches, 1)
-        fr = "frozen" if arch == "yolo_unified" and epoch < freeze_n else "e2e"
+        fr = "frozen" if arch == "aquaforge_ultralytics" and epoch < freeze_n else "e2e"
         ru_m = ru_epoch / max(n_batches, 1)
         # ASCII-only: Windows cp1252 consoles cannot print U+2248 (approx) or fancy punctuation.
         print(
@@ -454,7 +454,7 @@ def main() -> None:
             "auto_export_onnx": not bool(args.no_export_onnx),
         },
     }
-    if arch == "yolo_unified":
+    if arch == "aquaforge_ultralytics":
         upath = ultra_ckpt.resolve() if ultra_ckpt.is_file() else str(args.ultralytics_weights)
         meta["ultralytics_init_path"] = str(upath)
 

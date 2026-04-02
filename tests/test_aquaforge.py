@@ -55,7 +55,7 @@ class TestReviewUIUncertaintySignal(unittest.TestCase):
         self.assertEqual(review_ui_uncertainty_signal(None), 0.0)
         self.assertGreater(
             review_ui_uncertainty_signal(
-                {"pred_combined_proba": 0.5, "partial_cloud_obscuration": True}
+                {"pred_aquaforge_confidence": 0.5, "partial_cloud_obscuration": True}
             ),
             0.4,
         )
@@ -130,6 +130,15 @@ class TestAquaForgeConstants(unittest.TestCase):
     def test_landmark_count(self) -> None:
         self.assertEqual(NUM_LANDMARKS, len(LANDMARK_NAMES))
         self.assertEqual(NUM_LANDMARKS, 8)
+
+
+class TestTrainingArchNormalize(unittest.TestCase):
+    def test_normalize_yolo_unified_meta_alias(self) -> None:
+        from aquaforge.unified.model import ARCH_AQUAFORGE_ULTRALYTICS, normalize_training_arch
+
+        self.assertEqual(normalize_training_arch("yolo_unified"), ARCH_AQUAFORGE_ULTRALYTICS)
+        self.assertEqual(normalize_training_arch("aquaforge_ultralytics"), ARCH_AQUAFORGE_ULTRALYTICS)
+        self.assertEqual(normalize_training_arch("cnn"), "cnn")
 
 
 class TestAquaForgeLosses(unittest.TestCase):
@@ -256,7 +265,7 @@ class TestAquaForgeLosses(unittest.TestCase):
         p1 = review_ui_active_learning_priority({}, heading_labeled=False)
         self.assertGreaterEqual(p1, 0.45)
         p2 = review_ui_active_learning_priority(
-            {"pred_combined_proba": 0.5, "pred_aquaforge_length_m": 40.0},
+            {"pred_aquaforge_confidence": 0.5, "pred_aquaforge_length_m": 40.0},
             heading_labeled=True,
         )
         self.assertGreater(p2, p1)

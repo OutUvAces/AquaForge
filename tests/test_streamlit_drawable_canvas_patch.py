@@ -1,4 +1,4 @@
-"""Ensure drawable-canvas patch applies to streamlit.elements.image."""
+"""Drawable-canvas patch for streamlit.elements.image."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ class TestDrawableCanvasPatch(unittest.TestCase):
     def test_apply_adds_image_to_url(self) -> None:
         import streamlit.elements.image as st_image
 
-        from aquaforge.streamlit_drawable_canvas_compat import (
+        from aquaforge.streamlit_drawable_canvas_patch import (
             apply_streamlit_drawable_canvas_patch,
         )
 
