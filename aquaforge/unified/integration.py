@@ -42,6 +42,8 @@ def run_aquaforge_spot_inference(
     spot_row_off: int,
     hybrid_proba: float | None = None,
 ) -> dict[str, Any]:
+    # spot_col_off / spot_row_off kept for callers; crop geometry always uses the model chip
+    # (ar.chip_col_off / ar.chip_row_off) so landmarks and mask align with inference.
     from aquaforge.mask_measurements import mask_oriented_dimensions_m
     from aquaforge.shipstructure_adapter import heading_deg_bow_to_stern
     from aquaforge.yolo_marine_backend import polygon_fullres_to_crop
@@ -73,6 +75,9 @@ def run_aquaforge_spot_inference(
         "yolo_polygon_fullres": None,
         "aquaforge_heading_direct_deg": None,
         "aquaforge_wake_aux_deg": None,
+        # Full-image geometry for UI: project with current spot (sc0,sr0) each render.
+        "landmarks_xy_fullres": None,
+        "wake_segment_fullres": None,
         # False until a predictor loads; UI uses this for friendly setup (not sota_warnings codes).
         "aquaforge_model_ready": False,
     }
@@ -102,10 +107,12 @@ def run_aquaforge_spot_inference(
     out["yolo_confidence"] = float(ar.confidence)
     out["aquaforge_heading_direct_deg"] = ar.heading_direct_deg
 
+    ic0 = int(ar.chip_col_off)
+    ir0 = int(ar.chip_row_off)
+    _ = spot_col_off, spot_row_off
+
     if not skip_expensive:
-        poly_crop = polygon_fullres_to_crop(
-            ar.polygon_fullres, spot_col_off, spot_row_off
-        )
+        poly_crop = polygon_fullres_to_crop(ar.polygon_fullres, ic0, ir0)
         if poly_crop:
             out["yolo_polygon_crop"] = [[float(x), float(y)] for x, y in poly_crop]
         if ar.polygon_fullres:
@@ -121,18 +128,25 @@ def run_aquaforge_spot_inference(
 
     kp = _kp_result_from_aquaforge(ar)
     out["keypoints_json"] = keypoints_to_jsonable(kp)
+    if (
+        not skip_expensive
+        and ar.landmarks_fullres
+        and len(ar.landmarks_fullres) > 0
+    ):
+        out["landmarks_xy_fullres"] = [
+            [float(x), float(y), float(c)] for x, y, c in ar.landmarks_fullres
+        ]
     if kp is not None and kp.xy_fullres and not skip_expensive:
         out["keypoints_xy_conf_crop"] = [
             [
-                float(x) - float(spot_col_off),
-                float(y) - float(spot_row_off),
+                float(x) - float(ic0),
+                float(y) - float(ir0),
                 float(kp.conf[i]) if i < len(kp.conf) else 1.0,
             ]
             for i, (x, y) in enumerate(kp.xy_fullres)
         ]
         out["keypoints_crop"] = [
-            [float(x) - float(spot_col_off), float(y) - float(spot_row_off)]
-            for x, y in kp.xy_fullres
+            [float(x) - float(ic0), float(y) - float(ir0)] for x, y in kp.xy_fullres
         ]
 
     h_kp = None
@@ -161,8 +175,8 @@ def run_aquaforge_spot_inference(
             kp_trust = float(max(0.0, min(1.0, min(bow_c, stern_c))))
             out["keypoint_heading_trust"] = kp_trust
             out["bow_stern_segment_crop"] = [
-                [float(bow[0]) - float(spot_col_off), float(bow[1]) - float(spot_row_off)],
-                [float(stern[0]) - float(spot_col_off), float(stern[1]) - float(spot_row_off)],
+                [float(bow[0]) - float(ic0), float(bow[1]) - float(ir0)],
+                [float(stern[0]) - float(ic0), float(stern[1]) - float(ir0)],
             ]
 
     h_dir = ar.heading_direct_deg
@@ -187,9 +201,13 @@ def run_aquaforge_spot_inference(
         scale = float(max(ar.chip_w, ar.chip_h)) * 0.35
         x2 = cx_full + dx * scale
         y2 = cy_full + dy * scale
+        out["wake_segment_fullres"] = [
+            [float(cx_full), float(cy_full)],
+            [float(x2), float(y2)],
+        ]
         out["wake_segment_crop"] = [
-            [cx_full - float(spot_col_off), cy_full - float(spot_row_off)],
-            [x2 - float(spot_col_off), y2 - float(spot_row_off)],
+            [cx_full - float(ic0), cy_full - float(ir0)],
+            [x2 - float(ic0), y2 - float(ir0)],
         ]
         out["heading_wake_deg"] = float(aux_deg)
         out["heading_wake_combined_confidence"] = 0.35

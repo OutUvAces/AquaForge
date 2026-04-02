@@ -1,5 +1,5 @@
 """
-Offline benchmarking: compare **legacy_hybrid**, **yolo_fusion**, **ensemble**, and **aquaforge** on labeled JSONL.
+Offline benchmarking: AquaForge detection / ranking on labeled JSONL.
 
 Ground truth:
   * Binary vessel labels on point rows (same filter as ranking training).
@@ -19,7 +19,7 @@ import json
 import math
 import os
 import statistics
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -30,7 +30,6 @@ from aquaforge.detection_backend import (
 from aquaforge.detection_config import (
     DetectionSettings,
     load_detection_settings,
-    yolo_requested,
 )
 from aquaforge.labels import (
     iter_vessel_size_feedback,
@@ -102,82 +101,6 @@ def fmt_eval_pct(x: float | None, *, ndigits: int = 1) -> str:
     if not math.isfinite(v):
         return _NA
     return f"{v:.{ndigits}f}%"
-
-
-def _parse_cell_float(cell: str) -> float | None:
-    """Parse a markdown table cell for best-of-row comparison (strips ``**``)."""
-    t = cell.replace("**", "").strip()
-    if t == _NA:
-        return None
-    if t.endswith("%"):
-        try:
-            v = float(t[:-1].strip())
-        except (TypeError, ValueError):
-            return None
-        return v if math.isfinite(v) else None
-    try:
-        v = float(t)
-    except (TypeError, ValueError):
-        return None
-    return v if math.isfinite(v) else None
-
-
-def _bold_best_three(
-    leg: str,
-    yf: str,
-    ens: str,
-    *,
-    bold_best: bool,
-    higher_better: bool | None,
-) -> tuple[str, str, str]:
-    """
-    Bold the best among Legacy / YOLO-fusion / Ensemble when at least two numeric cells.
-    ``higher_better`` None skips bolding (e.g. count rows).
-    """
-    if not bold_best or higher_better is None:
-        return (leg, yf, ens)
-    cells = [leg, yf, ens]
-    vals = [_parse_cell_float(c) for c in cells]
-    valid_ix = [i for i, v in enumerate(vals) if v is not None]
-    if len(valid_ix) < 2:
-        return (leg, yf, ens)
-    picked = [float(vals[i]) for i in valid_ix]
-    best = max(picked) if higher_better else min(picked)
-    out = list(cells)
-    for i in valid_ix:
-        v = vals[i]
-        assert v is not None
-        if math.isclose(float(v), best, rel_tol=0.0, abs_tol=1e-6):
-            out[i] = f"**{cells[i]}**"
-    return (out[0], out[1], out[2])
-
-
-def _bold_best_four(
-    leg: str,
-    yf: str,
-    ens: str,
-    aq: str,
-    *,
-    bold_best: bool,
-    higher_better: bool | None,
-) -> tuple[str, str, str, str]:
-    """Bold the best among four numeric cells (Legacy / YF / Ens / AquaForge)."""
-    if not bold_best or higher_better is None:
-        return (leg, yf, ens, aq)
-    cells = [leg, yf, ens, aq]
-    vals = [_parse_cell_float(c) for c in cells]
-    valid_ix = [i for i, v in enumerate(vals) if v is not None]
-    if len(valid_ix) < 2:
-        return (leg, yf, ens, aq)
-    picked = [float(vals[i]) for i in valid_ix]
-    best = max(picked) if higher_better else min(picked)
-    out = list(cells)
-    for i in valid_ix:
-        v = vals[i]
-        assert v is not None
-        if math.isclose(float(v), best, rel_tol=0.0, abs_tol=1e-6):
-            out[i] = f"**{cells[i]}**"
-    return (out[0], out[1], out[2], out[3])
 
 
 def _mean_list(vals: list[float]) -> float | None:
@@ -400,7 +323,7 @@ def spot_window_for_eval(
     cx: float,
     cy: float,
 ) -> tuple[int, int, Path | None]:
-    """Spot (col0, row0) for :func:`run_sota_spot_inference`, matching review UI crops."""
+    """Legacy window hint for :func:`run_sota_spot_inference`; AquaForge crop coords use the model chip."""
     from aquaforge.raster_gsd import chip_pixels_for_ground_side_meters
 
     spot_px, _, _, _ = chip_pixels_for_ground_side_meters(
@@ -427,59 +350,21 @@ def rank_score_at_point(
     settings: DetectionSettings,
 ) -> dict[str, Any]:
     """
-    Single-candidate ranking-style scores under ``settings.backend``.
-
-    Returns keys: ``hybrid_proba``, ``yolo_confidence``, ``rank_score``.
+    Single-candidate scores for benchmarks: ``rank_score`` and ``yolo_confidence`` are AquaForge
+    vessel probability (0–1, sigmoid). ``hybrid_proba`` is still computed for optional analysis.
     """
+    _ = clf, chip_bundle
     ph = hybrid_vessel_proba_at(tci_path, cx, cy, clf, chip_bundle)
-    out: dict[str, Any] = {
+    from aquaforge.unified.inference import aquaforge_confidence_only
+    from aquaforge.model_manager import get_cached_aquaforge_predictor
+
+    pred_af = get_cached_aquaforge_predictor(project_root, settings)
+    py = float(aquaforge_confidence_only(pred_af, tci_path, cx, cy))
+    return {
         "hybrid_proba": ph,
-        "yolo_confidence": None,
-        "rank_score": ph,
+        "yolo_confidence": py,
+        "rank_score": py,
     }
-    if settings.backend == "aquaforge":
-        from aquaforge.unified.inference import aquaforge_confidence_only
-        from aquaforge.model_manager import get_cached_aquaforge_predictor
-
-        pred_af = get_cached_aquaforge_predictor(project_root, settings)
-        py = aquaforge_confidence_only(pred_af, tci_path, cx, cy)
-        out["yolo_confidence"] = py
-        wy = float(max(0.0, min(1.0, settings.aquaforge.weight_vs_hybrid)))
-        wh = 1.0 - wy
-        if py is None:
-            out["rank_score"] = ph
-        elif ph is None:
-            out["rank_score"] = py
-        else:
-            out["rank_score"] = wy * float(py) + wh * float(ph)
-        return out
-
-    if not yolo_requested(settings):
-        return out
-    from aquaforge.yolo_marine_backend import (
-        try_load_marine_predictor,
-        yolo_confidence_only,
-    )
-
-    pred = try_load_marine_predictor(project_root, settings.yolo)
-    py = (
-        yolo_confidence_only(pred, tci_path, cx, cy, settings.yolo)
-        if pred is not None
-        else None
-    )
-    out["yolo_confidence"] = py
-    wy = float(max(0.0, min(1.0, settings.yolo.weight_vs_hybrid)))
-    wh = 1.0 - wy
-    if settings.backend == "yolo_only":
-        out["rank_score"] = py
-    elif settings.backend in {"yolo_fusion", "ensemble"}:
-        if py is None:
-            out["rank_score"] = ph
-        elif ph is None:
-            out["rank_score"] = py
-        else:
-            out["rank_score"] = wy * float(py) + wh * float(ph)
-    return out
 
 
 @dataclass
@@ -609,17 +494,11 @@ def run_detection_evaluation(
     max_spots: int | None = None,
 ) -> EvalRunResult:
     """
-    Compare ranking scores under **legacy_hybrid**, **yolo_fusion**, **ensemble**, and **aquaforge**,
-    and run spot inference for geometry metrics under those SOTA backends (same YAML sub-sections;
-    only ``backend`` differs for the neural columns).
+    Ranking Pearson r (AquaForge fused rank score vs binary labels) and geometry / heading
+    metrics from AquaForge spot inference.
     """
     notes: list[str] = []
-    chip_half = int(settings_sota.yolo.chip_half)
-
-    s_legacy = replace(settings_sota, backend="legacy_hybrid")
-    s_yf = replace(settings_sota, backend="yolo_fusion")
-    s_ens = replace(settings_sota, backend="ensemble")
-    s_aq = replace(settings_sota, backend="aquaforge")
+    chip_half = int(settings_sota.aquaforge.chip_half)
 
     mp = project_root / "data" / "models" / "ship_baseline.joblib"
     clf = load_ship_classifier(mp) if mp.is_file() else None
@@ -639,46 +518,27 @@ def run_detection_evaluation(
     if n_skip:
         notes.append(f"ranking_rows_skipped:{n_skip}")
 
-    pearson_by: dict[str, list[float]] = {
-        "legacy_hybrid": [],
-        "yolo_fusion": [],
-        "ensemble": [],
-        "aquaforge": [],
-    }
-    pearson_y: dict[str, list[float]] = {
-        "legacy_hybrid": [],
-        "yolo_fusion": [],
-        "ensemble": [],
-        "aquaforge": [],
-    }
+    pearson_rs: list[float] = []
+    pearson_ys: list[float] = []
     for row in rows:
-        for key, sett in (
-            ("legacy_hybrid", s_legacy),
-            ("yolo_fusion", s_yf),
-            ("ensemble", s_ens),
-            ("aquaforge", s_aq),
-        ):
-            ss = rank_score_at_point(
-                project_root,
-                row.tci_path,
-                row.cx,
-                row.cy,
-                clf,
-                chip_bundle,
-                sett,
-            )
-            rs = ss.get("rank_score")
-            if rs is not None:
-                pearson_by[key].append(float(rs))
-                pearson_y[key].append(float(row.y))
+        ss = rank_score_at_point(
+            project_root,
+            row.tci_path,
+            row.cx,
+            row.cy,
+            clf,
+            chip_bundle,
+            settings_sota,
+        )
+        rs = ss.get("rank_score")
+        if rs is not None:
+            pearson_rs.append(float(rs))
+            pearson_ys.append(float(row.y))
 
-    pearson_r: dict[str, float | None] = {}
-    n_rank = 0
-    n_scored_by_backend: dict[str, int] = {}
-    for key in ("legacy_hybrid", "yolo_fusion", "ensemble", "aquaforge"):
-        pearson_r[key] = _corrcoef_safe(pearson_by[key], pearson_y[key])
-        n_scored_by_backend[key] = len(pearson_by[key])
-        n_rank = max(n_rank, len(pearson_by[key]))
+    pr_aq = _corrcoef_safe(pearson_rs, pearson_ys)
+    pearson_r: dict[str, float | None] = {"aquaforge": pr_aq}
+    n_scored_by_backend = {"aquaforge": len(pearson_rs)}
+    n_rank = len(pearson_rs)
 
     geo = collect_vessel_geometry_ground_truth(
         jsonl_path, project_root, chip_half=chip_half
@@ -686,14 +546,10 @@ def run_detection_evaluation(
     if max_spots is not None:
         geo = geo[: max(0, int(max_spots))]
 
-    buckets = {
-        "yolo_fusion": HeadingErrorBucket(),
-        "ensemble": HeadingErrorBucket(),
-        "aquaforge": HeadingErrorBucket(),
-    }
-    rel_len_bb: dict[str, list[float]] = {"yolo_fusion": [], "ensemble": [], "aquaforge": []}
-    rel_wid_bb: dict[str, list[float]] = {"yolo_fusion": [], "ensemble": [], "aquaforge": []}
-    iou_bb: dict[str, list[float]] = {"yolo_fusion": [], "ensemble": [], "aquaforge": []}
+    buckets = {"aquaforge": HeadingErrorBucket()}
+    rel_len_bb: dict[str, list[float]] = {"aquaforge": []}
+    rel_wid_bb: dict[str, list[float]] = {"aquaforge": []}
+    iou_bb: dict[str, list[float]] = {"aquaforge": []}
     kp_better = 0
     kp_pairs = 0
     fusion_better = 0
@@ -712,72 +568,67 @@ def run_detection_evaluation(
             g.dimension_markers, g.cx, g.cy, chip_half
         )
 
-        for bname, sett in (
-            ("yolo_fusion", s_yf),
-            ("ensemble", s_ens),
-            ("aquaforge", s_aq),
+        sota = run_sota_spot_inference(
+            project_root,
+            g.tci_path,
+            g.cx,
+            g.cy,
+            settings_sota,
+            spot_col_off=int(sc0),
+            spot_row_off=int(sr0),
+            scl_path=scl_path,
+        )
+        bname = "aquaforge"
+        if gt_h is not None:
+            _append_heading_errors(buckets[bname], sota, float(gt_h))
+
+        gl, gw = g.length_m, g.width_m
+        if gl is not None:
+            e = _rel_dim_error(sota.get("yolo_length_m"), gl)
+            if e is not None:
+                rel_len_bb[bname].append(e)
+        if gw is not None:
+            e = _rel_dim_error(sota.get("yolo_width_m"), gw)
+            if e is not None:
+                rel_wid_bb[bname].append(e)
+        yolo_full = sota.get("yolo_polygon_fullres")
+        if (
+            isinstance(yolo_full, list)
+            and len(yolo_full) >= 3
+            and gt_quad
+            and len(gt_quad) >= 3
         ):
-            sota = run_sota_spot_inference(
-                project_root,
-                g.tci_path,
-                g.cx,
-                g.cy,
-                sett,
-                spot_col_off=int(sc0),
-                spot_row_off=int(sr0),
-                scl_path=scl_path,
+            poly_y = [(float(p[0]), float(p[1])) for p in yolo_full]
+            iou = mask_polygon_iou(gt_quad, poly_y)
+            if iou is not None:
+                iou_bb[bname].append(iou)
+
+        if gt_h is not None:
+            h_kp = sota.get("heading_keypoint_deg")
+            h_wake_combined = sota.get("heading_wake_deg")
+            h_heur = sota.get("heading_wake_heuristic_deg")
+            h_wake_for_line = (
+                float(h_wake_combined)
+                if h_wake_combined is not None
+                else (float(h_heur) if h_heur is not None else None)
             )
-            if gt_h is not None:
-                _append_heading_errors(buckets[bname], sota, float(gt_h))
+            h_f = sota.get("heading_fused_deg")
+            if h_kp is not None and h_wake_for_line is not None:
+                e_wake_best = best_wake_line_error_deg(h_wake_for_line, float(gt_h))
+                e_kp = angular_error_deg(float(h_kp), float(gt_h))
+                if e_wake_best is not None and e_kp is not None:
+                    kp_pairs += 1
+                    if e_kp + 5.0 < e_wake_best:
+                        kp_better += 1
+            if h_f is not None and h_wake_for_line is not None:
+                e_wake_best = best_wake_line_error_deg(h_wake_for_line, float(gt_h))
+                e_f = angular_error_deg(float(h_f), float(gt_h))
+                if e_wake_best is not None and e_f is not None:
+                    fusion_pairs += 1
+                    if e_f + 5.0 < e_wake_best:
+                        fusion_better += 1
 
-            # Measurements + IoU per backend (YOLO config identical -> values usually match).
-            gl, gw = g.length_m, g.width_m
-            if gl is not None:
-                e = _rel_dim_error(sota.get("yolo_length_m"), gl)
-                if e is not None:
-                    rel_len_bb[bname].append(e)
-            if gw is not None:
-                e = _rel_dim_error(sota.get("yolo_width_m"), gw)
-                if e is not None:
-                    rel_wid_bb[bname].append(e)
-            yolo_full = sota.get("yolo_polygon_fullres")
-            if (
-                isinstance(yolo_full, list)
-                and len(yolo_full) >= 3
-                and gt_quad
-                and len(gt_quad) >= 3
-            ):
-                poly_y = [(float(p[0]), float(p[1])) for p in yolo_full]
-                iou = mask_polygon_iou(gt_quad, poly_y)
-                if iou is not None:
-                    iou_bb[bname].append(iou)
-
-            if bname == "ensemble" and gt_h is not None:
-                h_kp = sota.get("heading_keypoint_deg")
-                h_wake_combined = sota.get("heading_wake_deg")
-                h_heur = sota.get("heading_wake_heuristic_deg")
-                h_wake_for_line = (
-                    float(h_wake_combined)
-                    if h_wake_combined is not None
-                    else (float(h_heur) if h_heur is not None else None)
-                )
-                h_f = sota.get("heading_fused_deg")
-                if h_kp is not None and h_wake_for_line is not None:
-                    e_wake_best = best_wake_line_error_deg(h_wake_for_line, float(gt_h))
-                    e_kp = angular_error_deg(float(h_kp), float(gt_h))
-                    if e_wake_best is not None and e_kp is not None:
-                        kp_pairs += 1
-                        if e_kp + 5.0 < e_wake_best:
-                            kp_better += 1
-                if h_f is not None and h_wake_for_line is not None:
-                    e_wake_best = best_wake_line_error_deg(h_wake_for_line, float(gt_h))
-                    e_f = angular_error_deg(float(h_f), float(gt_h))
-                    if e_wake_best is not None and e_f is not None:
-                        fusion_pairs += 1
-                        if e_f + 5.0 < e_wake_best:
-                            fusion_better += 1
-
-    ens = buckets["ensemble"]
+    aq = buckets["aquaforge"]
     pct_kp = (
         (100.0 * float(kp_better) / float(kp_pairs)) if kp_pairs else None
     )
@@ -801,19 +652,19 @@ def run_detection_evaluation(
         pct_fusion_better_than_wake_ambiguity=pct_fusion,
         n_fusion_vs_wake_pairs=fusion_pairs,
         notes=notes,
-        mean_abs_heading_error_hybrid_wake=circular_mae_deg(ens.wake_line),
-        mean_abs_heading_error_keypoint=circular_mae_deg(ens.keypoint),
-        mean_abs_heading_error_fused=circular_mae_deg(ens.fused),
-        median_abs_heading_error_keypoint=circular_median_abs_error_deg(ens.keypoint),
-        mean_rel_length_error=_mean_list(rel_len_bb["ensemble"]),
-        mean_rel_width_error=_mean_list(rel_wid_bb["ensemble"]),
-        mean_mask_iou=_mean_list(iou_bb["ensemble"]),
-        n_mask_iou=len(iou_bb["ensemble"]),
-        corr_hybrid_vs_label=pearson_r.get("legacy_hybrid"),
-        corr_rank_sota_vs_label=pearson_r.get(settings_sota.backend),
-        n_heading_eval=len(ens.keypoint),
-        n_heading_wake_eval=len(ens.wake_line),
-        n_dim_eval=len(rel_len_bb["ensemble"]),
+        mean_abs_heading_error_hybrid_wake=circular_mae_deg(aq.wake_line),
+        mean_abs_heading_error_keypoint=circular_mae_deg(aq.keypoint),
+        mean_abs_heading_error_fused=circular_mae_deg(aq.fused),
+        median_abs_heading_error_keypoint=circular_median_abs_error_deg(aq.keypoint),
+        mean_rel_length_error=_mean_list(rel_len_bb["aquaforge"]),
+        mean_rel_width_error=_mean_list(rel_wid_bb["aquaforge"]),
+        mean_mask_iou=_mean_list(iou_bb["aquaforge"]),
+        n_mask_iou=len(iou_bb["aquaforge"]),
+        corr_hybrid_vs_label=None,
+        corr_rank_sota_vs_label=pearson_r.get("aquaforge"),
+        n_heading_eval=len(aq.keypoint),
+        n_heading_wake_eval=len(aq.wake_line),
+        n_dim_eval=len(rel_len_bb["aquaforge"]),
     )
     return res
 
@@ -836,99 +687,25 @@ def format_eval_report(
     """
     Markdown tables with GFM-friendly alignment (text left, numbers right).
 
-    When ``bold_best`` is true, the best value per comparable row among Legacy / YOLO-fusion /
-    Ensemble / AquaForge is wrapped in ``**`` (for summary / GitHub views). Count-only rows are not bolded.
+    ``bold_best`` is accepted for API compatibility; single-column AquaForge reports do not bold.
     """
-    yf = res.heading_buckets.get("yolo_fusion") or HeadingErrorBucket()
-    ens = res.heading_buckets.get("ensemble") or HeadingErrorBucket()
+    _ = bold_best
     aq = res.heading_buckets.get("aquaforge") or HeadingErrorBucket()
-    # Short "YOLO-fus." keeps tables narrower on mobile/GitHub (still spelled out in prose above).
-    hdr5 = "| Metric | Legacy | YOLO-fus. | Ensemble | AquaForge |"
-    sep5 = "| :--- | ---: | ---: | ---: | ---: |"
-
-    r_leg = fmt_eval_num(res.pearson_r_by_backend.get("legacy_hybrid"), ndigits=4)
-    r_yf = fmt_eval_num(res.pearson_r_by_backend.get("yolo_fusion"), ndigits=4)
-    r_ens = fmt_eval_num(res.pearson_r_by_backend.get("ensemble"), ndigits=4)
+    hdr = "| Metric | AquaForge |"
+    sep = "| :--- | ---: |"
     r_aq = fmt_eval_num(res.pearson_r_by_backend.get("aquaforge"), ndigits=4)
-    r_leg, r_yf, r_ens, r_aq = _bold_best_four(
-        r_leg, r_yf, r_ens, r_aq, bold_best=bold_best, higher_better=True
-    )
-
-    w_leg, w_yf, w_ens, w_aq = _bold_best_four(
-        _NA,
-        _heading_cell_mae(yf, "wake_line"),
-        _heading_cell_mae(ens, "wake_line"),
-        _heading_cell_mae(aq, "wake_line"),
-        bold_best=bold_best,
-        higher_better=False,
-    )
-    kp_leg, kp_yf, kp_ens, kp_aq = _bold_best_four(
-        _NA,
-        _heading_cell_mae(yf, "keypoint"),
-        _heading_cell_mae(ens, "keypoint"),
-        _heading_cell_mae(aq, "keypoint"),
-        bold_best=bold_best,
-        higher_better=False,
-    )
-    md_leg, md_yf, md_ens, md_aq = _bold_best_four(
-        _NA,
-        _heading_cell_median_kp(yf),
-        _heading_cell_median_kp(ens),
-        _heading_cell_median_kp(aq),
-        bold_best=bold_best,
-        higher_better=False,
-    )
-    fu_leg, fu_yf, fu_ens, fu_aq = _bold_best_four(
-        _NA,
-        _heading_cell_mae(yf, "fused"),
-        _heading_cell_mae(ens, "fused"),
-        _heading_cell_mae(aq, "fused"),
-        bold_best=bold_best,
-        higher_better=False,
-    )
-
-    len_yf = fmt_eval_num(
-        _mean_list(res.rel_length_by_backend.get("yolo_fusion", [])), ndigits=4
-    )
-    len_ens = fmt_eval_num(
-        _mean_list(res.rel_length_by_backend.get("ensemble", [])), ndigits=4
-    )
     len_aq = fmt_eval_num(
         _mean_list(res.rel_length_by_backend.get("aquaforge", [])), ndigits=4
-    )
-    len_leg, len_yf, len_ens, len_aq = _bold_best_four(
-        _NA, len_yf, len_ens, len_aq, bold_best=bold_best, higher_better=False
-    )
-
-    wid_yf = fmt_eval_num(
-        _mean_list(res.rel_width_by_backend.get("yolo_fusion", [])), ndigits=4
-    )
-    wid_ens = fmt_eval_num(
-        _mean_list(res.rel_width_by_backend.get("ensemble", [])), ndigits=4
     )
     wid_aq = fmt_eval_num(
         _mean_list(res.rel_width_by_backend.get("aquaforge", [])), ndigits=4
     )
-    wid_leg, wid_yf, wid_ens, wid_aq = _bold_best_four(
-        _NA, wid_yf, wid_ens, wid_aq, bold_best=bold_best, higher_better=False
-    )
-
-    iou_yf = fmt_eval_num(
-        _mean_list(res.mask_iou_by_backend.get("yolo_fusion", [])), ndigits=4
-    )
-    iou_ens = fmt_eval_num(
-        _mean_list(res.mask_iou_by_backend.get("ensemble", [])), ndigits=4
-    )
     iou_aq = fmt_eval_num(
         _mean_list(res.mask_iou_by_backend.get("aquaforge", [])), ndigits=4
     )
-    iou_leg, iou_yf, iou_ens, iou_aq = _bold_best_four(
-        _NA, iou_yf, iou_ens, iou_aq, bold_best=bold_best, higher_better=True
-    )
-
     lines: list[str] = [
         "## AquaForge — detection / SOTA evaluation",
-        f"**YAML backend (reference):** `{settings_sota.backend}`",
+        f"**Chip half (px):** `{settings_sota.aquaforge.chip_half}`",
         "",
         f"Labeled points (binary): {res.n_labeled_points}",
         f"Vessel geometry rows: {res.n_geometry_spots}",
@@ -936,26 +713,21 @@ def format_eval_report(
         "",
         "### Ranking (Pearson r vs binary label)",
         "",
-        hdr5,
-        sep5,
-        f"| Pearson r | {r_leg} | {r_yf} | {r_ens} | {r_aq} |",
-        "| N scored | "
-        f"{res.n_scored_by_backend.get('legacy_hybrid', 0)} | "
-        f"{res.n_scored_by_backend.get('yolo_fusion', 0)} | "
-        f"{res.n_scored_by_backend.get('ensemble', 0)} | "
-        f"{res.n_scored_by_backend.get('aquaforge', 0)} |",
+        hdr,
+        sep,
+        f"| Pearson r | {r_aq} |",
+        f"| N scored | {res.n_scored_by_backend.get('aquaforge', 0)} |",
         "",
-        "### Heading - circular MAE (deg, shortest arc; wake uses min of two directions)",
-        "_Legacy has no heading model - N/A._",
+        "### Heading — circular MAE (deg; wake uses min of two directions)",
         "",
-        hdr5,
-        sep5,
-        f"| Wake line MAE | {w_leg} | {w_yf} | {w_ens} | {w_aq} |",
-        f"| Keypoint MAE | {kp_leg} | {kp_yf} | {kp_ens} | {kp_aq} |",
-        f"| Keypoint median | {md_leg} | {md_yf} | {md_ens} | {md_aq} |",
-        f"| Fused MAE | {fu_leg} | {fu_yf} | {fu_ens} | {fu_aq} |",
+        hdr,
+        sep,
+        f"| Wake line MAE | {_heading_cell_mae(aq, 'wake_line')} |",
+        f"| Keypoint MAE | {_heading_cell_mae(aq, 'keypoint')} |",
+        f"| Keypoint median | {_heading_cell_median_kp(aq)} |",
+        f"| Fused MAE | {_heading_cell_mae(aq, 'fused')} |",
         "",
-        "### Fusion benefit (ensemble, vs undirected wake; +5 deg margin)",
+        "### Fusion benefit (vs undirected wake; +5° margin)",
         "",
         "| Metric | Value |",
         "| :--- | :--- |",
@@ -964,26 +736,20 @@ def format_eval_report(
         f"| % fused beats wake alone | {fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)} "
         f"(n={res.n_fusion_vs_wake_pairs if res.n_fusion_vs_wake_pairs else _NA}) |",
         "",
-        "### Measurements - mean relative abs error vs labeled L/W",
+        "### Measurements — mean relative abs error vs labeled L/W",
         "",
-        hdr5,
-        sep5,
-        f"| Mean rel. length err | {len_leg} | {len_yf} | {len_ens} | {len_aq} |",
-        f"| Mean rel. width err | {wid_leg} | {wid_yf} | {wid_ens} | {wid_aq} |",
-        "| N (length) | "
-        f"{_NA} | {len(res.rel_length_by_backend.get('yolo_fusion', []))} | "
-        f"{len(res.rel_length_by_backend.get('ensemble', []))} | "
-        f"{len(res.rel_length_by_backend.get('aquaforge', []))} |",
+        hdr,
+        sep,
+        f"| Mean rel. length err | {len_aq} |",
+        f"| Mean rel. width err | {wid_aq} |",
+        f"| N (length) | {len(res.rel_length_by_backend.get('aquaforge', []))} |",
         "",
-        "### Hull overlap - mean IoU (labeled quad vs YOLO polygon)",
+        "### Hull overlap — mean IoU (labeled quad vs model polygon)",
         "",
-        hdr5,
-        sep5,
-        f"| Mean IoU | {iou_leg} | {iou_yf} | {iou_ens} | {iou_aq} |",
-        "| N | "
-        f"{_NA} | {len(res.mask_iou_by_backend.get('yolo_fusion', []))} | "
-        f"{len(res.mask_iou_by_backend.get('ensemble', []))} | "
-        f"{len(res.mask_iou_by_backend.get('aquaforge', []))} |",
+        hdr,
+        sep,
+        f"| Mean IoU | {iou_aq} |",
+        f"| N | {len(res.mask_iou_by_backend.get('aquaforge', []))} |",
         "",
         "### Notes",
     ]
@@ -992,14 +758,9 @@ def format_eval_report(
 
 
 def _ranking_backends_with_scores(res: EvalRunResult) -> list[str]:
-    order = ("legacy_hybrid", "yolo_fusion", "ensemble", "aquaforge")
-    pretty = {
-        "legacy_hybrid": "Legacy",
-        "yolo_fusion": "YOLO-fusion",
-        "ensemble": "Ensemble",
-        "aquaforge": "AquaForge",
-    }
-    return [pretty[k] for k in order if res.n_scored_by_backend.get(k, 0) > 0]
+    if res.n_scored_by_backend.get("aquaforge", 0) > 0:
+        return ["AquaForge"]
+    return []
 
 
 def _key_takeaways_and_summary_lines(
@@ -1025,7 +786,7 @@ def _key_takeaways_and_summary_lines(
         takeaway_lines.append(
             "- **Fusion:** Improved heading vs ambiguous wake by **≥5°** in "
             f"**{fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)}** of cases "
-            f"(n={res.n_fusion_vs_wake_pairs}; ensemble, undirected wake baseline)."
+            f"(n={res.n_fusion_vs_wake_pairs}; AquaForge, undirected wake baseline)."
         )
     else:
         takeaway_lines.append(
@@ -1037,27 +798,12 @@ def _key_takeaways_and_summary_lines(
         takeaway_lines.append(
             "- **Keypoint:** Beat ambiguous wake by **≥5°** in "
             f"**{fmt_eval_pct(res.pct_keypoint_better_than_wake_line)}** of cases "
-            f"(n={res.n_kp_vs_wake_pairs}; ensemble)."
+            f"(n={res.n_kp_vs_wake_pairs}; AquaForge)."
         )
 
-    best_r = None
-    best_name = None
-    for key, label in (
-        ("legacy_hybrid", "Legacy"),
-        ("yolo_fusion", "YOLO-fusion"),
-        ("ensemble", "Ensemble"),
-        ("aquaforge", "AquaForge"),
-    ):
-        v = res.pearson_r_by_backend.get(key)
-        if v is None or not math.isfinite(float(v)):
-            continue
-        if best_r is None or float(v) > float(best_r):
-            best_r = float(v)
-            best_name = label
-    if best_name is not None and best_r is not None:
-        takeaway_lines.append(
-            f"- **Ranking:** Strongest Pearson **r** is **{best_name}** (**{best_r:.4f}**)."
-        )
+    v = res.pearson_r_by_backend.get("aquaforge")
+    if v is not None and math.isfinite(float(v)):
+        takeaway_lines.append(f"- **Ranking:** Pearson **r** (AquaForge rank score): **{float(v):.4f}**.")
 
     takeaway_lines.extend(
         [
@@ -1085,12 +831,12 @@ def _key_takeaways_and_summary_lines(
         "| Field | Value |",
         "| :--- | :--- |",
         f"| JSONL | `{jl}` |",
-        f"| Reference backend | `{settings_sota.backend}` |",
+        f"| AquaForge chip half (px) | `{settings_sota.aquaforge.chip_half}` |",
         f"| Geometry spots | {res.n_geometry_spots} |",
         f"| Binary labeled points | {res.n_labeled_points} |",
         f"| Heading GT rows | {res.n_heading_gt} |",
         f"| Backends with ranking scores | {n_scored} ({scored_txt}) |",
-        f"| % fused beats wake (ensemble) | {fusion_cell} |",
+        f"| % fused beats wake (AquaForge) | {fusion_cell} |",
         "",
         "_Wide tables scroll horizontally on narrow GitHub / mobile views._",
         "",
@@ -1123,25 +869,23 @@ def format_demo_console_summary(
     max_spots: int,
 ) -> str:
     """Short plain-text lines for ``--demo`` (no markdown tables)."""
+    aq = res.heading_buckets.get("aquaforge") or HeadingErrorBucket()
     lines = [
         "=== AquaForge quick eval demo ===",
         f"JSONL: {jsonl_path}",
-        f"Reference backend: {settings_sota.backend}",
+        f"Chip half (px): {settings_sota.aquaforge.chip_half}",
         f"Cap: {max_spots} geometry spot(s)",
         f"Geometry spots evaluated: {res.n_geometry_spots}",
         f"Binary labeled points: {res.n_labeled_points} | Heading GT rows: {res.n_heading_gt}",
-        "Pearson r (legacy / YOLO-fusion / ensemble / AquaForge): "
-        f"{fmt_eval_num(res.pearson_r_by_backend.get('legacy_hybrid'), ndigits=4)} / "
-        f"{fmt_eval_num(res.pearson_r_by_backend.get('yolo_fusion'), ndigits=4)} / "
-        f"{fmt_eval_num(res.pearson_r_by_backend.get('ensemble'), ndigits=4)} / "
+        "Pearson r (AquaForge rank score): "
         f"{fmt_eval_num(res.pearson_r_by_backend.get('aquaforge'), ndigits=4)}",
-        "Ensemble heading MAE (deg): wake / keypoint / fused: "
-        f"{fmt_eval_num(circular_mae_deg((res.heading_buckets.get('ensemble') or HeadingErrorBucket()).wake_line), ndigits=2)} / "
-        f"{fmt_eval_num(circular_mae_deg((res.heading_buckets.get('ensemble') or HeadingErrorBucket()).keypoint), ndigits=2)} / "
-        f"{fmt_eval_num(circular_mae_deg((res.heading_buckets.get('ensemble') or HeadingErrorBucket()).fused), ndigits=2)}",
-        f"% fused beats wake (ensemble, >5°): {fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)} "
+        "Heading MAE (deg): wake / keypoint / fused: "
+        f"{fmt_eval_num(circular_mae_deg(aq.wake_line), ndigits=2)} / "
+        f"{fmt_eval_num(circular_mae_deg(aq.keypoint), ndigits=2)} / "
+        f"{fmt_eval_num(circular_mae_deg(aq.fused), ndigits=2)}",
+        f"% fused beats wake (>5°): {fmt_eval_pct(res.pct_fusion_better_than_wake_ambiguity)} "
         f"(n={res.n_fusion_vs_wake_pairs if res.n_fusion_vs_wake_pairs else _NA})",
-        f"Mean mask IoU (ensemble): {fmt_eval_num(res.mean_mask_iou, ndigits=4)} (n={res.n_mask_iou})",
+        f"Mean mask IoU: {fmt_eval_num(res.mean_mask_iou, ndigits=4)} (n={res.n_mask_iou})",
     ]
     if res.notes:
         lines.append("Notes: " + "; ".join(res.notes[:5]))
@@ -1245,7 +989,7 @@ def main_cli(argv: list[str] | None = None) -> int:
     import argparse
 
     ap = argparse.ArgumentParser(
-        description="Benchmark legacy hybrid vs SOTA backend on labeled JSONL."
+        description="Benchmark AquaForge ranking and spot metrics on labeled JSONL."
     )
     ap.add_argument("--project-root", type=Path, default=Path.cwd())
     ap.add_argument(
@@ -1256,12 +1000,6 @@ def main_cli(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--labels-dir", type=Path, default=None)
     ap.add_argument("--detection-config", type=Path, default=None)
-    ap.add_argument(
-        "--backend",
-        type=str,
-        default=None,
-        choices=("yolo_fusion", "ensemble", "aquaforge", "yolo_only"),
-    )
     ap.add_argument("--max-spots", type=int, default=None)
     ap.add_argument(
         "--demo",
@@ -1293,23 +1031,7 @@ def main_cli(argv: list[str] | None = None) -> int:
         os.environ["AF_DETECTION_CONFIG"] = p
         os.environ["VD_DETECTION_CONFIG"] = p
 
-    base_settings = load_detection_settings(root)
-    if args.backend:
-        settings_sota = replace(base_settings, backend=str(args.backend))
-    else:
-        settings_sota = base_settings
-
-    if settings_sota.backend not in {
-        "yolo_fusion",
-        "ensemble",
-        "yolo_only",
-        "aquaforge",
-    }:
-        print(
-            "Warning: detection.yaml backend is not a neural SOTA mode; "
-            "reference column may match legacy. Use --backend if needed.",
-            flush=True,
-        )
+    settings_sota = load_detection_settings(root)
 
     jsonl_paths: list[Path]
     if args.labels_dir:
@@ -1362,7 +1084,7 @@ def main_cli(argv: list[str] | None = None) -> int:
                 tr.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
             jd = eval_result_to_jsonable(res)
             jd["jsonl"] = str(jp)
-            jd["settings_backend"] = settings_sota.backend
+            jd["settings_backend"] = "aquaforge"
             jp_out.append(jd)
         return tr, jp_out
 

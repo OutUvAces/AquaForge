@@ -1,8 +1,8 @@
 """
 ShipStructure / SLAD-style vessel keypoints via ONNX Runtime.
 
-Export your MMPose / ShipStructure checkpoint to ONNX (opset ≥ 11 recommended), then set
-``keypoints.external_onnx_path`` in ``detection.yaml``. This module does **not** ship weights.
+Export your MMPose / ShipStructure checkpoint to ONNX (opset ≥ 11 recommended), then pass
+``KeypointsSection.external_onnx_path`` when calling the adapter from scripts. This module does **not** ship weights.
 
 Supported output layouts (``output_layout`` in YAML):
 
@@ -26,7 +26,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-from aquaforge.detection_config import KeypointsSection, OnnxRuntimeSection
+from aquaforge.detection_config import OnnxRuntimeSection
+from aquaforge.keypoints_config import KeypointsSection
 from aquaforge.onnx_session_cache import get_ort_session
 from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
 

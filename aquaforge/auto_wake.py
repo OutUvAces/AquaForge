@@ -499,7 +499,7 @@ def ship_candidates_fullres(
     water_frac = float(np.mean(water))
     if min_water_fraction > 0.0 and water_frac < min_water_fraction:
         raise AutoWakeError(
-            f"This image is mostly land or masked out — only about {100.0 * water_frac:.1f}% is usable open water. "
+            f"This image is mostly land or masked out — only about {int(round(100.0 * water_frac))}% is usable open water. "
             "Choose a satellite image that shows more ocean."
         )
 

@@ -1,8 +1,8 @@
 """
 Spot-review visuals: contrast-stretched crops with optional detection overlays (PIL).
 
-The web UI turns layers on/off via ``draw_*`` flags on :func:`overlay_sota_on_spot_rgb`; the daily layout
-defaults to **outline + direction** with keypoints and wake off until the user enables them under **On image**.
+The web UI turns layers on/off via ``draw_*`` flags on :func:`overlay_sota_on_spot_rgb`; default layers
+are all on (outline, direction, keypoints, wake) under **On image**.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from aquaforge.locator_coords import LetterboxSquareMeta
 
 # Legacy ratio spot:locator ≈ 1:10 when locator side was derived as spot_px × this factor.
 # The web UI now sets locator extent via a separate 10 km ground target (see web_ui.REVIEW_LOCATOR_TARGET_SIDE_M).
@@ -870,12 +872,14 @@ def overlay_heading_arrow_north(
     *,
     cx: float | None = None,
     cy: float | None = None,
-    length_frac: float = 0.24,
+    length_frac: float | None = None,
     color: tuple[int, int, int] = (255, 230, 40),
+    placement: str = "corner_br",
 ) -> np.ndarray:
     """
     Draw a **direction arrow** on the chip: degrees clockwise from north (up in the image).
-    Makes fused / keypoint heading visible at a glance on the close-up view.
+    Default ``placement="corner_br"`` draws in the bottom-right margin so the vessel and hull
+    outline stay visible (center placement covered the subject).
     """
     from PIL import Image, ImageDraw
 
@@ -886,19 +890,92 @@ def overlay_heading_arrow_north(
     # North = toward top of image (−y); east = +x
     dx = float(np.sin(rad))
     dy = float(-np.cos(rad))
-    cx_f = float(w * 0.5 if cx is None else np.clip(cx, 0, w - 1))
-    cy_f = float(h * 0.5 if cy is None else np.clip(cy, 0, h - 1))
-    L = float(min(h, w)) * float(np.clip(length_frac, 0.08, 0.45))
+    m_side = float(min(h, w))
+    if cx is not None and cy is not None:
+        cx_f = float(np.clip(cx, 0, w - 1))
+        cy_f = float(np.clip(cy, 0, h - 1))
+        lf = float(length_frac) if length_frac is not None else 0.24
+    elif placement == "center":
+        cx_f = float(w * 0.5)
+        cy_f = float(h * 0.5)
+        lf = float(length_frac) if length_frac is not None else 0.24
+    else:
+        margin = max(6.0, m_side * 0.07)
+        cx_f = float(w - 1 - margin)
+        cy_f = float(h - 1 - margin)
+        lf = float(length_frac) if length_frac is not None else 0.12
+    L = m_side * float(np.clip(lf, 0.06, 0.45))
     x1 = float(np.clip(cx_f + dx * L, 0, w - 1))
     y1 = float(np.clip(cy_f + dy * L, 0, h - 1))
     im = Image.fromarray(rgb.copy())
     dr = ImageDraw.Draw(im)
-    lw = max(2, min(h, w) // 64)
+    lw = max(2, int(m_side) // 64)
+    outline_rgb = (24, 24, 28)
+    if lw >= 2:
+        dr.line([(cx_f, cy_f), (x1, y1)], fill=outline_rgb, width=lw + 2)
     dr.line([(cx_f, cy_f), (x1, y1)], fill=color, width=lw)
-    ah = max(5.0, L * 0.22)
+    ah = max(4.0, L * 0.22)
     bx, by = x1 - dx * ah, y1 - dy * ah
     perp_x, perp_y = -dy, dx
     p1 = (bx + perp_x * ah * 0.45, by + perp_y * ah * 0.45)
     p2 = (bx - perp_x * ah * 0.45, by - perp_y * ah * 0.45)
-    dr.polygon([(x1, y1), p1, p2], fill=color)
+    ow = max(1, lw // 2)
+    try:
+        dr.polygon([(x1, y1), p1, p2], fill=color, outline=outline_rgb, width=ow)
+    except TypeError:
+        dr.polygon([(x1, y1), p1, p2], fill=color)
+    return np.asarray(im)
+
+
+def overlay_heading_arrow_north_on_letterbox(
+    rgb_square: np.ndarray,
+    meta: LetterboxSquareMeta,
+    heading_deg_from_north: float,
+    *,
+    color: tuple[int, int, int] = (255, 230, 40),
+) -> np.ndarray:
+    """
+    Draw the heading arrow after :func:`letterbox_rgb_to_square`, anchored at the **bottom
+    center** of the pasted chip so it stays on the imagery (not the square’s corner padding).
+    """
+    from PIL import Image, ImageDraw
+
+    h, w = int(rgb_square.shape[0]), int(rgb_square.shape[1])
+    ox, oy = int(meta.ox), int(meta.oy)
+    nw, nh = int(meta.nw), int(meta.nh)
+    if w < 8 or h < 8 or nw < 12 or nh < 12:
+        return rgb_square
+
+    m_short = float(min(nw, nh))
+    margin = max(8.0, m_short * 0.055)
+    cx_f = float(ox) + 0.5 * float(max(nw - 1, 1))
+    # Inset from bottom so the arrowhead is not clipped by the widget edge.
+    cy_f = float(oy + nh - 1) - 2.35 * margin
+    cx_f = float(np.clip(cx_f, float(ox) + margin, float(ox + nw - 1) - margin))
+    cy_f = float(np.clip(cy_f, float(oy) + margin, float(oy + nh - 1) - 2.0 * margin))
+
+    rad = float(heading_deg_from_north) * (np.pi / 180.0)
+    dx = float(np.sin(rad))
+    dy = float(-np.cos(rad))
+    lf = 0.11
+    L = m_short * float(np.clip(lf, 0.08, 0.26))
+    x1 = float(np.clip(cx_f + dx * L, 0, w - 1))
+    y1 = float(np.clip(cy_f + dy * L, 0, h - 1))
+    im = Image.fromarray(rgb_square.copy())
+    dr = ImageDraw.Draw(im)
+    lw = max(2, int(m_short) // 72)
+    outline_rgb = (24, 24, 28)
+    if lw >= 2:
+        dr.line([(cx_f, cy_f), (x1, y1)], fill=outline_rgb, width=lw + 2)
+    dr.line([(cx_f, cy_f), (x1, y1)], fill=color, width=lw)
+    ah = max(3.0, L * 0.16)
+    bx, by = x1 - dx * ah, y1 - dy * ah
+    perp_x, perp_y = -dy, dx
+    p1 = (bx + perp_x * ah * 0.45, by + perp_y * ah * 0.45)
+    p2 = (bx - perp_x * ah * 0.45, by - perp_y * ah * 0.45)
+    ow = max(1, lw // 2)
+    try:
+        dr.polygon([(x1, y1), p1, p2], fill=color, outline=outline_rgb, width=ow)
+    except TypeError:
+        dr.polygon([(x1, y1), p1, p2], fill=color)
     return np.asarray(im)

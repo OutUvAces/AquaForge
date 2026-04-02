@@ -55,10 +55,12 @@ def main() -> None:
 
     weights = args.weights
     if weights is None:
-        from aquaforge.detection_config import YoloSection
-        from aquaforge.yolo_marine_backend import ensure_marine_yolo_weights
+        from aquaforge.yolo_marine_backend import (
+            MarineYoloConfig,
+            ensure_marine_yolo_weights,
+        )
 
-        weights = ensure_marine_yolo_weights(ROOT, YoloSection())
+        weights = ensure_marine_yolo_weights(ROOT, MarineYoloConfig())
         if weights is None:
             print(
                 "No --weights and could not download marine YOLO (install huggingface_hub / check network).",

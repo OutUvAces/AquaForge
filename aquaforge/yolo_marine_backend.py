@@ -1,14 +1,17 @@
 """
-Ultralytics YOLO11 segmentation for Sentinel-2 marine vessels (mayrajeo/marine-vessel-yolo).
+Ultralytics YOLO11 segmentation helpers (mayrajeo/marine-vessel-yolo).
 
-Optional dependency: install ``requirements-ml.txt``. Without torch/ultralytics, imports fail
-gracefully and the UI falls back to legacy rankers.
+Used for optional **standalone** marine-YOLO scripts and shared geometry helpers
+(``polygon_fullres_to_crop``) for AquaForge chip overlays. The main app does not run
+marine YOLO as a detection backend.
+
+Optional dependency: install ``requirements-ml.txt``. Without torch/ultralytics, loads fail
+gracefully and return ``None``.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -17,10 +20,23 @@ from typing import Any
 
 import numpy as np
 
-from aquaforge.detection_config import YoloSection
 from aquaforge.raster_rgb import read_rgba_window
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MarineYoloConfig:
+    """Defaults for optional marine-YOLO weight resolution (not part of :class:`DetectionSettings`)."""
+
+    hf_repo: str = "mayrajeo/marine-vessel-yolo"
+    weights_file: str = "yolo11s_tci.pt"
+    weights_path: str | None = None
+    imgsz: int = 640
+    chip_half: int = 320
+    conf_threshold: float = 0.15
+    chip_batch_size: int = 6
+
 
 @dataclass
 class YoloSpotResult:
@@ -39,6 +55,9 @@ _CHIP_CACHE_MAX = 512  # Performance: scene-sized queues + SOTA reuse without ch
 _chip_result_lock = threading.Lock()
 _chip_result_cache: OrderedDict[tuple[Any, ...], YoloSpotResult | None] = OrderedDict()
 _CACHE_MISS = object()
+
+_marine_lock = threading.Lock()
+_marine_predictors: dict[tuple[str, int], Any] = {}
 
 
 def clear_yolo_chip_result_cache() -> None:
@@ -64,6 +83,8 @@ def _chip_result_cache_key(
     cx: float,
     cy: float,
 ) -> tuple[Any, ...]:
+    # Per-chip polygons live in crop pixel space; keys must not merge distinct full-image centers.
+    # Old int(round(cx*4)) merged spots within ~0.25 px — wrong cache hits reused one mask on every chip.
     return (
         weights_sig[0],
         weights_sig[1],
@@ -72,8 +93,8 @@ def _chip_result_cache_key(
         int(chip_half),
         int(imgsz),
         round(float(conf_threshold), 6),
-        int(round(float(cx) * 4.0)),
-        int(round(float(cy) * 4.0)),
+        round(float(cx), 4),
+        round(float(cy), 4),
     )
 
 
@@ -97,7 +118,7 @@ def default_marine_yolo_dir(project_root: Path) -> Path:
     return project_root / "data" / "models" / "marine_yolo"
 
 
-def ensure_marine_yolo_weights(project_root: Path, yolo: YoloSection) -> Path | None:
+def ensure_marine_yolo_weights(project_root: Path, yolo: MarineYoloConfig) -> Path | None:
     """
     Return path to ``.pt`` weights: local ``weights_path``, else HF download into ``data/models/marine_yolo/``.
     """
@@ -424,31 +445,27 @@ class MarineYOLOPredictor:
         return out
 
 
-def try_load_marine_predictor(project_root: Path, yolo: YoloSection) -> MarineYOLOPredictor | None:
-    """Performance: returns process-cached predictor when available."""
-    from aquaforge.model_manager import get_cached_marine_predictor
-
-    return get_cached_marine_predictor(project_root, yolo)
-
-
-def yolo_confidence_only(
-    predictor: MarineYOLOPredictor | None,
-    tci_path: Path,
-    cx: float,
-    cy: float,
-    yolo: YoloSection,
-) -> float:
-    if predictor is None:
-        return 0.0
-    r = predictor.predict_at_candidate(
-        tci_path,
-        cx,
-        cy,
-        chip_half=int(yolo.chip_half),
-        imgsz=int(yolo.imgsz),
-        conf_threshold=float(yolo.conf_threshold),
-    )
-    return float(r.confidence) if r is not None else 0.0
+def try_load_marine_predictor(
+    project_root: Path, yolo: MarineYoloConfig | None = None
+) -> MarineYOLOPredictor | None:
+    """Return a process-cached :class:`MarineYOLOPredictor` when weights exist."""
+    cfg = yolo or MarineYoloConfig()
+    w = ensure_marine_yolo_weights(project_root, cfg)
+    if w is None:
+        return None
+    try:
+        st = w.stat()
+        key = (str(w.resolve()), int(st.st_mtime_ns))
+    except OSError:
+        return None
+    with _marine_lock:
+        if key not in _marine_predictors:
+            try:
+                _marine_predictors[key] = MarineYOLOPredictor(w)
+            except Exception as e:
+                logger.warning("Marine YOLO load failed: %s", e)
+                return None
+        return _marine_predictors[key]
 
 
 def polygon_fullres_to_crop(
@@ -461,94 +478,4 @@ def polygon_fullres_to_crop(
     out: list[tuple[float, float]] = []
     for x, y in poly_full:
         out.append((float(x) - float(spot_col_off), float(y) - float(spot_row_off)))
-    return out
-
-
-def _sliding_window_centers(
-    width: int,
-    height: int,
-    chip_half: int,
-    stride: int,
-    max_windows: int,
-) -> list[tuple[float, float]]:
-    """Grid of (cx, cy) in full-raster pixels, clamped inside the image."""
-    half = max(8, int(chip_half))
-    if width <= 2 * half or height <= 2 * half:
-        return [(width * 0.5, height * 0.5)]
-    xs = list(range(half, max(half + 1, width - half), max(8, int(stride))))
-    ys = list(range(half, max(half + 1, height - half), max(8, int(stride))))
-    if not xs:
-        xs = [width // 2]
-    if not ys:
-        ys = [height // 2]
-    pts = [(float(x), float(y)) for y in ys for x in xs]
-    if len(pts) <= max_windows:
-        return pts
-    step = max(1, int(math.ceil(len(pts) / float(max_windows))))
-    return pts[::step][: int(max_windows)]
-
-
-def merge_candidates_with_sliding_window_yolo(
-    base: list[tuple[float, float, float]],
-    tci_path: Path,
-    predictor: MarineYOLOPredictor | None,
-    yolo: Any,
-) -> list[tuple[float, float, float]]:
-    """
-    Append high-confidence YOLO hits from a coarse sliding grid (full scene).
-
-    Dedupes against existing candidates within ``sliding_window_dedupe_px``. Original
-    detector scores are preserved for rows that originated in ``base``.
-    """
-    from aquaforge.detection_config import YoloSection
-
-    if not isinstance(yolo, YoloSection):
-        return base
-    if str(yolo.inference_mode).strip() != "sliding_window_merge":
-        return base
-    if predictor is None:
-        return base
-
-    import rasterio
-
-    with rasterio.open(tci_path) as ds:
-        w, h = ds.width, ds.height
-
-    centers = _sliding_window_centers(
-        w,
-        h,
-        int(yolo.chip_half),
-        int(yolo.sliding_window_stride),
-        int(yolo.sliding_window_max_windows),
-    )
-    yolo_hits: list[tuple[float, float, float]] = []
-    bs = max(1, int(yolo.chip_batch_size))
-    for start in range(0, len(centers), bs):
-        chunk = centers[start : start + bs]
-        batch_out = predictor.predict_batch_at_candidates(
-            tci_path,
-            chunk,
-            chip_half=int(yolo.chip_half),
-            imgsz=int(yolo.imgsz),
-            conf_threshold=float(yolo.conf_threshold),
-            batch_size=bs,
-        )
-        for (cx, cy), r in zip(chunk, batch_out):
-            if r is None or float(r.confidence) < float(yolo.sliding_window_min_conf):
-                continue
-            yolo_hits.append((cx, cy, float(r.confidence)))
-
-    dedupe = float(max(4.0, yolo.sliding_window_dedupe_px))
-    out = list(base)
-
-    def _near_existing(px: float, py: float) -> bool:
-        for bx, by, _ in out:
-            if abs(px - bx) <= dedupe and abs(py - by) <= dedupe:
-                return True
-        return False
-
-    for cx, cy, conf in yolo_hits:
-        if _near_existing(cx, cy):
-            continue
-        out.append((cx, cy, conf))
     return out

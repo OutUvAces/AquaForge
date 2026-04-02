@@ -101,7 +101,7 @@ class TestEvalReportJson(unittest.TestCase):
             d = eval_result_to_jsonable(res)
             self.assertIn("pearson_r_by_backend", d)
             self.assertIn("heading_bucket_summary", d)
-            self.assertIn("legacy_hybrid", d["pearson_r_by_backend"])
+            self.assertIn("aquaforge", d["pearson_r_by_backend"])
             self.assertIn("pct_fusion_better_than_wake_ambiguity", d)
             self.assertIn("n_scored_by_backend", d)
         finally:
@@ -122,8 +122,7 @@ class TestEvalReportJson(unittest.TestCase):
             )
             txt = format_eval_report(res, settings_sota=DetectionSettings())
             self.assertIn("Ranking (Pearson", txt)
-            self.assertIn("YOLO-fus.", txt)
-            self.assertIn("AquaForge", txt)
+            self.assertIn("| AquaForge |", txt)
             self.assertIn("Hull overlap", txt)
             self.assertIn("N/A", txt)
         finally:
@@ -180,33 +179,23 @@ class TestSummaryMarkdown(unittest.TestCase):
             self.assertIn("≥5°", md)
             self.assertIn("| JSONL |", md)
             self.assertIn("AquaForge", md)
-            self.assertIn("| Legacy |", md)
+            self.assertIn("chip half", md.lower())
         finally:
             jp.unlink(missing_ok=True)
 
-    def test_format_eval_summary_markdown_bolds_best_pearson_row(self) -> None:
-        hb = {"yolo_fusion": HeadingErrorBucket(), "ensemble": HeadingErrorBucket()}
+    def test_format_eval_summary_markdown_lists_aquaforge_pearson(self) -> None:
+        hb = {"aquaforge": HeadingErrorBucket()}
         res = EvalRunResult(
             n_labeled_points=4,
             n_geometry_spots=3,
             n_heading_gt=2,
-            pearson_r_by_backend={
-                "legacy_hybrid": 0.2,
-                "yolo_fusion": 0.9,
-                "ensemble": 0.4,
-                "aquaforge": 0.35,
-            },
+            pearson_r_by_backend={"aquaforge": 0.9},
             n_ranking_scored=12,
-            n_scored_by_backend={
-                "legacy_hybrid": 4,
-                "yolo_fusion": 4,
-                "ensemble": 4,
-                "aquaforge": 4,
-            },
+            n_scored_by_backend={"aquaforge": 4},
             heading_buckets=hb,
-            rel_length_by_backend={"yolo_fusion": [0.1], "ensemble": [0.05], "aquaforge": [0.08]},
-            rel_width_by_backend={"yolo_fusion": [], "ensemble": [], "aquaforge": []},
-            mask_iou_by_backend={"yolo_fusion": [0.5], "ensemble": [0.8], "aquaforge": [0.55]},
+            rel_length_by_backend={"aquaforge": [0.08]},
+            rel_width_by_backend={"aquaforge": []},
+            mask_iou_by_backend={"aquaforge": [0.55]},
             pct_keypoint_better_than_wake_line=10.0,
             n_kp_vs_wake_pairs=5,
             pct_fusion_better_than_wake_ambiguity=25.0,
@@ -219,8 +208,6 @@ class TestSummaryMarkdown(unittest.TestCase):
             jsonl_path="fixture.jsonl",
         )
         self.assertIn("**0.9000**", md)
-        self.assertIn("**0.0500**", md)
-        self.assertIn("**0.8000**", md)
         self.assertIn("#### Highlights", md)
         self.assertIn("Improved heading vs ambiguous wake", md)
         self.assertIn("≥5°", md)

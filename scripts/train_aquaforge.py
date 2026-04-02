@@ -10,8 +10,8 @@ of curriculum weights from detached per-task losses (our stabiliser, not third-p
 **Review → train loop** — Save labels in Streamlit; exported JSONL rows carry ``al_priority`` (uncertain
 scores, small-ship cues, clouds, manual map picks, optional ``af_training_priority`` in ``extra``).
 :class:`torch.utils.data.WeightedRandomSampler` (unless ``--no-priority-sampling``) oversamples those
-chips. Each epoch, ``hydrate_teacher_signals`` ranks the same priorities and runs the **ensemble**
-teacher on the top ``--teacher-per-epoch`` IDs for heading distillation. **Self-training**:
+chips. Each epoch, ``hydrate_teacher_signals`` ranks the same priorities and runs an **AquaForge**
+teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation. **Self-training**:
 ``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
 want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).
 
@@ -198,8 +198,10 @@ def main() -> None:
 
     project_root = Path(args.project_root).resolve()
     jp = args.jsonl or default_labels_path(project_root)
-    out = args.output or (project_root / "data" / "models" / "aquaforge" / "aquaforge.pt")
-    out.parent.mkdir(parents=True, exist_ok=True)
+    ckpt_path = Path(
+        args.output or (project_root / "data" / "models" / "aquaforge" / "aquaforge.pt")
+    ).resolve()
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows: list[AquaForgeSample] = list(iter_aquaforge_samples(jp, project_root))
     pseudo_pool = (
@@ -222,7 +224,7 @@ def main() -> None:
     print(
         "\n=== AquaForge training ===\n"
         f"  labels: {jp}  (supervised chips: {len(rows)})\n"
-        f"  output: {out}\n"
+        f"  output: {ckpt_path}\n"
         f"  architecture: {str(args.architecture).strip().lower()}  "
         f"imgsz={int(args.imgsz)}  epochs={int(args.epochs)}  batch={int(args.batch_size)}\n",
         flush=True,
@@ -354,7 +356,7 @@ def main() -> None:
             batch_dict = collate_batch(batch_list, device)
             imgs = batch_dict["imgs"]
             cls_l, seg, kp, hdg, wake, kp_hm = model(imgs)
-            out = {
+            pred = {
                 "cls_logit": cls_l,
                 "seg_logit": seg,
                 "kp": kp,
@@ -362,7 +364,7 @@ def main() -> None:
                 "wake": wake,
                 "kp_hm": kp_hm,
             }
-            loss, logs = aquaforge_joint_loss(out, batch_dict, sw_eff)
+            loss, logs = aquaforge_joint_loss(pred, batch_dict, sw_eff)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -421,8 +423,9 @@ def main() -> None:
         avg = total_loss / max(n_batches, 1)
         fr = "frozen" if arch == "yolo_unified" and epoch < freeze_n else "e2e"
         ru_m = ru_epoch / max(n_batches, 1)
+        # ASCII-only: Windows cp1252 consoles cannot print U+2248 (approx) or fancy punctuation.
         print(
-            f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} review_ui_u≈{ru_m:.3f} "
+            f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} review_ui_u~{ru_m:.3f} "
             f"curriculum={base_sw} backbone={fr} balance={'on' if use_balance else 'off'}",
             flush=True,
         )
@@ -450,16 +453,21 @@ def main() -> None:
         ypath = yolo_w.resolve() if yolo_w.is_file() else str(args.yolo_weights)
         meta["yolo_init_path"] = str(ypath)
 
-    torch.save({"meta": meta, "state_dict": model.state_dict()}, out)
-    print(f"Wrote {out}", flush=True)
+    # Write via a Python file object: PyTorchFileWriter(path) in C++ often fails on Windows with
+    # error 123 (ERROR_INVALID_NAME) for paths under OneDrive, spaces, or mixed separators; the
+    # buffer code path (PyTorchFileWriter(stream)) avoids native open-by-string.
+    _ckpt = {"meta": meta, "state_dict": model.state_dict()}
+    with open(ckpt_path, "wb") as _fp:
+        torch.save(_ckpt, _fp)
+    print(f"Wrote {ckpt_path}", flush=True)
 
     if not bool(args.no_export_onnx):
         exp_script = project_root / "scripts" / "export_aquaforge_onnx.py"
-        if exp_script.is_file() and out.is_file():
-            print("Exporting ONNX (CPU, optional for ORT inference) …", flush=True)
+        if exp_script.is_file() and ckpt_path.is_file():
+            print("Exporting ONNX (CPU, optional for ORT inference) ...", flush=True)
             _exe = str(Path(sys.executable).resolve())
             er = subprocess.run(
-                [_exe, str(exp_script.resolve()), "--checkpoint", str(out)],
+                [_exe, str(exp_script.resolve()), "--checkpoint", str(ckpt_path)],
                 cwd=str(project_root.resolve()),
                 capture_output=True,
                 text=True,

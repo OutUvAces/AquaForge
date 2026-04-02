@@ -52,12 +52,12 @@ class TestReviewSchema(unittest.TestCase):
             yolo_width_m=30.0,
             heading_fused_deg=45.0,
             heading_fusion_source="fused_keypoint_wake",
-            sota_backend="ensemble",
+            sota_backend="aquaforge",
         )
         self.assertAlmostEqual(e["pred_yolo_confidence"], 0.88)
         self.assertAlmostEqual(e["pred_yolo_length_m"], 120.0)
         self.assertAlmostEqual(e["pred_heading_fused_deg"], 45.0)
-        self.assertEqual(e["sota_backend_snapshot"], "ensemble")
+        self.assertEqual(e["sota_backend_snapshot"], "aquaforge")
 
     def test_enrich_wake_kp_audit(self) -> None:
         e = enrich_extra_with_predictions(

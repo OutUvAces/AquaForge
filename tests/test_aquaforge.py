@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from aquaforge.unified.constants import LANDMARK_NAMES, NUM_LANDMARKS
 
 
@@ -58,6 +60,27 @@ class TestReviewUIUncertaintySignal(unittest.TestCase):
             0.4,
         )
         self.assertLessEqual(review_ui_uncertainty_signal({"manual_locator": True}), 1.0)
+
+
+class TestLandmarksFromHeatmap(unittest.TestCase):
+    def test_peak_center_maps_to_chip_center(self) -> None:
+        from aquaforge.unified.constants import NUM_LANDMARKS
+        from aquaforge.unified.inference import _landmarks_from_kp_hm_logits
+
+        h, w = 3, 3
+        logits = np.full((NUM_LANDMARKS, h, w), -20.0, dtype=np.float32)
+        cy, cx = 1, 1
+        for k in range(NUM_LANDMARKS):
+            logits[k, cy, cx] = 20.0
+        lm = _landmarks_from_kp_hm_logits(
+            logits.reshape(1, NUM_LANDMARKS, h, w), c0=100, r0=200, cw=400, ch=300
+        )
+        self.assertIsNotNone(lm)
+        assert lm is not None
+        fx, fy, c0 = lm[0]
+        self.assertGreater(c0, 0.5)
+        self.assertAlmostEqual(fx, 100.0 + 0.5 * 400.0, places=3)
+        self.assertAlmostEqual(fy, 200.0 + 0.5 * 300.0, places=3)
 
 
 class TestAquaForgeConstants(unittest.TestCase):

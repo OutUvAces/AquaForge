@@ -1,20 +1,7 @@
-# Copy to data/config/detection.yaml (create folder if needed) to enable SOTA backends.
-# data/ is gitignored — keep this example under version control and copy locally.
-#
-# Full ensemble (YOLO + keypoints + wake): see detection.ensemble.example.yaml (needs force_legacy: true).
-#
-# Performance (YOLO): ``yolo.inference_mode: chip_per_candidate`` runs one marine YOLO pass per
-# candidate chip (good for interactive review). ``sliding_window_merge`` scans the full TCI in a
-# coarse grid and merges extra high-confidence boxes — higher recall, more compute.
+# Copy to data/config/detection.yaml (create folder if needed).
+# The app uses **AquaForge** only; legacy ``backend``, ``yolo``, ``keypoints``, and ``wake_fusion``
+# keys are ignored if present.
 
-# Default app path: AquaForge (seg + landmarks + heading + measurements). Train with **Retrain AquaForge** in the UI
-# or scripts/train_aquaforge.py. Review labels JSONL is used automatically.
-backend: aquaforge
-#
-# Hidden: set force_legacy: true to honor backend below (legacy_hybrid | yolo_only | yolo_fusion | ensemble).
-# force_legacy: false
-
-# AquaForge (optional): train with scripts/train_aquaforge.py, export ONNX with scripts/export_aquaforge_onnx.py
 # aquaforge:
 #   weights_path: data/models/aquaforge/aquaforge.pt
 #   onnx_path: data/models/aquaforge/aquaforge.onnx
@@ -27,76 +14,14 @@ backend: aquaforge
 #   chip_batch_size: 6
 #   min_direct_heading_confidence: 0.35
 
-yolo:
-  hf_repo: mayrajeo/marine-vessel-yolo
-  weights_file: yolo11s_tci.pt
-  weights_path: null
-  imgsz: 640
-  chip_half: 320
-  conf_threshold: 0.15
-  weight_vs_hybrid: 0.55
-  # chip_per_candidate (default): YOLO only on each bright-spot chip — fast for Streamlit.
-  # sliding_window_merge: one coarse grid over the full scene merges extra high-conf YOLO centers.
-  inference_mode: chip_per_candidate
-  sliding_window_stride: 512
-  sliding_window_max_windows: 120
-  sliding_window_dedupe_px: 24
-  sliding_window_min_conf: 0.35
-  # Performance: batch chip inference when ranking many candidates on the same scene (UI / yolo_fusion).
-  chip_batch_size: 6
+# onnx_runtime:
+#   intra_op_num_threads: 0
+#   inter_op_num_threads: 0
+#   execution_mode: parallel
+#   graph_optimization_level: all
 
-# Performance: ONNX Runtime session tuning (CPU). 0 = ORT default thread counts.
-onnx_runtime:
-  intra_op_num_threads: 0
-  inter_op_num_threads: 0
-  execution_mode: parallel   # parallel | sequential
-  graph_optimization_level: all   # all | extended | basic | disable
-
-# Optional: skip keypoints / wake when hybrid P(vessel) is below this (Streamlit passes hybrid per spot).
+# Skip full chip decode when AquaForge vessel probability is below this (0–1). Name is historical.
 # sota_min_hybrid_proba_for_expensive: 0.2
-
-# Optional: ORT ExecutionProviders for every ONNX session (overrides keypoints.onnx_providers; for GPU later).
 # onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
-# Streamlit: opt-in before running SOTA on a spot; lazy-draw heavy RGB overlays (default off = prior behavior).
 # ui_require_checkbox_for_sota: false
 # ui_lazy_sota_overlays: false
-
-keypoints:
-  enabled: false
-  # SLAD / ShipStructure landmark indices (verify against your ONNX export).
-  bow_index: 0
-  stern_index: 1
-  num_keypoints: 20
-  # Path to ONNX from MMPose export (opset ≥ 11). See shipstructure_adapter.parse_pose_onnx_output.
-  external_onnx_path: null
-  onnx_input_size: 384
-  # auto | nk2 | nk3 | flat_xyc
-  output_layout: auto
-  # divide_255 | none
-  input_normalize: divide_255
-  min_point_confidence: 0.12
-  min_bow_stern_confidence: 0.25
-  # onnx_providers: ["CPUExecutionProvider"]
-  # Dynamic INT8 weight quantization for faster CPU inference (cached under system temp).
-  quantize: false
-  # Skip pose ONNX when marine YOLO confidence is below this (0 = no gate).
-  min_yolo_confidence: 0.0
-
-wake_fusion:
-  enabled: false
-  weight_keypoint_vs_wake: 0.65
-  use_auto_wake_segment: true
-  # Optional ONNX wake direction (WakeNet / wakemodel_llmassist-style export). See wake_heading_fusion.heading_from_wake_onnx_chip.
-  use_onnx_wake: false
-  onnx_wake_path: null
-  onnx_wake_input_size: 256
-  # dxy: (dx, dy) in model input space | angle_rad: scalar clockwise from +column in input space
-  wake_onnx_layout: dxy
-  # best_confidence | prefer_onnx | prefer_heuristic | mean_vector
-  combine_wake_mode: best_confidence
-  onnx_wake_confidence_prior: 0.72
-  adaptive_fusion: true
-  adaptive_fusion_min_quality: 0.15
-  quantize: false
-  # Skip wake heuristic / ONNX when YOLO confidence is below this (0 = no gate).
-  min_yolo_confidence: 0.0

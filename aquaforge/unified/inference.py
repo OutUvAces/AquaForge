@@ -83,6 +83,44 @@ def _landmarks_full_from_normalized(
     return out
 
 
+def _landmarks_from_kp_hm_logits(
+    kp_hm_logit: np.ndarray,
+    *,
+    c0: int,
+    r0: int,
+    cw: int,
+    ch: int,
+) -> list[tuple[float, float, float]] | None:
+    """
+    Decode landmarks from per-landmark heatmap logits (training uses ``kp_hm`` heavily).
+
+    Maps peak locations on the low-res heatmap grid back to full-image chip fractions, matching
+    :func:`aquaforge.unified.losses.build_kp_heat_targets` (normalized × (W-1), (H-1) on the hm grid).
+    """
+    a = np.asarray(kp_hm_logit, dtype=np.float32)
+    if a.ndim == 4:
+        a = a[0]
+    if a.ndim != 3:
+        return None
+    nk, H, W = int(a.shape[0]), int(a.shape[1]), int(a.shape[2])
+    if nk < NUM_LANDMARKS or H < 2 or W < 2:
+        return None
+    hm = 1.0 / (1.0 + np.exp(-np.clip(a[:NUM_LANDMARKS], -32.0, 32.0)))
+    out: list[tuple[float, float, float]] = []
+    w_d = float(max(W - 1, 1))
+    h_d = float(max(H - 1, 1))
+    for ki in range(NUM_LANDMARKS):
+        plane = hm[ki]
+        peak = float(plane.max())
+        iy, ix = np.unravel_index(int(np.argmax(plane)), plane.shape)
+        nx = float(ix) / w_d
+        ny = float(iy) / h_d
+        fx = float(c0) + nx * float(cw)
+        fy = float(r0) + ny * float(ch)
+        out.append((fx, fy, float(np.clip(peak, 0.0, 1.0))))
+    return out
+
+
 class AquaForgePredictor:
     def __init__(
         self,
@@ -151,22 +189,33 @@ class AquaForgePredictor:
         if self._device is not None:
             x = x.to(self._device)
 
+        kp_hm: np.ndarray | None = None
         if self._sess is not None:
             arr = x.cpu().numpy()
             in_name = self._sess.get_inputs()[0].name
             outs = self._sess.run(None, {in_name: arr})
-            # v2 ONNX: 6 outputs (kp_hm logits); legacy: 5.
+            # Export order: cls, seg, kp, hdg, wake, kp_hm (legacy ONNX may omit kp_hm).
             cls_l, seg, kp, hdg, wake = outs[0], outs[1], outs[2], outs[3], outs[4]
+            if len(outs) > 5:
+                kp_hm = np.asarray(outs[5], dtype=np.float32)
         elif self._torch is not None:
             self._torch.eval()
             with torch.no_grad():
                 raw = self._torch(x)
-                cls_l, seg, kp, hdg, wake = raw[0], raw[1], raw[2], raw[3], raw[4]
+                cls_l, seg, kp, hdg, wake, kp_hm_t = (
+                    raw[0],
+                    raw[1],
+                    raw[2],
+                    raw[3],
+                    raw[4],
+                    raw[5],
+                )
             cls_l = cls_l.cpu().numpy()
             seg = seg.cpu().numpy()
             kp = kp.cpu().numpy()
             hdg = hdg.cpu().numpy()
             wake = wake.cpu().numpy()
+            kp_hm = kp_hm_t.cpu().numpy()
         else:
             return None
 
@@ -188,11 +237,17 @@ class AquaForgePredictor:
         seg_prob = 1.0 / (1.0 + np.exp(-seg[0, 0]))
         poly = _mask_to_polygon_fullres(seg_prob, imgsz, c0, r0, cw, ch)
 
-        kp_r = kp.reshape(1, NUM_LANDMARKS, 3)[0]
-        xy = 1.0 / (1.0 + np.exp(-kp_r[:, :2]))
-        vis_l = kp_r[:, 2]
-        vis_p = 1.0 / (1.0 + np.exp(-vis_l))
-        lm = _landmarks_full_from_normalized(xy, vis_p, c0, r0, cw, ch)
+        lm = None
+        if kp_hm is not None:
+            lm = _landmarks_from_kp_hm_logits(
+                kp_hm, c0=int(c0), r0=int(r0), cw=int(cw), ch=int(ch)
+            )
+        if lm is None:
+            kp_r = kp.reshape(1, NUM_LANDMARKS, 3)[0]
+            xy = 1.0 / (1.0 + np.exp(-kp_r[:, :2]))
+            vis_l = kp_r[:, 2]
+            vis_p = 1.0 / (1.0 + np.exp(-vis_l))
+            lm = _landmarks_full_from_normalized(xy, vis_p, c0, r0, cw, ch)
 
         hs = float(hdg[0, 0])
         hc = float(hdg[0, 1])

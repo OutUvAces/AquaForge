@@ -5,7 +5,7 @@ Streamlit UI: pick a scene, refresh, review spots.
 **Advanced** (retrain AquaForge, finding spots, download, ranking helpers, exports, duplicates, label fixer,
 whole-scene map, optional heavy-inference consent).
 
-**Main:** large close-up, subtle **On image** toggles (default outline + direction), optional readouts
+**Main:** large close-up, **On image** toggles (defaults: outline, direction, keypoints, wake on), optional readouts
 after the image, then **Back / Next** and **Ship / Not a ship / Unsure**.
 """
 
@@ -24,6 +24,26 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def _probability_to_percent_str(p: float | None) -> str:
+    """AquaForge vessel logit → sigmoid lives in (0, 1); display as a whole-number percentage."""
+    if p is None:
+        return "—"
+    x = max(0.0, min(1.0, float(p)))
+    return f"{int(round(100.0 * x))}%"
+
+
+def _percentile_stretch_u8_rgb(rgb: np.ndarray) -> np.ndarray:
+    """2–98% per-band stretch (uint8 RGB), same idea as locator/spot review reads."""
+    arr = rgb.astype(np.float32)
+    if arr.size == 0:
+        return rgb
+    lo = np.percentile(arr, 2.0, axis=(0, 1))
+    hi = np.percentile(arr, 98.0, axis=(0, 1))
+    out = (np.clip((arr - lo) / (hi - lo + 1e-9), 0.0, 1.0) * 255.0).astype(np.uint8)
+    return out
+
 
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -70,25 +90,25 @@ from aquaforge.detection_backend import (
     run_sota_spot_inference,
 )
 from aquaforge.detection_config import (
-    aquaforge_requested,
     default_detection_yaml_path,
     example_detection_yaml_path,
     load_detection_settings,
     sota_inference_requested,
-    yolo_requested,
 )
 from aquaforge.model_manager import (
     clear_aquaforge_predictor_cache,
+    get_cached_aquaforge_predictor,
     schedule_background_warm,
 )
 from aquaforge.evaluation import (
     angular_error_deg,
-    rank_score_at_point,
     spot_geometry_gt_from_labels,
 )
 from aquaforge.unified.inference import (
+    aquaforge_confidence_only,
     expected_aquaforge_checkpoint_path,
     resolve_aquaforge_checkpoint_path,
+    resolve_aquaforge_onnx_path,
 )
 from aquaforge.review_overlay import (
     annotate_locator_spot_outline,
@@ -96,12 +116,11 @@ from aquaforge.review_overlay import (
     extent_preview_image,
     footprint_width_length_m,
     fullres_xy_from_spot_red_outline_aabb_center,
-    overlay_heading_arrow_north,
+    overlay_heading_arrow_north_on_letterbox,
     overlay_sota_on_spot_rgb,
     read_locator_and_spot_rgb_matching_stretch,
     vessel_quad_for_label,
 )
-from aquaforge.yolo_marine_backend import default_marine_yolo_dir
 from aquaforge.scene_overview_100 import (
     DEFAULT_OVERVIEW_MAX_CANDIDATES,
     DEFAULT_OVERVIEW_MAX_DIM,
@@ -156,6 +175,7 @@ from aquaforge.vessel_markers import (
     quad_crop_from_dimension_markers,
     serialize_markers_for_json,
 )
+from aquaforge.yolo_marine_backend import polygon_fullres_to_crop
 from aquaforge.vessel_heading import merge_keel_heading_into_extra
 from aquaforge.hull_aspect import enrich_extra_hull_aspect_ratio
 from aquaforge.label_identity import attach_label_identity_extra
@@ -237,10 +257,32 @@ def _ui_styles() -> None:
         """
 <style>
   /* Wide calm main column; extra bottom space so the sticky action row is not clipped */
+  /*
+   * Streamlit draws a fixed header/toolbar over the main column; padding only on
+   * div.block-container is not enough — the scroll viewport starts at y=0 and the
+   * first lines of st.info / captions are clipped. Pad the main section itself.
+   */
+  section[data-testid="stMain"],
+  section.main {
+    padding-top: 3.75rem !important;
+  }
   div.block-container {
-    padding-top: 0.35rem;
+    padding-top: 1rem !important;
     padding-bottom: 5.5rem !important;
     max-width: min(1180px, 96vw);
+  }
+  /* Notched / inset displays */
+  @supports (padding: max(0px)) {
+    section[data-testid="stMain"],
+    section.main {
+      padding-top: max(3.75rem, calc(env(safe-area-inset-top, 0px) + 2.75rem)) !important;
+    }
+  }
+  /* Extra clearance before the one-time startup callout */
+  .vd-main-top-spacer {
+    margin-top: 0.35rem;
+    height: 0;
+    overflow: hidden;
   }
   /* Subtle top-right “On image” expander */
   .vd-overlay-exp summary, .vd-overlay-exp span[data-testid="stMarkdownContainer"] p {
@@ -1265,8 +1307,6 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
     Shown when AquaForge is the active backend but no ``.pt`` is found — short first training job.
     """
     det = load_detection_settings(project_root)
-    if not aquaforge_requested(det):
-        return
     if resolve_aquaforge_checkpoint_path(project_root, det.aquaforge) is not None:
         return
     st.markdown("##### Train first AquaForge model")
@@ -1359,9 +1399,9 @@ def _sidebar_spot_finding_settings() -> None:
         )
         st.slider(
             "How many spots to list at once",
-            8,
+            5,
             DEFAULT_OVERVIEW_MAX_CANDIDATES,
-            64,
+            10,
             key="webui_max_k",
             help="After **Refresh**, at most this many spots stay in the list.",
         )
@@ -1426,6 +1466,23 @@ def main() -> None:
     tci_list = discover_tci_jp2()
     choice: Path | None = None
     refresh = False
+
+    _had_tci = bool(str(st.session_state.get("tci_loaded") or "").strip())
+    if (
+        tci_list
+        and not _had_tci
+        and not st.session_state.get("_vd_startup_hint_done")
+    ):
+        st.session_state["_vd_startup_hint_done"] = True
+        st.markdown(
+            '<div class="vd-main-top-spacer" aria-hidden="true"></div>',
+            unsafe_allow_html=True,
+        )
+        st.info(
+            "**AquaForge is running.** Open the **←** sidebar, pick a **Scene**, then press "
+            "**Refresh spot list**. While the scene is scanned you will see a **spinner** in the main "
+            "area; large JP2 files can take a minute or two."
+        )
 
     # Sidebar: only scene + refresh on first glance; everything else under **Advanced**.
     tci_loaded_sidebar = str(st.session_state.get("tci_loaded") or "").strip()
@@ -1507,18 +1564,17 @@ def main() -> None:
 
     assert choice is not None
     _vd_af_cfg = load_detection_settings(ROOT)
-    if aquaforge_requested(_vd_af_cfg):
-        if resolve_aquaforge_checkpoint_path(ROOT, _vd_af_cfg.aquaforge) is None:
-            try:
-                _af_rel = expected_aquaforge_checkpoint_path(ROOT).relative_to(ROOT)
-            except ValueError:
-                _af_rel = expected_aquaforge_checkpoint_path(ROOT)
-            st.info(
-                "**AquaForge** will show masks, keypoints, and headings once a trained checkpoint "
-                "exists. Save **at least two** vessel reviews, then open **← Advanced** and run "
-                "**Train first AquaForge model** (short run). Default weights file: "
-                f"`{_af_rel}`."
-            )
+    if resolve_aquaforge_checkpoint_path(ROOT, _vd_af_cfg.aquaforge) is None:
+        try:
+            _af_rel = expected_aquaforge_checkpoint_path(ROOT).relative_to(ROOT)
+        except ValueError:
+            _af_rel = expected_aquaforge_checkpoint_path(ROOT)
+        st.info(
+            "**AquaForge** will show masks, keypoints, and headings once a trained checkpoint "
+            "exists. Save **at least two** vessel reviews, then open **← Advanced** and run "
+            "**Train first AquaForge model** (short run). Default weights file: "
+            f"`{_af_rel}`."
+        )
     tci_path_sel = Path(choice)
     scl_found = find_scl_for_tci(tci_path_sel)
     ready_dl, _ = cdse_download_ready()
@@ -1544,7 +1600,7 @@ def main() -> None:
 
     tci_path = Path(choice)
     ds_factor = int(st.session_state.get("webui_ds_factor", 4))
-    max_k = int(st.session_state.get("webui_max_k", 64))
+    max_k = int(st.session_state.get("webui_max_k", 10))
     _scl_raw = str(st.session_state.get("webui_scl_path", "") or "").strip()
     scl_opt = Path(_scl_raw) if _scl_raw else None
     scene_key = f"{tci_path.resolve()}|{scl_opt or ''}"
@@ -1560,84 +1616,91 @@ def main() -> None:
             st.session_state.last_scene_key = scene_key
         else:
             try:
-                pool = _detector_fetch_pool_size(max_k)
-                raw, meta = ship_candidates_fullres(
-                    tci_path,
-                    ds_factor=ds_factor,
-                    scl_path=scl_opt,
-                    max_candidates=pool,
-                    require_scl=True,
-                    min_water_fraction=MIN_OPEN_WATER_FRACTION,
-                )
-                cands = filter_unlabeled_candidates(
-                    raw,
-                    labels_path,
-                    str(tci_path.resolve()),
-                    tolerance_px=2.0,
-                    project_root=ROOT,
-                )
-                if st.session_state.get("webui_static_sea_suppress", True):
-                    cands = filter_candidates_by_static_sea_witness(
-                        cands,
+                with st.spinner(
+                    "Scanning this scene: reading the JP2 and mask, finding bright spots on open water, "
+                    "filtering saved labels, running sort models… Large images can take 30s–a few minutes — "
+                    "the app is still working."
+                ):
+                    pool = _detector_fetch_pool_size(max_k)
+                    raw, meta = ship_candidates_fullres(
                         tci_path,
-                        default_static_sea_witness_path(ROOT),
-                        project_root=ROOT,
-                        min_cell_hits=int(st.session_state.get("webui_static_sea_min", 3)),
+                        ds_factor=ds_factor,
+                        scl_path=scl_opt,
+                        max_candidates=pool,
+                        require_scl=True,
+                        min_water_fraction=MIN_OPEN_WATER_FRACTION,
                     )
-                mp = default_model_path(ROOT)
-                mt_mod = mp.stat().st_mtime if mp.is_file() else 0.0
-                clf = (
-                    _load_classifier_cached(str(mp.resolve()), mt_mod)
-                    if mt_mod
-                    else None
-                )
-                mlp_p = default_chip_mlp_path(ROOT)
-                mlp_mod = mlp_p.stat().st_mtime if mlp_p.is_file() else 0.0
-                chip_bundle = (
-                    _load_chip_mlp_bundle_cached(str(mlp_p.resolve()), mlp_mod)
-                    if mlp_mod
-                    else None
-                )
-                det_cfg = load_detection_settings(ROOT)
-                if cands:
-                    try:
-                        cands = rank_candidates_from_config(
+                    cands = filter_unlabeled_candidates(
+                        raw,
+                        labels_path,
+                        str(tci_path.resolve()),
+                        tolerance_px=2.0,
+                        project_root=ROOT,
+                    )
+                    if st.session_state.get("webui_static_sea_suppress", True):
+                        cands = filter_candidates_by_static_sea_witness(
                             cands,
                             tci_path,
-                            clf,
-                            chip_bundle,
-                            det_cfg,
-                            ROOT,
+                            default_static_sea_witness_path(ROOT),
+                            project_root=ROOT,
+                            min_cell_hits=int(
+                                st.session_state.get("webui_static_sea_min", 3)
+                            ),
                         )
-                    except Exception:
+                    mp = default_model_path(ROOT)
+                    mt_mod = mp.stat().st_mtime if mp.is_file() else 0.0
+                    clf = (
+                        _load_classifier_cached(str(mp.resolve()), mt_mod)
+                        if mt_mod
+                        else None
+                    )
+                    mlp_p = default_chip_mlp_path(ROOT)
+                    mlp_mod = mlp_p.stat().st_mtime if mlp_p.is_file() else 0.0
+                    chip_bundle = (
+                        _load_chip_mlp_bundle_cached(str(mlp_p.resolve()), mlp_mod)
+                        if mlp_mod
+                        else None
+                    )
+                    det_cfg = load_detection_settings(ROOT)
+                    if cands:
                         try:
-                            cands = rank_candidates_hybrid(
-                                cands, tci_path, clf, chip_bundle
+                            cands = rank_candidates_from_config(
+                                cands,
+                                tci_path,
+                                clf,
+                                chip_bundle,
+                                det_cfg,
+                                ROOT,
                             )
                         except Exception:
-                            if clf is not None:
-                                try:
-                                    cands = rank_candidates_by_vessel_proba(
-                                        cands, tci_path, clf
-                                    )
-                                except Exception:
-                                    pass
-                st.session_state.detector_ranked_unlabeled_pool = list(cands)
-                cands = cands[:max_k]
-                st.session_state.detector_candidates = cands
-                st.session_state.meta = meta
-                st.session_state.idx = 0
-                st.session_state.tci_loaded = str(tci_path.resolve())
-                st.session_state.last_scene_key = scene_key
-                if not cands:
-                    if raw:
-                        st.warning(
-                            "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another scene."
-                        )
-                    else:
-                        st.warning(
-                            "No bright spots on open water. Try another image or relax detector settings."
-                        )
+                            try:
+                                cands = rank_candidates_hybrid(
+                                    cands, tci_path, clf, chip_bundle
+                                )
+                            except Exception:
+                                if clf is not None:
+                                    try:
+                                        cands = rank_candidates_by_vessel_proba(
+                                            cands, tci_path, clf
+                                        )
+                                    except Exception:
+                                        pass
+                    st.session_state.detector_ranked_unlabeled_pool = list(cands)
+                    cands = cands[:max_k]
+                    st.session_state.detector_candidates = cands
+                    st.session_state.meta = meta
+                    st.session_state.idx = 0
+                    st.session_state.tci_loaded = str(tci_path.resolve())
+                    st.session_state.last_scene_key = scene_key
+                    if not cands:
+                        if raw:
+                            st.warning(
+                                "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another scene."
+                            )
+                        else:
+                            st.warning(
+                                "No bright spots on open water. Try another image or relax detector settings."
+                            )
             except AutoWakeError as e:
                 st.error(str(e))
                 st.session_state.last_scene_key = scene_key
@@ -1662,7 +1725,11 @@ def main() -> None:
                 "Nothing to review — **Refresh spot list** in the left panel, or **Advanced → Whole-scene map** to add a spot."
             )
         else:
-            st.info("Choose a scene in the left panel, then press **Refresh spot list**.")
+            st.info(
+                "**No spot list yet.** Open the **←** sidebar, pick a **Scene**, then press "
+                "**Refresh spot list**. The main area stays empty until that scan finishes "
+                "(large JP2s can take a minute or two — you will see a progress message then)."
+            )
         return
 
     _render_review_deck(
@@ -1764,7 +1831,7 @@ def _render_hundred_cell_overview(
             f"Mosaic **{ov_meta['mosaic_w']}×{ov_meta['mosaic_h']}** px "
             f"(max edge {ov_meta['max_overview_dim']} px) · full **{ov_meta['w_full']}×{ov_meta['h_full']}** · "
             f"**{ov_meta['n_detections']}** detector marks · *{ov_note}* · "
-            f"open-water fraction (mosaic) **{100.0 * float(ov_meta.get('water_fraction_mosaic', 0)):.1f}%**."
+            f"open-water fraction (mosaic) **{int(round(100.0 * float(ov_meta.get('water_fraction_mosaic', 0))))}%**."
         )
 
         ov_key_fb = hashlib.sha256(f"{tci_loaded}|ovfb".encode()).hexdigest()[:16]
@@ -1969,7 +2036,7 @@ def _render_hundred_cell_overview(
                     st.rerun()
 
 
-def _render_spot_measurements_expander(
+def _render_spot_measurements_panel(
     *,
     sota: dict,
     det_settings: Any,
@@ -1981,40 +2048,19 @@ def _render_spot_measurements_expander(
     tci_loaded: str,
     cx: float,
     cy: float,
+    in_expander: bool = True,
 ) -> None:
-    """Helper readouts from detection (AquaForge by default) — optional expander after the close-up image."""
-    if not sota:
-        return
-    with st.expander("Lengths, angles, helper readouts", expanded=False):
-        if clf_disp is not None or bundle_disp is not None:
-            _rs = rank_score_at_point(
-                ROOT,
-                tci_p,
-                cx,
-                cy,
-                clf_disp,
-                bundle_disp,
-                det_settings,
-            )
-            _leg = p_comb if p_comb is not None else _rs.get("hybrid_proba")
-            _yo = _rs.get("yolo_confidence")
-            _rk = _rs.get("rank_score")
-            _leg_s = f"{float(_leg):.3f}" if _leg is not None else "n/a"
-            _rk_s = f"{float(_rk):.3f}" if _rk is not None else "n/a"
-            _yo_s = f"{float(_yo):.3f}" if _yo is not None else "n/a"
-            _conf_lbl = (
-                "model confidence" if aquaforge_requested(det_settings) else "mask confidence"
-            )
-            st.caption(
-                f"This spot — blend **{_leg_s}**, sort **{_rk_s}**, {_conf_lbl} **{_yo_s}**."
-            )
+    """Helper readouts from detection (AquaForge by default) — expander or inline column."""
+
+    def _body() -> None:
+        _ = clf_disp, bundle_disp, p_comb
         _gt_hint = spot_geometry_gt_from_labels(
             labels_path,
             ROOT,
             tci_loaded,
             float(cx),
             float(cy),
-            chip_half=int(det_settings.yolo.chip_half),
+            chip_half=int(det_settings.aquaforge.chip_half),
         )
         if isinstance(sota, dict) and isinstance(_gt_hint, dict):
             prov = str(_gt_hint.get("provenance", "") or "")
@@ -2050,16 +2096,16 @@ def _render_spot_measurements_expander(
                 _ins_parts: list[str] = []
                 if ek is not None:
                     _ins_parts.append(
-                        f"- Keypoint vs your heading: **{ek:.1f}°** off"
+                        f"- Keypoint heading vs your heading: **{int(round(ek))}°** off"
                     )
                 if ef is not None:
                     if fused_meaningful and delta_improve is not None:
                         _ins_parts.append(
-                            f"- Blended overlay: **{ef:.1f}°** off (~**{delta_improve:.1f}°** closer than keypoint alone)"
+                            f"- Shown heading: **{int(round(ef))}°** off (~**{int(round(delta_improve))}°** closer than keypoint alone)"
                         )
                     else:
                         _ins_parts.append(
-                            f"- Blended overlay vs your heading: **{ef:.1f}°** off"
+                            f"- Shown heading vs your heading: **{int(round(ef))}°** off"
                         )
                 if _ins_parts:
                     with st.expander("Compare to a saved heading", expanded=False):
@@ -2070,7 +2116,9 @@ def _render_spot_measurements_expander(
                         "You have a saved heading here, but no overlay heading to compare."
                     )
         if sota.get("yolo_confidence") is not None:
-            st.metric("Mask confidence", f"{float(sota['yolo_confidence']):.3f}")
+            st.caption(
+                f"Vessel confidence: **{_probability_to_percent_str(float(sota['yolo_confidence']))}**"
+            )
         if sota.get("yolo_length_m") is not None and sota.get("yolo_width_m") is not None:
             st.caption(
                 f"Mask size (length × width): **{sota['yolo_length_m']:.0f}** × "
@@ -2078,30 +2126,30 @@ def _render_spot_measurements_expander(
             )
         if sota.get("heading_keypoint_deg") is not None:
             st.caption(
-                f"Keypoint bow→stern: **{float(sota['heading_keypoint_deg']):.1f}°**"
+                f"Keypoint heading: **{int(round(float(sota['heading_keypoint_deg'])))}°**"
             )
         if sota.get("keypoint_bow_confidence") is not None:
+            _bc = float(sota["keypoint_bow_confidence"])
+            _sc = float(sota.get("keypoint_stern_confidence") or 0.0)
             st.caption(
-                f"Keypoint trust (bow / stern): **{float(sota['keypoint_bow_confidence']):.2f}** / "
-                f"**{float(sota.get('keypoint_stern_confidence') or 0):.2f}**"
+                f"Bow / stern confidence: **{_probability_to_percent_str(_bc)}** / "
+                f"**{_probability_to_percent_str(_sc)}**"
             )
         if sota.get("heading_wake_heuristic_deg") is not None:
             st.caption(
-                f"Wake line (simple): **{float(sota['heading_wake_heuristic_deg']):.1f}°**"
+                f"Wake line (simple): **{int(round(float(sota['heading_wake_heuristic_deg'])))}°**"
             )
         if sota.get("heading_wake_onnx_deg") is not None:
             st.caption(
-                f"Wake model: **{float(sota['heading_wake_onnx_deg']):.1f}°**"
+                f"Wake model: **{int(round(float(sota['heading_wake_onnx_deg'])))}°**"
             )
         if sota.get("heading_wake_deg") is not None:
             st.caption(
-                f"Wake blend: **{float(sota['heading_wake_deg']):.1f}°** "
-                f"({sota.get('heading_wake_combine_source', '')})"
+                f"Wake heading: **{int(round(float(sota['heading_wake_deg'])))}°**"
             )
         if sota.get("heading_fused_deg") is not None:
             st.caption(
-                f"Blended direction: **{float(sota['heading_fused_deg']):.1f}°** "
-                f"({sota.get('heading_fusion_source', '')})"
+                f"Shown heading: **{int(round(float(sota['heading_fused_deg'])))}°**"
             )
         sw = sota.get("sota_warnings") or []
         if isinstance(sw, list):
@@ -2109,8 +2157,16 @@ def _render_spot_measurements_expander(
         if isinstance(sw, list) and sw:
             st.warning(
                 "Overlay notes: " + "; ".join(str(x) for x in sw if x)
-                + " — optional keypoint/wake models may be off; simple wake line can still show."
+                + " — some geometry or heading cues may be missing or low quality on this chip."
             )
+
+    if not sota:
+        return
+    if in_expander:
+        with st.expander("Lengths, angles, helper readouts", expanded=False):
+            _body()
+    else:
+        _body()
 
 
 def _render_review_deck(
@@ -2129,9 +2185,10 @@ def _render_review_deck(
         return
 
     cx, cy, score = cands[idx]
+    # Full hash avoids rare key collisions; sub-pixel coords so nearby spots never share a key.
     spot_k = hashlib.sha256(
-        f"{tci_loaded}|{idx}|{cx:.4f}|{cy:.4f}".encode()
-    ).hexdigest()[:28]
+        f"{tci_loaded}|{idx}|{cx:.8f}|{cy:.8f}".encode()
+    ).hexdigest()
     dim_key = f"dim_markers_{spot_k}"
     hull_mode_k = f"hull_mode_{spot_k}"
     active_hull_k = f"active_hull_{spot_k}"
@@ -2182,8 +2239,10 @@ def _render_review_deck(
     tci_p = Path(tci_loaded)
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
     det_settings = load_detection_settings(ROOT)
+    _af_pred_gate = get_cached_aquaforge_predictor(ROOT, det_settings)
+    af_gate_prob = float(aquaforge_confidence_only(_af_pred_gate, tci_p, cx, cy))
 
-    # Minimal header + subtle top-right overlay toggles (default: outline + direction only).
+    # Minimal header + top-right overlay toggles (defaults: all layers on).
     _sc_prev_hdr = cands[idx][2]
     _hint_hdr = " · map" if _sc_prev_hdr == LOCATOR_MANUAL_SCORE else ""
     _hl, _hr = st.columns([3.5, 1.05])
@@ -2191,12 +2250,12 @@ def _render_review_deck(
         st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
     with _hr:
         if sota_inference_requested(det_settings):
-            # Default overlays: outline, heading, and landmarks (AquaForge-first UX).
+            # Default overlays: outline, heading, landmarks, wake (all on).
             for _xk, _dv in (
                 ("vd_ov_hull", True),
                 ("vd_ov_mark", True),
                 ("vd_ov_dir", True),
-                ("vd_ov_wake", False),
+                ("vd_ov_wake", True),
             ):
                 if _xk not in st.session_state:
                     st.session_state[_xk] = _dv
@@ -2206,6 +2265,10 @@ def _render_review_deck(
                 st.toggle("Direction", key="vd_ov_dir")
                 st.toggle("Keypoints", key="vd_ov_mark")
                 st.toggle("Wake", key="vd_ov_wake")
+                st.caption(
+                    "**Outline** = cyan hull/mask edge. **Direction** = **yellow arrow** — estimated "
+                    "heading (bow direction vs. north), not the mask."
+                )
             st.markdown("</div>", unsafe_allow_html=True)
 
     # Optional consent: global toggle lives under sidebar **Advanced** when YAML requires it.
@@ -2213,17 +2276,18 @@ def _render_review_deck(
     if sota_inference_requested(det_settings) and det_settings.ui_require_checkbox_for_sota:
         _sota_allow = bool(st.session_state.get("vd_advanced_spot_hints", False))
 
-    # Performance: background warm — AquaForge / optional YOLO+ORT off the main thread when models may run soon.
-    _need_warm = yolo_requested(det_settings) or (
-        sota_inference_requested(det_settings)
-        and (not det_settings.ui_require_checkbox_for_sota or _sota_allow)
+    # Performance: background warm — AquaForge off the main thread when inference may run soon.
+    _need_warm = sota_inference_requested(det_settings) and (
+        not det_settings.ui_require_checkbox_for_sota or _sota_allow
     )
     if _need_warm:
+        _af_ck = resolve_aquaforge_checkpoint_path(ROOT, det_settings.aquaforge)
+        _af_onx = resolve_aquaforge_onnx_path(ROOT, det_settings.aquaforge)
         _warm_fp = (
             float(_detection_yaml_mtime(ROOT)),
-            str(det_settings.backend),
-            str(det_settings.yolo.weights_path or ""),
-            str(det_settings.yolo.weights_file),
+            str(_af_ck) if _af_ck is not None else "",
+            str(_af_onx) if _af_onx is not None else "",
+            bool(det_settings.aquaforge.use_onnx_inference),
             bool(_sota_allow) if det_settings.ui_require_checkbox_for_sota else True,
         )
         if st.session_state.get("_vd_warm_bg_fp") != _warm_fp:
@@ -2233,9 +2297,13 @@ def _render_review_deck(
     chip_px, locator_px, gdx, gdy, gavg = _cached_review_crop_metrics(
         str(tci_p.resolve()), mt
     )
-
+    # Review close-up uses REVIEW_CHIP_TARGET_SIDE_M (~1 km ground). Overlays reproject from
+    # full-res using this window (landmarks_xy_fullres, wake_segment_fullres, polygon).
+    spot_px_read = int(chip_px)
     loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = (
-        read_locator_and_spot_rgb_matching_stretch(tci_p, cx, cy, chip_px, locator_px)
+        read_locator_and_spot_rgb_matching_stretch(
+            tci_p, cx, cy, spot_px_read, locator_px
+        )
     )
     _mscl = (meta or {}).get("scl_path")
     _scl_sota = Path(str(_mscl)) if _mscl else None
@@ -2243,15 +2311,22 @@ def _render_review_deck(
         _scl_sota = None
     _hyb_sig: tuple[float | None, ...] = ()
     if det_settings.sota_min_hybrid_proba_for_expensive is not None:
-        _hyb_sig = (round(float(p_comb), 6) if p_comb is not None else None,)
+        # YAML name is historical; gate uses AquaForge vessel probability (0–1).
+        _hyb_sig = (round(af_gate_prob, 6),)
+    # Include idx + fine coords so SOTA cache never reuses another spot’s inference when
+    # windows round the same (arrow/mask would look “stuck” across Next).
     sota_sig = (
         _detection_yaml_mtime(ROOT),
         mt,
-        round(cx, 4),
-        round(cy, 4),
-        det_settings.backend,
+        int(idx),
+        round(cx, 7),
+        round(cy, 7),
+        "aquaforge",
+        "sota_ov6",
         int(sc0),
         int(sr0),
+        int(scw),
+        int(sch),
     ) + _hyb_sig + (
         (_sota_allow,) if det_settings.ui_require_checkbox_for_sota else ()
     )
@@ -2271,7 +2346,7 @@ def _render_review_deck(
                 spot_col_off=int(sc0),
                 spot_row_off=int(sr0),
                 scl_path=_scl_sota,
-                hybrid_proba=float(p_comb) if p_comb is not None else None,
+                hybrid_proba=af_gate_prob,
             )
             st.session_state[sota_k + "_sig"] = sota_sig
         sota = st.session_state.get(sota_k, {}) or {}
@@ -2393,9 +2468,9 @@ def _render_review_deck(
         st.session_state[sel_mk] = MARKER_ROLES[0]
 
     _show_hull = bool(st.session_state.get("vd_ov_hull", True))
-    _show_mark = bool(st.session_state.get("vd_ov_mark", False))
+    _show_mark = bool(st.session_state.get("vd_ov_mark", True))
     _show_dir = bool(st.session_state.get("vd_ov_dir", True))
-    _show_wake = bool(st.session_state.get("vd_ov_wake", False))
+    _show_wake = bool(st.session_state.get("vd_ov_wake", True))
 
     spot_vis = annotate_spot_detection_center(
         spot_rgb,
@@ -2409,35 +2484,93 @@ def _render_review_deck(
     if sota_inference_requested(det_settings) and sota and (
         _show_hull or _show_mark or _show_wake
     ):
+        _sc0i = int(sc0)
+        _sr0i = int(sr0)
         _poly = None
-        raw_poly = sota.get("yolo_polygon_crop")
-        if isinstance(raw_poly, list) and len(raw_poly) >= 3:
-            _poly = [(float(t[0]), float(t[1])) for t in raw_poly]
-        _kpc = None
-        raw_kp = sota.get("keypoints_crop")
-        if isinstance(raw_kp, list) and raw_kp:
-            _kpc = [(float(t[0]), float(t[1])) for t in raw_kp]
-        _kxc = None
-        raw_kxc = sota.get("keypoints_xy_conf_crop")
-        if isinstance(raw_kxc, list) and raw_kxc:
-            _kxc = [
-                (float(t[0]), float(t[1]), float(t[2]))
-                for t in raw_kxc
-                if isinstance(t, (list, tuple)) and len(t) >= 3
+        raw_full_poly = sota.get("yolo_polygon_fullres")
+        if isinstance(raw_full_poly, list) and len(raw_full_poly) >= 3:
+            _fp = [
+                (float(t[0]), float(t[1]))
+                for t in raw_full_poly
+                if isinstance(t, (list, tuple)) and len(t) >= 2
             ]
+            if len(_fp) >= 3:
+                _poly = polygon_fullres_to_crop(_fp, _sc0i, _sr0i)
+        if _poly is None:
+            raw_poly = sota.get("yolo_polygon_crop")
+            if isinstance(raw_poly, list) and len(raw_poly) >= 3:
+                _poly = [(float(t[0]), float(t[1])) for t in raw_poly]
+        _kpc = None
+        _kxc = None
+        lm_full = sota.get("landmarks_xy_fullres")
+        if isinstance(lm_full, list) and lm_full:
+            _kxc = []
+            for p in lm_full:
+                if not isinstance(p, (list, tuple)) or len(p) < 3:
+                    continue
+                _kxc.append(
+                    (float(p[0]) - sc0, float(p[1]) - sr0, float(p[2]))
+                )
+            if not _kxc:
+                _kxc = None
+        if _kxc is None:
+            raw_kp = sota.get("keypoints_crop")
+            if isinstance(raw_kp, list) and raw_kp:
+                _kpc = [(float(t[0]), float(t[1])) for t in raw_kp]
+            raw_kxc = sota.get("keypoints_xy_conf_crop")
+            if isinstance(raw_kxc, list) and raw_kxc:
+                _kxc = [
+                    (float(t[0]), float(t[1]), float(t[2]))
+                    for t in raw_kxc
+                    if isinstance(t, (list, tuple)) and len(t) >= 3
+                ]
         _bs_conf = None
         if sota.get("keypoint_heading_trust") is not None:
             _bs_conf = float(sota["keypoint_heading_trust"])
         _bs = None
-        raw_bs = sota.get("bow_stern_segment_crop")
-        if isinstance(raw_bs, list) and len(raw_bs) == 2:
-            a0, a1 = raw_bs[0], raw_bs[1]
-            _bs = ((float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1])))
+        _mbs_kp = 0.2
+        if (
+            _show_mark
+            and isinstance(lm_full, list)
+            and len(lm_full) >= 2
+            and isinstance(lm_full[0], (list, tuple))
+            and isinstance(lm_full[1], (list, tuple))
+            and len(lm_full[0]) >= 3
+            and len(lm_full[1]) >= 3
+        ):
+            _bc = float(lm_full[0][2])
+            _stc = float(lm_full[1][2])
+            if _bc >= _mbs_kp and _stc >= _mbs_kp:
+                _bs = (
+                    (float(lm_full[0][0]) - sc0, float(lm_full[0][1]) - sr0),
+                    (float(lm_full[1][0]) - sc0, float(lm_full[1][1]) - sr0),
+                )
+                if _bs_conf is None:
+                    _bs_conf = float(max(0.0, min(1.0, min(_bc, _stc))))
+        if _bs is None:
+            raw_bs = sota.get("bow_stern_segment_crop")
+            if isinstance(raw_bs, list) and len(raw_bs) == 2:
+                a0, a1 = raw_bs[0], raw_bs[1]
+                _bs = ((float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1])))
         _wk = None
-        raw_wk = sota.get("wake_segment_crop")
-        if isinstance(raw_wk, list) and len(raw_wk) == 2:
-            w0, w1 = raw_wk[0], raw_wk[1]
-            _wk = ((float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1])))
+        wk_full = sota.get("wake_segment_fullres")
+        if isinstance(wk_full, list) and len(wk_full) == 2:
+            w0, w1 = wk_full[0], wk_full[1]
+            if (
+                isinstance(w0, (list, tuple))
+                and isinstance(w1, (list, tuple))
+                and len(w0) >= 2
+                and len(w1) >= 2
+            ):
+                _wk = (
+                    (float(w0[0]) - sc0, float(w0[1]) - sr0),
+                    (float(w1[0]) - sc0, float(w1[1]) - sr0),
+                )
+        if _wk is None:
+            raw_wk = sota.get("wake_segment_crop")
+            if isinstance(raw_wk, list) and len(raw_wk) == 2:
+                w0, w1 = raw_wk[0], raw_wk[1]
+                _wk = ((float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1])))
         if _poly or _kxc or _kpc or _bs or _wk:
             spot_vis = overlay_sota_on_spot_rgb(
                 spot_vis,
@@ -2456,30 +2589,6 @@ def _render_review_deck(
     if not isinstance(mk_draw2, list):
         mk_draw2 = []
     spot_ui = draw_markers_on_rgb(spot_vis, mk_draw2) if mk_draw2 else spot_vis
-    if (
-        _show_dir
-        and sota_inference_requested(det_settings)
-        and isinstance(sota, dict)
-        and sota
-    ):
-        _arrow_h: float | None = None
-        for _hk in (
-            "heading_fused_deg",
-            "heading_keypoint_deg",
-            "heading_wake_heuristic_deg",
-        ):
-            _raw = sota.get(_hk)
-            if _raw is None:
-                continue
-            try:
-                _fv = float(_raw)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(_fv):
-                _arrow_h = _fv
-                break
-        if _arrow_h is not None:
-            spot_ui = overlay_heading_arrow_north(spot_ui, _arrow_h)
 
     side_px = CHIP_DISPLAY_SIDE
     main_px = CHIP_DISPLAY_MAIN
@@ -2492,65 +2601,55 @@ def _render_review_deck(
     else:
         extent_sq2 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
+    if (
+        _show_dir
+        and sota_inference_requested(det_settings)
+        and isinstance(sota, dict)
+        and sota
+    ):
+        _arrow_h: float | None = None
+        for _hk in (
+            "heading_fused_deg",
+            "heading_keypoint_deg",
+            "heading_wake_heuristic_deg",
+            "heading_wake_deg",
+            "heading_wake_onnx_deg",
+            "aquaforge_wake_aux_deg",
+        ):
+            _raw = sota.get(_hk)
+            if _raw is None:
+                continue
+            try:
+                _fv = float(_raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(_fv):
+                _arrow_h = _fv
+                break
+        if _arrow_h is not None:
+            spot_sq = overlay_heading_arrow_north_on_letterbox(
+                spot_sq, spot_lb_meta, _arrow_h
+            )
     loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, side_px)
 
-    # Large single close-up; hull preview + map + extra checkboxes live in optional expanders below.
-    click_spot_dim = streamlit_image_coordinates(
-        spot_sq,
-        key=f"spot_dim_{spot_k}",
-        width=main_px,
-        height=main_px,
-        use_column_width=False,
-        cursor="crosshair",
-    )
-    loc_nat_w = int(loc_vis.shape[1])
-    loc_nat_h = int(loc_vis.shape[0])
-    loc_comp_key = hashlib.sha256(
-        f"{tci_loaded}|{idx}|{lc0}|{lr0}|{loc_nat_w}|{loc_nat_h}|"
-        f"{len(st.session_state.pending_locator_candidates)}".encode()
-    ).hexdigest()[:20]
-    click_loc = None
-    with st.expander("Small map — add another location", expanded=False):
-        st.caption(
-            "Click where you want another bright spot queued. Orange = suggestions · green = queued · "
-            "purple = saved · yellow = this spot."
-        )
-        click_loc = streamlit_image_coordinates(
-            loc_sq,
-            key=f"loc_vessel_{loc_comp_key}",
-            width=side_px,
-            height=side_px,
-            use_column_width=False,
-            cursor="crosshair",
-        )
-
-    if sota_inference_requested(det_settings) and sota:
-        _render_spot_measurements_expander(
-            sota=dict(sota) if isinstance(sota, dict) else {},
-            det_settings=det_settings,
-            clf_disp=clf_disp,
-            bundle_disp=bundle_disp,
-            p_comb=p_comb,
-            labels_path=labels_path,
-            tci_p=tci_p,
-            tci_loaded=tci_loaded,
-            cx=cx,
-            cy=cy,
-        )
-
+    # Keys + quick notes above the image row so marker metrics see wake/cloud state on the same run.
     wake_vis_k = f"wake_vis_{spot_k}"
     cloud_partial_k = f"cloud_partial_{spot_k}"
-    with st.expander("Optional: quick notes for training", expanded=False):
+    st.caption("Optional training flags (affect marker-derived lengths)")
+    _wn1, _wn2 = st.columns(2)
+    with _wn1:
         st.checkbox(
             "Wake visible behind the ship",
             key=wake_vis_k,
             help="Helps the model learn water patterns.",
         )
+    with _wn2:
         st.checkbox(
             "Partly hidden by cloud",
             key=cloud_partial_k,
             help="Marks a harder example.",
         )
+
     mk_list_fb = st.session_state.get(dim_key, [])
     if not isinstance(mk_list_fb, list):
         mk_list_fb = []
@@ -2608,58 +2707,90 @@ def _render_review_deck(
         lab = f"<b>{label}</b> " if label else ""
         return f'<p class="vd-deck-foot">{lab}{body}{note}</p>'
 
-    with st.expander("Optional: sizes and outline markers", expanded=False):
-        st.caption("Bow, stern, sides: pick a role, then click the **large** image above.")
-        f_extent, f_spot, f_loc = st.columns(3)
-        with f_extent:
-            if is_twin:
-                h1t = ""
-                h2t = ""
-                if fp is not None:
-                    w1, l1, _fs = fp
-                    h1t = f"H1 L×W **{l1:.0f}×{w1:.0f} m** · "
-                else:
-                    h1t = "H1: ≥2 markers · "
-                if fp_h2 is not None:
-                    w2, l2, _fs2 = fp_h2
-                    h2t = f"H2 L×W **{l2:.0f}×{w2:.0f} m**"
-                else:
-                    h2t = "H2: ≥2 markers"
+    _cmain, _cside = st.columns([2.45, 0.95])
+    with _cmain:
+        # Include idx in the key so the coordinate component remounts when changing spots (avoids stale image).
+        click_spot_dim = streamlit_image_coordinates(
+            np.ascontiguousarray(spot_sq.copy()),
+            key=f"spot_dim_idx{idx}_{spot_k}",
+            width=main_px,
+            height=main_px,
+            use_column_width=False,
+            cursor="crosshair",
+        )
+    with _cside:
+        st.caption("Locator — queue another bright spot")
+        st.markdown(
+            '<p class="vd-deck-foot">Orange = suggestions · green = queued · purple = saved · yellow = here</p>',
+            unsafe_allow_html=True,
+        )
+        click_loc = streamlit_image_coordinates(
+            loc_sq,
+            key=f"loc_vessel_{spot_k}",
+            width=side_px,
+            height=side_px,
+            use_column_width=False,
+            cursor="crosshair",
+        )
+        if sota_inference_requested(det_settings) and sota:
+            _render_spot_measurements_panel(
+                sota=dict(sota) if isinstance(sota, dict) else {},
+                det_settings=det_settings,
+                clf_disp=clf_disp,
+                bundle_disp=bundle_disp,
+                p_comb=p_comb,
+                labels_path=labels_path,
+                tci_p=tci_p,
+                tci_loaded=tci_loaded,
+                cx=cx,
+                cy=cy,
+                in_expander=False,
+            )
+        st.markdown("##### From markers")
+        if is_twin:
+            h1t = ""
+            h2t = ""
+            if fp is not None:
+                w1, l1, _fs = fp
+                h1t = f"H1 L×W **{l1:.0f}×{w1:.0f} m** · "
+            else:
+                h1t = "H1: ≥2 markers · "
+            if fp_h2 is not None:
+                w2, l2, _fs2 = fp_h2
+                h2t = f"H2 L×W **{l2:.0f}×{w2:.0f} m**"
+            else:
+                h2t = "H2: ≥2 markers"
+            st.markdown(
+                "<p class=\"vd-deck-foot\">Extent preview when bow, stern, and **two side** points are set.<br/>"
+                f"{h1t}{h2t}</p>",
+                unsafe_allow_html=True,
+            )
+        else:
+            if fp is not None:
+                width_m, length_m, _fss = fp
                 st.markdown(
-                    "<p class=\"vd-deck-foot\">Extent preview: keel-aligned rectangle when bow, stern, and "
-                    f"**two side** points are set.<br/>{h1t}{h2t}</p>",
+                    f"<p class=\"vd-deck-foot\">Footprint <b>{length_m:.0f}×{width_m:.0f} m</b> — "
+                    f"hull from markers (edges through sides) or PCA.</p>",
                     unsafe_allow_html=True,
                 )
             else:
-                if fp is not None:
-                    width_m, length_m, _fss = fp
-                    st.markdown(
-                        f"<p class=\"vd-deck-foot\">Footprint <b>{length_m:.0f}×{width_m:.0f} m</b> — "
-                        f"hull from markers (edges through sides) or PCA.</p>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        '<p class="vd-deck-foot">Hull from markers when ≥2 hull points; '
-                        "bow + stern + two **side** points give the edge-aligned rectangle.</p>",
-                        unsafe_allow_html=True,
-                    )
-        with f_spot:
-            spot_body = ""
-            if is_twin:
-                spot_body = _derived_metrics_html(gm, "H1 ")
-                spot_body += _derived_metrics_html(gm2, "H2 ")
-            else:
-                spot_body = _derived_metrics_html(gm, "") if gm else (
-                    '<p class="vd-deck-foot">Spot: pick role, then click to place.</p>'
+                st.markdown(
+                    '<p class="vd-deck-foot">Hull from markers when ≥2 hull points; '
+                    "bow + stern + two **side** points give the edge-aligned rectangle.</p>",
+                    unsafe_allow_html=True,
                 )
-            st.markdown(spot_body, unsafe_allow_html=True)
-        with f_loc:
-            st.markdown(
-                '<p class="vd-deck-foot"><b>Map</b> — orange: suggestions · green: queued · purple: saved · yellow: here</p>',
-                unsafe_allow_html=True,
+        spot_body2 = ""
+        if is_twin:
+            spot_body2 = _derived_metrics_html(gm, "H1 ")
+            spot_body2 += _derived_metrics_html(gm2, "H2 ")
+        else:
+            spot_body2 = _derived_metrics_html(gm, "") if gm else (
+                '<p class="vd-deck-foot">Pick a role below, then click the large image.</p>'
             )
-        
+        st.markdown(spot_body2, unsafe_allow_html=True)
+
+    with st.expander("Optional: sizes and outline markers", expanded=False):
+        st.caption("Bow, stern, sides: pick a role, then click the **large** image (left column).")
         st.markdown("##### Ships in this chip")
         v1, v2, v3, v4 = st.columns(4)
         with v1:
@@ -2890,28 +3021,55 @@ def _render_review_deck(
     if conf_k not in st.session_state:
         st.session_state[conf_k] = "high"
 
+    # on_click runs before the rest of the script on the next run — avoids streamlit_image_coordinates
+    # / widget order quirks where footer clicks did not advance idx reliably.
+    def _vd_review_go_prev() -> None:
+        st.session_state.idx = max(0, int(st.session_state.idx) - 1)
+
+    def _vd_review_go_next() -> None:
+        st.session_state.idx = int(st.session_state.idx) + 1
+
+    def _vd_review_go_skip() -> None:
+        pool = st.session_state.get("detector_candidates") or []
+        i = int(st.session_state.idx)
+        if i < 0 or i >= len(pool):
+            return
+        cxi, cyi, _sc = pool[i]
+        st.session_state.pending_locator_candidates = remove_pending_near(
+            st.session_state.pending_locator_candidates,
+            float(cxi),
+            float(cyi),
+        )
+        st.session_state.idx = i + 1
+
     st.markdown('<div class="vd-review-footer-anchor"></div>', unsafe_allow_html=True)
     st.markdown("---")
-    fb1, fb2, fb3, fb4, fb5 = st.columns([0.62, 0.62, 1.15, 1.15, 1.15])
+    fb1, fb2, fb3, fb4, fb5, fb6 = st.columns([0.5, 0.5, 0.5, 1.05, 1.05, 1.05])
     with fb1:
-        if st.button(
+        st.button(
             "← Back",
             disabled=idx <= 0,
             use_container_width=True,
             key="vd_review_spot_back",
-        ):
-            st.session_state.idx = idx - 1
-            st.rerun()
+            on_click=_vd_review_go_prev,
+        )
     with fb2:
-        if st.button(
+        st.button(
             "Next →",
             disabled=idx >= n - 1,
             use_container_width=True,
             key="vd_review_spot_next",
-        ):
-            st.session_state.idx = idx + 1
-            st.rerun()
+            on_click=_vd_review_go_next,
+        )
     with fb3:
+        st.button(
+            "Skip",
+            use_container_width=True,
+            key="vd_review_spot_skip_main",
+            help="Next spot without saving (works on the last spot too — ends the batch).",
+            on_click=_vd_review_go_skip,
+        )
+    with fb4:
         if st.button(
             "Ship",
             key=f"lbl_vessel_{idx}",
@@ -2934,7 +3092,7 @@ def _render_review_deck(
                 sr0=sr0,
                 fp=fp,
             )
-    with fb4:
+    with fb5:
         if st.button(
             "Not a ship",
             key=f"lbl_not_vessel_{idx}",
@@ -2956,7 +3114,7 @@ def _render_review_deck(
                 sr0=sr0,
                 fp=fp,
             )
-    with fb5:
+    with fb6:
         if st.button(
             "Unsure",
             key=f"lbl_ambiguous_{idx}",
@@ -2980,8 +3138,8 @@ def _render_review_deck(
             )
 
     with st.expander("Advanced (this spot)", expanded=False):
-        st.caption("Cloud, land, skip, confidence — if the main three buttons are not enough.")
-        mx1, mx2, mx3 = st.columns(3)
+        st.caption("Cloud, land, confidence — **Skip** is on the main bar above.")
+        mx1, mx2 = st.columns(2)
         with mx1:
             if st.button(
                 "Cloud",
@@ -3026,17 +3184,6 @@ def _render_review_deck(
                     sr0=sr0,
                     fp=fp,
                 )
-        with mx3:
-            if st.button(
-                "Skip — next spot",
-                key=f"vd_skip_{spot_k}_{idx}",
-                use_container_width=True,
-            ):
-                st.session_state.pending_locator_candidates = remove_pending_near(
-                    st.session_state.pending_locator_candidates, cx, cy
-                )
-                st.session_state.idx = idx + 1
-                st.rerun()
         st.markdown("**How sure are you?** (only matters if you did not pick **Unsure**)")
         ch1, ch2, ch3, _ = st.columns(4)
         cur_conf = str(st.session_state.get(conf_k, "high")).lower()
@@ -3066,23 +3213,12 @@ def _render_review_deck(
                 st.rerun()
 
         st.divider()
-        st.markdown("**Sort helpers**")
-        if p_comb is not None:
-            cols_p = st.columns(
-                min(3, 2 + (1 if p_lr is not None and p_mlp is not None else 0))
-            )
-            i_col = 0
-            if p_lr is not None:
-                cols_p[i_col].metric("Model A", f"{p_lr:.2f}")
-                i_col += 1
-            if p_mlp is not None:
-                cols_p[i_col].metric("Model B", f"{p_mlp:.2f}")
-                i_col += 1
-            if p_lr is not None and p_mlp is not None and i_col < len(cols_p):
-                cols_p[i_col].metric("Mixed", f"{p_comb:.2f}")
-            st.caption("Higher ≈ more like past **Ship** saves (after retraining sort models).")
-        elif clf_disp is not None or bundle_disp is not None:
-            st.caption("No score here — try **Refresh spot list**.")
+        st.markdown("**Queue / AquaForge**")
+        st.caption(
+            "Candidates are sorted by **AquaForge vessel confidence**, then bright-spot brightness. "
+            "**Vessel confidence** (as a %) is in the captions next to the locator above. "
+            "LR / chip-MLP “ranking” models are not used for queue order."
+        )
 
         if mt_pred:
             st.divider()
@@ -3195,19 +3331,12 @@ def _commit_review_label(
     if _cfg_fp.is_file():
         _fp_paths.append(_cfg_fp)
     _dset_fp = load_detection_settings(ROOT)
-    _yw_fp = default_marine_yolo_dir(ROOT) / _dset_fp.yolo.weights_file
-    if _yw_fp.is_file():
-        _fp_paths.append(_yw_fp)
-    _kpx = _dset_fp.keypoints.external_onnx_path
-    if _kpx:
-        _kp_p = Path(str(_kpx))
-        if _kp_p.is_file():
-            _fp_paths.append(_kp_p)
-    _wkx = _dset_fp.wake_fusion.onnx_wake_path
-    if _wkx:
-        _wk_p = Path(str(_wkx))
-        if _wk_p.is_file():
-            _fp_paths.append(_wk_p)
+    _af_ck_save = resolve_aquaforge_checkpoint_path(ROOT, _dset_fp.aquaforge)
+    if _af_ck_save is not None and _af_ck_save.is_file():
+        _fp_paths.append(_af_ck_save)
+    _af_onx_save = resolve_aquaforge_onnx_path(ROOT, _dset_fp.aquaforge)
+    if _af_onx_save is not None and _af_onx_save.is_file():
+        _fp_paths.append(_af_onx_save)
     fpid = model_run_fingerprint(*_fp_paths)
     extra: dict = {"score": score, "candidate_index": idx}
     wake_k = f"wake_vis_{spot_k}"

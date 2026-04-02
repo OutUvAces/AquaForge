@@ -1,15 +1,14 @@
 """
-Ensemble teacher + active-learning hooks for AquaForge (our pipeline — not vendor distillation).
+AquaForge teacher signal + active-learning hooks (our pipeline — not vendor distillation).
 
-The **teacher** is the existing ``ensemble`` stack in ``detection_backend`` (marine YOLO + optional
-keypoints + wake fusion). We only distill **heading** as normalised (sin, cos) targets into
-AquaForge's own heading head — we do not clone their internal losses or architectures.
+The **teacher** is the current AquaForge forward pass (``heading_fused_deg`` and fallbacks in the
+same ``sota`` dict shape as the review UI). We distill **heading** as normalised (sin, cos) targets
+into AquaForge's own heading head.
 
 **Active learning**: priority scores come from review-UI ``extra`` fields (model uncertainty, small
 vessel proxies, low heading trust, cloud flags, optional manual training boost). The trainer
-oversamples high-priority rows; :func:`hydrate_teacher_signals` fills ensemble heading targets on the
-same ranked queue each epoch so **chips you struggled with in the UI** tend to get teacher signal
-first — a tight loop with Streamlit review exports, not a separate mining pipeline.
+oversamples high-priority rows; :func:`hydrate_teacher_signals` fills teacher heading targets on the
+same ranked queue each epoch.
 """
 
 from __future__ import annotations
@@ -156,7 +155,7 @@ def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
 
 
 def merge_al_priority_with_aquaforge_u(base_priority: float, af_u: float) -> float:
-    """Boost sampling weight when the **student** is uncertain (complements UI / ensemble cues)."""
+    """Boost sampling weight when the **student** is uncertain (complements UI-derived cues)."""
     u = max(0.0, min(1.0, float(af_u)))
     return float(max(0.45, min(base_priority * (1.0 + 0.72 * u), 5.8)))
 
@@ -247,20 +246,17 @@ def teacher_sota_dict(
     spot_row_off: int,
     hybrid_proba: float | None = None,
 ) -> dict[str, Any]:
-    """Run :func:`run_sota_spot_inference` with ``backend: ensemble`` (YAML otherwise unchanged)."""
-    from dataclasses import replace
-
-    from aquaforge.detection_backend import run_sota_spot_inference
+    """Run AquaForge spot inference (same stack as the review UI) for teacher heading targets."""
     from aquaforge.detection_config import load_detection_settings
+    from aquaforge.unified.integration import run_aquaforge_spot_inference
 
-    base = load_detection_settings(project_root)
-    s = replace(base, backend="ensemble")
-    return run_sota_spot_inference(
+    settings = load_detection_settings(project_root)
+    return run_aquaforge_spot_inference(
         project_root,
         tci_path,
         cx,
         cy,
-        s,
+        settings,
         spot_col_off=int(spot_col_off),
         spot_row_off=int(spot_row_off),
         hybrid_proba=hybrid_proba,
