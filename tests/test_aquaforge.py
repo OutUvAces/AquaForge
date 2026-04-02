@@ -83,6 +83,49 @@ class TestLandmarksFromHeatmap(unittest.TestCase):
         self.assertAlmostEqual(fy, 200.0 + 0.5 * 300.0, places=3)
 
 
+class TestTiledSceneHelpers(unittest.TestCase):
+    def test_tile_axis_starts_covers_right_edge(self) -> None:
+        from aquaforge.unified.inference import _tile_axis_starts
+
+        s = _tile_axis_starts(1000, 640, 320)
+        self.assertIn(0, s)
+        self.assertIn(360, s)
+
+    def test_nms_suppresses_overlapping_boxes(self) -> None:
+        from aquaforge.unified.inference import (
+            AquaForgeSpotResult,
+            nms_aquaforge_spot_results,
+        )
+
+        a = AquaForgeSpotResult(
+            confidence=0.9,
+            polygon_fullres=[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)],
+            chip_col_off=0,
+            chip_row_off=0,
+            chip_w=100,
+            chip_h=100,
+            landmarks_fullres=None,
+            heading_direct_deg=0.0,
+            heading_direct_conf=1.0,
+            wake_dxdy=(1.0, 0.0),
+        )
+        b = AquaForgeSpotResult(
+            confidence=0.5,
+            polygon_fullres=[(10.0, 10.0), (90.0, 10.0), (90.0, 90.0), (10.0, 90.0)],
+            chip_col_off=0,
+            chip_row_off=0,
+            chip_w=100,
+            chip_h=100,
+            landmarks_fullres=None,
+            heading_direct_deg=90.0,
+            heading_direct_conf=1.0,
+            wake_dxdy=(0.0, 1.0),
+        )
+        keep = nms_aquaforge_spot_results([a, b], iou_threshold=0.3)
+        self.assertEqual(len(keep), 1)
+        self.assertAlmostEqual(keep[0].confidence, 0.9)
+
+
 class TestAquaForgeConstants(unittest.TestCase):
     def test_landmark_count(self) -> None:
         self.assertEqual(NUM_LANDMARKS, len(LANDMARK_NAMES))

@@ -1,8 +1,14 @@
 """
-Candidate ranking and per-spot inference using **AquaForge**.
+Candidate discovery and per-spot inference using **AquaForge**.
 
-Queue ordering uses AquaForge vessel probability only (brightness score tie-breaks).
-Spot diagnostics come from :func:`run_aquaforge_spot_inference` in
+**Default (``backend: aquaforge``)** — :func:`aquaforge_tiled_scene_triples` runs a sliding-window
+over the full Sentinel-2 scene, merges overlapping hits with mask-bbox NMS, and returns vessel
+centroids with confidence (no bright-spot stage).
+
+**Legacy** — ``legacy_hybrid`` / ``ensemble`` or ``force_legacy: true`` keep the bright-spot +
+water-mask candidate list; :func:`rank_candidates_from_config` then re-scores with AquaForge.
+
+Spot diagnostics still come from :func:`run_aquaforge_spot_inference` in
 :mod:`aquaforge.unified.integration`.
 """
 
@@ -11,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from aquaforge.detection_config import DetectionSettings
+from aquaforge.detection_config import DetectionSettings, use_legacy_candidate_pipeline
 from aquaforge.review_schema import combined_vessel_proba_with_bundle
 from aquaforge.ship_chip_mlp import vessel_proba_chip_mlp
 from aquaforge.training_data import extract_crop_features
@@ -50,6 +56,44 @@ def hybrid_vessel_proba_at(
     return _hybrid_proba_at(tci_path, cx, cy, clf, chip_bundle)
 
 
+def aquaforge_tiled_scene_triples(
+    project_root: Path,
+    tci_path: Path,
+    settings: DetectionSettings,
+) -> tuple[list[tuple[float, float, float]], dict[str, Any]]:
+    """
+    End-to-end AquaForge on the full raster: overlapping tiles → NMS → ``(cx, cy, conf)`` list.
+
+    ``cx, cy`` are hull centroids in full-image pixels; ``conf`` is the classifier score after NMS.
+    """
+    from aquaforge.model_manager import get_cached_aquaforge_predictor
+    from aquaforge.raster_rgb import raster_dimensions
+
+    meta: dict[str, Any] = {
+        "candidate_source": "aquaforge_tiled",
+        "downsample_factor": 1,
+        "mask": "full_scene_tiled",
+        "scl_path": None,
+        "ds_shape": None,
+        "water_fraction": None,
+        "scl_warped_to_tci_grid": False,
+    }
+    pred = get_cached_aquaforge_predictor(project_root, settings)
+    if pred is None:
+        meta["error"] = "aquaforge_weights_missing"
+        meta["full_shape"] = None
+        return [], meta
+    try:
+        w, h = raster_dimensions(tci_path)
+        meta["full_shape"] = (h, w)
+        triples = pred.run_tiled_scene_candidates(tci_path)
+        return triples, meta
+    except Exception as e:
+        meta["error"] = str(e)
+        meta["full_shape"] = None
+        return [], meta
+
+
 def rank_candidates_from_config(
     candidates: list[tuple[float, float, float]],
     tci_path: Path,
@@ -64,10 +108,15 @@ def rank_candidates_from_config(
     ``clf`` / ``chip_bundle`` are ignored for ordering (kept for API compatibility).
 
     Tie-breaker: original detector ``brightness_score`` (descending).
+
+    No-op when ``candidates`` is empty. For tiled listings, the UI skips this (scores are final).
     """
     _ = clf, chip_bundle
     if not candidates:
         return candidates
+    if not use_legacy_candidate_pipeline(settings):
+        # Tiled path already sorted by confidence; re-ranking would duplicate full-scene work.
+        return list(candidates)
 
     work = list(candidates)
     from aquaforge.unified.inference import aquaforge_confidence_only

@@ -1,6 +1,11 @@
 # Copy to data/config/detection.yaml (create folder if needed).
-# The app uses **AquaForge** only; legacy ``backend``, ``yolo``, ``keypoints``, and ``wake_fusion``
-# keys are ignored if present.
+#
+# backend: aquaforge          # default — full-scene tiled AquaForge detection (no bright-spot stage)
+# backend: legacy_hybrid     # bright spots + SCL / heuristic water mask, then AquaForge ranking
+# backend: ensemble           # same candidate pipeline as legacy_hybrid
+# force_legacy: true         # hidden: force bright-spot pipeline even if backend is aquaforge
+#
+# Legacy keys ``yolo``, ``keypoints``, ``wake_fusion`` are ignored if present.
 
 # aquaforge:
 #   weights_path: data/models/aquaforge/aquaforge.pt
@@ -13,6 +18,11 @@
 #   weight_vs_hybrid: 0.55
 #   chip_batch_size: 6
 #   min_direct_heading_confidence: 0.35
+#   # Full-scene tiling (backend: aquaforge only):
+#   tiled_overlap_fraction: 0.5
+#   tiled_nms_iou: 0.45
+#   tiled_min_proposal_confidence: 0.08
+#   tiled_max_detections: 500
 
 # onnx_runtime:
 #   intra_op_num_threads: 0

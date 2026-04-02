@@ -12,6 +12,7 @@ from aquaforge.detection_config import (
     load_detection_settings,
     merged_onnx_providers,
     sota_inference_requested,
+    use_legacy_candidate_pipeline,
 )
 
 
@@ -24,7 +25,7 @@ class TestDetectionConfig(unittest.TestCase):
             self.assertEqual(s.onnx_runtime.graph_optimization_level, "all")
             self.assertTrue(sota_inference_requested(s))
 
-    def test_yaml_ignores_legacy_backend_and_reads_aquaforge(self) -> None:
+    def test_yaml_backend_unknown_defaults_to_aquaforge(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cfg = root / "data" / "config"
@@ -37,9 +38,25 @@ class TestDetectionConfig(unittest.TestCase):
                 encoding="utf-8",
             )
             s = load_detection_settings(root)
+            self.assertEqual(s.backend, "aquaforge")
+            self.assertTrue(s.force_legacy)
+            self.assertTrue(use_legacy_candidate_pipeline(s))
             self.assertAlmostEqual(s.aquaforge.weight_vs_hybrid, 0.61)
             self.assertEqual(s.aquaforge.chip_half, 288)
             self.assertTrue(sota_inference_requested(s))
+
+    def test_yaml_backend_legacy_hybrid(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = root / "data" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "detection.yaml").write_text(
+                "backend: legacy_hybrid\n",
+                encoding="utf-8",
+            )
+            s = load_detection_settings(root)
+            self.assertEqual(s.backend, "legacy_hybrid")
+            self.assertTrue(use_legacy_candidate_pipeline(s))
 
     def test_ui_flags_from_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as td:

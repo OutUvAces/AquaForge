@@ -20,6 +20,8 @@ def get_cached_aquaforge_predictor(project_root: Path, settings: Any) -> Any | N
     Process-wide cached :class:`AquaForgePredictor` (Torch or ONNX per YAML).
 
     Keyed by resolved weight/onnx path mtimes and ``use_onnx_inference`` flag.
+    The same predictor powers single-chip review, batched ranking (legacy), and
+    :meth:`AquaForgePredictor.run_tiled_scene_candidates` for full-scene detection.
     """
     from aquaforge.unified.inference import (
         build_aquaforge_predictor,

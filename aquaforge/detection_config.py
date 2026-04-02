@@ -4,8 +4,16 @@ YAML-driven settings for **AquaForge** (unified vessel model) and ONNX runtime t
 Default path: ``<project_root>/data/config/detection.yaml``.
 Override with env ``AF_DETECTION_CONFIG`` or ``VD_DETECTION_CONFIG`` (absolute path).
 
-Legacy marine-YOLO / ensemble / ``force_legacy`` backends are removed; YAML keys such as
-``backend``, ``yolo``, ``keypoints``, and ``wake_fusion`` are ignored if still present.
+**Detection mode**
+
+* ``backend: aquaforge`` (default) — full-scene **tiled** AquaForge inference proposes vessel
+  centers (no bright-spot / ocean-mask candidate stage).
+* ``backend: legacy_hybrid`` or ``ensemble`` — classic bright-spot + SCL / heuristic water
+  mask candidate generation (same path as historical apps).
+* ``force_legacy: true`` — hidden override: use the legacy candidate pipeline even when
+  ``backend`` is ``aquaforge`` (debug / A–B comparisons).
+
+Other legacy keys (``yolo``, ``keypoints``, ``wake_fusion``) are ignored if present.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ __all__ = [
     "load_detection_settings",
     "merged_onnx_providers",
     "sota_inference_requested",
+    "use_legacy_candidate_pipeline",
 ]
 
 
@@ -61,10 +70,25 @@ class AquaForgeSection:
     weight_vs_hybrid: float = 0.55
     chip_batch_size: int = 6
     min_direct_heading_confidence: float = 0.35
+    # --- Full-scene tiled detection (backend: aquaforge) ---
+    # Overlap between adjacent windows as a fraction of tile side (0.5 => 50% overlap, stride = half tile).
+    tiled_overlap_fraction: float = 0.5
+    # Greedy box IoU NMS on axis-aligned bounds of predicted hulls after merging tiles.
+    tiled_nms_iou: float = 0.45
+    # Minimum classifier score to emit a tile proposal before NMS (decode mask/keypoints).
+    tiled_min_proposal_confidence: float = 0.08
+    # Cap merged detections per scene (after NMS, before final conf_threshold filter in listing).
+    tiled_max_detections: int = 500
 
 
 @dataclass
 class DetectionSettings:
+    """Top-level detection YAML."""
+
+    # aquaforge | legacy_hybrid | ensemble
+    backend: str = "aquaforge"
+    # If true, always use bright-spot + mask candidate generation (ignores tiled path).
+    force_legacy: bool = False
     aquaforge: AquaForgeSection = field(default_factory=AquaForgeSection)
     onnx_runtime: OnnxRuntimeSection = field(default_factory=OnnxRuntimeSection)
     # If set and ``hybrid_proba`` is passed to spot inference, skip full AquaForge decode when low.
@@ -119,6 +143,31 @@ def _parse_aquaforge(d: dict[str, Any] | None) -> AquaForgeSection:
                 "min_direct_heading_confidence",
                 AquaForgeSection.min_direct_heading_confidence,
             )
+        ),
+        tiled_overlap_fraction=float(
+            d.get(
+                "tiled_overlap_fraction",
+                AquaForgeSection.tiled_overlap_fraction,
+            )
+        ),
+        tiled_nms_iou=float(d.get("tiled_nms_iou", AquaForgeSection.tiled_nms_iou)),
+        tiled_min_proposal_confidence=float(
+            d.get(
+                "tiled_min_proposal_confidence",
+                AquaForgeSection.tiled_min_proposal_confidence,
+            )
+        ),
+        tiled_max_detections=max(
+            1,
+            min(
+                5000,
+                int(
+                    d.get(
+                        "tiled_max_detections",
+                        AquaForgeSection.tiled_max_detections,
+                    )
+                ),
+            ),
         ),
     )
 
@@ -189,7 +238,18 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
     if isinstance(gop, list) and all(isinstance(x, str) for x in gop):
         global_onnx_prov = list(gop)
 
+    raw_be = data.get("backend")
+    backend = (
+        str(raw_be).strip().lower()
+        if isinstance(raw_be, str) and raw_be.strip()
+        else DetectionSettings.backend
+    )
+    if backend not in ("aquaforge", "legacy_hybrid", "ensemble"):
+        backend = DetectionSettings.backend
+
     return DetectionSettings(
+        backend=backend,
+        force_legacy=bool(data.get("force_legacy", False)),
         aquaforge=_parse_aquaforge(
             data.get("aquaforge") if isinstance(data.get("aquaforge"), dict) else None
         ),
@@ -208,3 +268,15 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
 def sota_inference_requested(_settings: DetectionSettings) -> bool:
     """Spot-level model overlays are always available when AquaForge is the only stack."""
     return True
+
+
+def use_legacy_candidate_pipeline(settings: DetectionSettings) -> bool:
+    """
+    True → UI / bench use bright-spot + water-mask candidates.
+
+    False → default **tiled** AquaForge full-scene listing (``backend: aquaforge``).
+    """
+    if settings.force_legacy:
+        return True
+    b = (settings.backend or "aquaforge").strip().lower()
+    return b in ("legacy_hybrid", "ensemble")

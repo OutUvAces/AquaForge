@@ -121,6 +121,156 @@ def _landmarks_from_kp_hm_logits(
     return out
 
 
+# --- Tiled full-scene detection: axis-aligned helpers + IoU NMS -----------------
+# Overlapping windows each run the same single-vessel head; duplicates merge by box IoU.
+# Heading is not yet fused across near-duplicates (same box NMS drops weaker tile copies).
+
+
+def _tile_axis_starts(length_px: int, tile_px: int, stride_px: int) -> list[int]:
+    """Start indices so every window is fully inside ``[0, length_px)`` with width ``tile_px``."""
+    t = int(tile_px)
+    s = max(1, int(stride_px))
+    L = int(length_px)
+    if L <= 0 or t <= 0:
+        return [0]
+    if L <= t:
+        return [0]
+    last = L - t
+    starts: list[int] = []
+    pos = 0
+    while pos < last:
+        starts.append(pos)
+        pos += s
+    starts.append(last)
+    return sorted(set(starts))
+
+
+def _polygon_aabb_xyxy(
+    poly: list[tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    xs = [float(p[0]) for p in poly]
+    ys = [float(p[1]) for p in poly]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _polygon_centroid_xy(poly: list[tuple[float, float]]) -> tuple[float, float]:
+    n = len(poly)
+    if n == 0:
+        return 0.0, 0.0
+    if n < 3:
+        return (
+            float(sum(p[0] for p in poly) / n),
+            float(sum(p[1] for p in poly) / n),
+        )
+    a = 0.0
+    cx = 0.0
+    cy = 0.0
+    for i in range(n):
+        x0, y0 = float(poly[i][0]), float(poly[i][1])
+        x1, y1 = float(poly[(i + 1) % n][0]), float(poly[(i + 1) % n][1])
+        c = x0 * y1 - x1 * y0
+        a += c
+        cx += (x0 + x1) * c
+        cy += (y0 + y1) * c
+    a *= 0.5
+    if abs(a) < 1e-9:
+        return (
+            float(sum(p[0] for p in poly) / n),
+            float(sum(p[1] for p in poly) / n),
+        )
+    return cx / (6.0 * a), cy / (6.0 * a)
+
+
+def _iou_xyxy(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    aa = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    ab = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = aa + ab - inter
+    return float(inter / union) if union > 1e-12 else 0.0
+
+
+def nms_aquaforge_spot_results(
+    dets: list[AquaForgeSpotResult],
+    *,
+    iou_threshold: float,
+) -> list[AquaForgeSpotResult]:
+    """
+    Greedy NMS on axis-aligned bounds of each hull (mask polygon), or chip rect fallback.
+    """
+    if not dets:
+        return []
+    thr = float(iou_threshold)
+    boxes: list[tuple[float, float, float, float]] = []
+    for d in dets:
+        poly = d.polygon_fullres
+        if poly is not None and len(poly) >= 3:
+            boxes.append(_polygon_aabb_xyxy(poly))
+        else:
+            c0, r0 = float(d.chip_col_off), float(d.chip_row_off)
+            boxes.append(
+                (c0, r0, c0 + float(d.chip_w), r0 + float(d.chip_h))
+            )
+    order = sorted(range(len(dets)), key=lambda i: -dets[i].confidence)
+    keep: list[int] = []
+    suppressed = [False] * len(dets)
+    for idx in order:
+        if suppressed[idx]:
+            continue
+        keep.append(idx)
+        for j in order:
+            if j == idx or suppressed[j]:
+                continue
+            if _iou_xyxy(boxes[idx], boxes[j]) >= thr:
+                suppressed[j] = True
+    return [dets[i] for i in keep]
+
+
+def _read_padded_chip_bgr(
+    tci_path: Path,
+    col0: int,
+    row0: int,
+    tw: int,
+    th: int,
+    img_w: int,
+    img_h: int,
+) -> tuple[np.ndarray, int, int, int, int] | None:
+    """
+    Read a fixed ``tw×th`` BGR chip; pad with black if the window hits the raster edge so the
+    network always sees a square tensor (geometry origin stays the true window corner).
+    """
+    import cv2
+
+    from aquaforge.raster_rgb import read_rgba_window
+
+    col1 = col0 + tw
+    row1 = row0 + th
+    rgba, w, h, _wf, _hf, c0, r0 = read_rgba_window(
+        tci_path, col0, row0, col1, row1
+    )
+    if w < 8 or h < 8:
+        return None
+    rgb = np.ascontiguousarray(rgba[:, :, :3])
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    if w == tw and h == th:
+        return bgr, int(c0), int(r0), int(tw), int(th)
+    pad = np.zeros((th, tw, 3), dtype=np.uint8)
+    pad[:h, :w] = bgr
+    return pad, int(c0), int(r0), int(tw), int(th)
+
+
 class AquaForgePredictor:
     def __init__(
         self,
@@ -167,96 +317,151 @@ class AquaForgePredictor:
         tci_path: str | Path,
         centers: Sequence[tuple[float, float]],
     ) -> list[AquaForgeSpotResult | None]:
-        out: list[AquaForgeSpotResult | None] = []
-        for cx, cy in centers:
-            out.append(self.predict_at_candidate(tci_path, cx, cy))
+        from aquaforge.yolo_marine_backend import read_yolo_chip_bgr
+
+        n = len(centers)
+        out: list[AquaForgeSpotResult | None] = [None] * n
+        half = int(self._af.chip_half)
+        chips: list[tuple[np.ndarray, int, int, int, int]] = []
+        idx_map: list[int] = []
+        for i, (cx, cy) in enumerate(centers):
+            bgr, c0, r0, cw, ch = read_yolo_chip_bgr(tci_path, cx, cy, half)
+            if bgr.size == 0 or cw < 8 or ch < 8:
+                continue
+            idx_map.append(i)
+            chips.append((bgr, c0, r0, cw, ch))
+        if not chips:
+            return out
+        mb = self._effective_minibatch_size()
+        for k in range(0, len(chips), mb):
+            chunk = chips[k : k + mb]
+            decoded = self._forward_bgr_minibatch(chunk, proposal_floor=None)
+            for j, r in enumerate(decoded):
+                out[idx_map[k + j]] = r
         return out
 
-    def _forward_bgr(
+    def _effective_minibatch_size(self) -> int:
+        want = max(1, min(32, int(self._af.chip_batch_size)))
+        if self._sess is None:
+            return want
+        try:
+            shp = self._sess.get_inputs()[0].shape
+            if shp and len(shp) > 0:
+                b0 = shp[0]
+                if isinstance(b0, int) and b0 > 0:
+                    return min(want, b0)
+        except Exception:
+            pass
+        return want
+
+    def _network_forward_numpy_batch(self, arr_bchw: np.ndarray) -> tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None
+    ]:
+        """Run AquaForge for batch ``arr_bchw`` float32 NCHW [0,1]. Returns numpy outputs."""
+        import torch
+
+        if self._sess is not None:
+            in_name = self._sess.get_inputs()[0].name
+            outs = self._sess.run(None, {in_name: arr_bchw})
+            cls_l, seg, kp, hdg, wake = outs[0], outs[1], outs[2], outs[3], outs[4]
+            kp_hm = np.asarray(outs[5], dtype=np.float32) if len(outs) > 5 else None
+            return cls_l, seg, kp, hdg, wake, kp_hm
+        if self._torch is None:
+            raise RuntimeError("no aquaforge runtime")
+        x = torch.from_numpy(arr_bchw.astype(np.float32))
+        if self._device is not None:
+            x = x.to(self._device)
+        self._torch.eval()
+        with torch.no_grad():
+            raw = self._torch(x)
+            cls_l, seg, kp, hdg, wake, kp_hm_t = (
+                raw[0],
+                raw[1],
+                raw[2],
+                raw[3],
+                raw[4],
+                raw[5],
+            )
+        return (
+            cls_l.cpu().numpy(),
+            seg.cpu().numpy(),
+            kp.cpu().numpy(),
+            hdg.cpu().numpy(),
+            wake.cpu().numpy(),
+            kp_hm_t.cpu().numpy(),
+        )
+
+    def _decode_batch_index(
         self,
-        bgr: np.ndarray,
+        cls_l: np.ndarray,
+        seg: np.ndarray,
+        kp: np.ndarray,
+        hdg: np.ndarray,
+        wake: np.ndarray,
+        kp_hm: np.ndarray | None,
+        bi: int,
         c0: int,
         r0: int,
         cw: int,
         ch: int,
+        *,
+        proposal_floor: float | None,
     ) -> AquaForgeSpotResult | None:
-        import cv2
-        import torch
-
+        """Decode one sample from batched raw outputs."""
         imgsz = int(self._af.imgsz)
-        img = cv2.resize(bgr, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
-        x = torch.from_numpy(img.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0)
-        if self._device is not None:
-            x = x.to(self._device)
+        cls_slice = np.asarray(cls_l[bi]).reshape(-1)
+        p_vessel = float(1.0 / (1.0 + math.exp(-float(cls_slice[0]))))
+        thr = float(self._af.conf_threshold)
 
-        kp_hm: np.ndarray | None = None
-        if self._sess is not None:
-            arr = x.cpu().numpy()
-            in_name = self._sess.get_inputs()[0].name
-            outs = self._sess.run(None, {in_name: arr})
-            # Export order: cls, seg, kp, hdg, wake, kp_hm (legacy ONNX may omit kp_hm).
-            cls_l, seg, kp, hdg, wake = outs[0], outs[1], outs[2], outs[3], outs[4]
-            if len(outs) > 5:
-                kp_hm = np.asarray(outs[5], dtype=np.float32)
-        elif self._torch is not None:
-            self._torch.eval()
-            with torch.no_grad():
-                raw = self._torch(x)
-                cls_l, seg, kp, hdg, wake, kp_hm_t = (
-                    raw[0],
-                    raw[1],
-                    raw[2],
-                    raw[3],
-                    raw[4],
-                    raw[5],
+        if proposal_floor is None:
+            if p_vessel < thr:
+                return AquaForgeSpotResult(
+                    confidence=p_vessel,
+                    polygon_fullres=None,
+                    chip_col_off=int(c0),
+                    chip_row_off=int(r0),
+                    chip_w=int(cw),
+                    chip_h=int(ch),
+                    landmarks_fullres=None,
+                    heading_direct_deg=None,
+                    heading_direct_conf=0.0,
+                    wake_dxdy=None,
                 )
-            cls_l = cls_l.cpu().numpy()
-            seg = seg.cpu().numpy()
-            kp = kp.cpu().numpy()
-            hdg = hdg.cpu().numpy()
-            wake = wake.cpu().numpy()
-            kp_hm = kp_hm_t.cpu().numpy()
         else:
-            return None
+            if p_vessel < float(proposal_floor):
+                return None
 
-        p_vessel = float(1.0 / (1.0 + math.exp(-float(cls_l.reshape(-1)[0]))))
-        if p_vessel < float(self._af.conf_threshold):
-            return AquaForgeSpotResult(
-                confidence=p_vessel,
-                polygon_fullres=None,
-                chip_col_off=int(c0),
-                chip_row_off=int(r0),
-                chip_w=int(cw),
-                chip_h=int(ch),
-                landmarks_fullres=None,
-                heading_direct_deg=None,
-                heading_direct_conf=0.0,
-                wake_dxdy=None,
-            )
-
-        seg_prob = 1.0 / (1.0 + np.exp(-seg[0, 0]))
+        seg_b = seg[bi : bi + 1]
+        seg_prob = 1.0 / (1.0 + np.exp(-seg_b[0, 0]))
         poly = _mask_to_polygon_fullres(seg_prob, imgsz, c0, r0, cw, ch)
 
         lm = None
         if kp_hm is not None:
+            hm_b = np.asarray(kp_hm[bi : bi + 1])
             lm = _landmarks_from_kp_hm_logits(
-                kp_hm, c0=int(c0), r0=int(r0), cw=int(cw), ch=int(ch)
+                hm_b, c0=int(c0), r0=int(r0), cw=int(cw), ch=int(ch)
             )
         if lm is None:
-            kp_r = kp.reshape(1, NUM_LANDMARKS, 3)[0]
+            kp_r = np.asarray(kp[bi])
+            if kp_r.ndim != 2:
+                kp_r = kp_r.reshape(NUM_LANDMARKS, 3)
+            elif kp_r.shape[0] < NUM_LANDMARKS:
+                return None
+            kp_r = kp_r[:NUM_LANDMARKS]
             xy = 1.0 / (1.0 + np.exp(-kp_r[:, :2]))
             vis_l = kp_r[:, 2]
             vis_p = 1.0 / (1.0 + np.exp(-vis_l))
             lm = _landmarks_full_from_normalized(xy, vis_p, c0, r0, cw, ch)
 
-        hs = float(hdg[0, 0])
-        hc = float(hdg[0, 1])
-        hconf = float(1.0 / (1.0 + math.exp(-float(hdg[0, 2]))))
+        hdg_b = hdg[bi]
+        hs = float(hdg_b[0])
+        hc = float(hdg_b[1])
+        hconf = float(1.0 / (1.0 + math.exp(-float(hdg_b[2]))))
         nrm = max(1e-6, math.hypot(hs, hc))
         sn, cs = hs / nrm, hc / nrm
         h_deg = (math.degrees(math.atan2(sn, cs)) + 360.0) % 360.0
 
-        w = wake.reshape(-1)
+        w = np.asarray(wake[bi]).reshape(-1)
         wx, wy = float(w[0]), float(w[1]) if len(w) > 1 else 0.0
         wn = max(1e-6, math.hypot(wx, wy))
 
@@ -272,6 +477,123 @@ class AquaForgePredictor:
             heading_direct_conf=hconf,
             wake_dxdy=(wx / wn, wy / wn),
         )
+
+    def _forward_bgr_minibatch(
+        self,
+        chips: list[tuple[np.ndarray, int, int, int, int]],
+        *,
+        proposal_floor: float | None,
+    ) -> list[AquaForgeSpotResult | None]:
+        import cv2
+
+        if not chips or (self._sess is None and self._torch is None):
+            return [None] * len(chips)
+        imgsz = int(self._af.imgsz)
+        batch = len(chips)
+        arrs = np.zeros((batch, 3, imgsz, imgsz), dtype=np.float32)
+        meta = list(chips)
+        for i, (bgr, _c0, _r0, _cw, _ch) in enumerate(meta):
+            img = cv2.resize(bgr, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
+            arrs[i] = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)
+        cls_l, seg, kp, hdg, wake, kp_hm = self._network_forward_numpy_batch(arrs)
+        out: list[AquaForgeSpotResult | None] = []
+        for i in range(batch):
+            bgr, c0, r0, cw, ch = meta[i]
+            out.append(
+                self._decode_batch_index(
+                    cls_l,
+                    seg,
+                    kp,
+                    hdg,
+                    wake,
+                    kp_hm,
+                    i,
+                    c0,
+                    r0,
+                    cw,
+                    ch,
+                    proposal_floor=proposal_floor,
+                )
+            )
+        return out
+
+    def _forward_bgr(
+        self,
+        bgr: np.ndarray,
+        c0: int,
+        r0: int,
+        cw: int,
+        ch: int,
+    ) -> AquaForgeSpotResult | None:
+        res = self._forward_bgr_minibatch(
+            [(bgr, c0, r0, cw, ch)], proposal_floor=None
+        )
+        return res[0] if res else None
+
+    def run_tiled_scene_candidates(
+        self,
+        tci_path: str | Path,
+    ) -> list[tuple[float, float, float]]:
+        """
+        Full-raster sliding-window AquaForge (overlap + NMS). Returns ``(cx, cy, confidence)``
+        sorted by confidence descending — **vessel centers** from hull centroids (chip center fallback).
+
+        Uses :attr:`self._settings` tiling fields (overlap, NMS IoU, proposal floor, max dets).
+        """
+        from aquaforge.raster_rgb import raster_dimensions
+
+        if self._sess is None and self._torch is None:
+            return []
+
+        path = Path(tci_path)
+        W, H = raster_dimensions(path)
+        half = int(self._af.chip_half)
+        tile = max(16, 2 * half)
+        ov = float(self._af.tiled_overlap_fraction)
+        ov = min(0.95, max(0.0, ov))
+        stride = max(8, int(round(tile * (1.0 - ov))))
+        proposal_min = float(self._af.tiled_min_proposal_confidence)
+        nms_iou = float(self._af.tiled_nms_iou)
+        cap = int(self._af.tiled_max_detections)
+        conf_final = float(self._af.conf_threshold)
+
+        row_starts = _tile_axis_starts(H, tile, stride)
+        col_starts = _tile_axis_starts(W, tile, stride)
+        chips: list[tuple[np.ndarray, int, int, int, int]] = []
+        for r0 in row_starts:
+            for c0 in col_starts:
+                chip = _read_padded_chip_bgr(path, c0, r0, tile, tile, W, H)
+                if chip is not None:
+                    chips.append(chip)
+
+        mb = self._effective_minibatch_size()
+        raw_dets: list[AquaForgeSpotResult] = []
+        for k in range(0, len(chips), mb):
+            chunk = chips[k : k + mb]
+            part = self._forward_bgr_minibatch(chunk, proposal_floor=proposal_min)
+            for det in part:
+                if det is None:
+                    continue
+                if det.polygon_fullres is None or len(det.polygon_fullres) < 3:
+                    continue
+                raw_dets.append(det)
+
+        merged = nms_aquaforge_spot_results(raw_dets, iou_threshold=nms_iou)
+        merged.sort(key=lambda d: -d.confidence)
+        merged = merged[:cap]
+
+        triples: list[tuple[float, float, float]] = []
+        for d in merged:
+            if d.confidence < conf_final:
+                continue
+            poly = d.polygon_fullres
+            if poly and len(poly) >= 3:
+                cx, cy = _polygon_centroid_xy(poly)
+            else:
+                cx = float(d.chip_col_off) + float(d.chip_w) * 0.5
+                cy = float(d.chip_row_off) + float(d.chip_h) * 0.5
+            triples.append((cx, cy, float(d.confidence)))
+        return triples
 
 
 def resolve_aquaforge_checkpoint_path(project_root: Path, af: AquaForgeSection) -> Path | None:

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from aquaforge.detection_backend import (
+    aquaforge_tiled_scene_triples,
     hybrid_vessel_proba_at,
     run_sota_spot_inference,
 )
@@ -484,6 +485,66 @@ def _append_heading_errors(
     ef = angular_error_deg(float(h_f) if h_f is not None else None, gt)
     if ef is not None:
         bucket.fused.append(ef)
+
+
+def run_tiled_recall_vs_ranking_labels(
+    project_root: Path,
+    jsonl_path: Path,
+    settings: DetectionSettings,
+    *,
+    match_radius_px: float = 96.0,
+) -> dict[str, Any]:
+    """
+    Benchmark **full-scene tiled** AquaForge against human ranking labels (vessel = 1).
+
+    One tiled pass per unique TCI; a vessel label counts as a hit if any detection centroid lies
+    within ``match_radius_px`` (full-image pixels). This is a recall-oriented proxy, not full
+    precision–recall (negatives are not scored per detection).
+    """
+    from collections import defaultdict
+
+    from aquaforge.ranking_label_agreement import collect_ranking_labeled_rows
+
+    rows, n_skip = collect_ranking_labeled_rows(jsonl_path, project_root)
+    by_tci: dict[Path, list[tuple[float, float, int]]] = defaultdict(list)
+    for r in rows:
+        by_tci[r.tci_path].append((r.cx, r.cy, int(r.y)))
+
+    R = float(match_radius_px)
+    vessel_pts = 0
+    matched = 0
+    scenes = 0
+    errors: list[str] = []
+    for tci, pts in by_tci.items():
+        if not tci.is_file():
+            errors.append(f"missing_tci:{tci}")
+            continue
+        scenes += 1
+        raw, meta = aquaforge_tiled_scene_triples(project_root, tci, settings)
+        err = meta.get("error")
+        if err:
+            errors.append(f"{tci.name}:{err}")
+        det_xy = [(float(a), float(b)) for a, b, _c in raw]
+        for cx, cy, y in pts:
+            if y != 1:
+                continue
+            vessel_pts += 1
+            if not det_xy:
+                continue
+            dmin = min(math.hypot(cx - dx, cy - dy) for dx, dy in det_xy)
+            if dmin <= R:
+                matched += 1
+    return {
+        "jsonl": str(jsonl_path),
+        "ranking_rows_used": len(rows),
+        "ranking_rows_skipped": n_skip,
+        "unique_scenes": scenes,
+        "match_radius_px": R,
+        "n_vessel_positive_labels": vessel_pts,
+        "n_matched_within_radius": matched,
+        "recall_proxy": (float(matched) / float(vessel_pts)) if vessel_pts else None,
+        "notes": errors[:20],
+    }
 
 
 def run_detection_evaluation(
@@ -1023,6 +1084,17 @@ def main_cli(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run cProfile: file-level tottime %% roll-up + top functions by cumulative time",
     )
+    ap.add_argument(
+        "--tiled-recall",
+        action="store_true",
+        help="Full-scene tiled AquaForge vs ranking labels (recall proxy within --tiled-recall-radius px)",
+    )
+    ap.add_argument(
+        "--tiled-recall-radius",
+        type=float,
+        default=96.0,
+        help="Pixel radius in full raster for matching a vessel label to a tiled detection centroid",
+    )
     args = ap.parse_args(argv)
 
     root = args.project_root.resolve()
@@ -1042,6 +1114,24 @@ def main_cli(argv: list[str] | None = None) -> int:
     else:
         jp = args.jsonl or (root / "data" / "labels" / "ship_reviews.jsonl")
         jsonl_paths = [Path(jp).resolve()]
+
+    if args.tiled_recall:
+        out_payload: list[dict[str, Any]] = []
+        for jp in jsonl_paths:
+            if not jp.is_file():
+                print(f"Skip missing: {jp}", flush=True)
+                continue
+            print(f"Tiled recall: {jp} ...", flush=True)
+            out_payload.append(
+                run_tiled_recall_vs_ranking_labels(
+                    root,
+                    jp,
+                    settings_sota,
+                    match_radius_px=float(args.tiled_recall_radius),
+                )
+            )
+        print(json.dumps(out_payload, indent=2, ensure_ascii=False), flush=True)
+        return 0
 
     spot_cap: int | None
     if args.demo:
@@ -1084,7 +1174,7 @@ def main_cli(argv: list[str] | None = None) -> int:
                 tr.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
             jd = eval_result_to_jsonable(res)
             jd["jsonl"] = str(jp)
-            jd["settings_backend"] = "aquaforge"
+            jd["settings_backend"] = str(settings_sota.backend)
             jp_out.append(jd)
         return tr, jp_out
 

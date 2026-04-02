@@ -86,6 +86,7 @@ from aquaforge.review_schema import (
     model_run_fingerprint,
 )
 from aquaforge.detection_backend import (
+    aquaforge_tiled_scene_triples,
     rank_candidates_from_config,
     run_sota_spot_inference,
 )
@@ -94,6 +95,7 @@ from aquaforge.detection_config import (
     example_detection_yaml_path,
     load_detection_settings,
     sota_inference_requested,
+    use_legacy_candidate_pipeline,
 )
 from aquaforge.model_manager import (
     clear_aquaforge_predictor_cache,
@@ -1579,7 +1581,8 @@ def main() -> None:
     scl_found = find_scl_for_tci(tci_path_sel)
     ready_dl, _ = cdse_download_ready()
 
-    if scl_found is None:
+    _det_for_scl = load_detection_settings(ROOT)
+    if scl_found is None and use_legacy_candidate_pipeline(_det_for_scl):
         st.warning(
             "This scene needs a **land/water mask** file next to the image (name contains **SCL**). "
             "Without it we cannot limit spots to open water."
@@ -1597,6 +1600,11 @@ def main() -> None:
                         st.error(str(e))
         else:
             st.caption("Sign in via **.env** (see **.env.example**) or copy the mask JP2 next to your image.")
+    elif scl_found is None:
+        st.caption(
+            "**SCL** mask is optional for **AquaForge tiled** detection (full scene). "
+            "It is still required if you switch to legacy hybrid / ensemble in `detection.yaml`."
+        )
 
     tci_path = Path(choice)
     ds_factor = int(st.session_state.get("webui_ds_factor", 4))
@@ -1616,37 +1624,62 @@ def main() -> None:
             st.session_state.last_scene_key = scene_key
         else:
             try:
-                with st.spinner(
-                    "Scanning this scene: reading the JP2 and mask, finding bright spots on open water, "
-                    "filtering saved labels, running sort models… Large images can take 30s–a few minutes — "
-                    "the app is still working."
-                ):
-                    pool = _detector_fetch_pool_size(max_k)
-                    raw, meta = ship_candidates_fullres(
-                        tci_path,
-                        ds_factor=ds_factor,
-                        scl_path=scl_opt,
-                        max_candidates=pool,
-                        require_scl=True,
-                        min_water_fraction=MIN_OPEN_WATER_FRACTION,
-                    )
-                    cands = filter_unlabeled_candidates(
-                        raw,
-                        labels_path,
-                        str(tci_path.resolve()),
-                        tolerance_px=2.0,
-                        project_root=ROOT,
-                    )
-                    if st.session_state.get("webui_static_sea_suppress", True):
-                        cands = filter_candidates_by_static_sea_witness(
-                            cands,
+                det_cfg = load_detection_settings(ROOT)
+                pool = _detector_fetch_pool_size(max_k)
+                if use_legacy_candidate_pipeline(det_cfg):
+                    with st.spinner(
+                        "Scanning this scene (legacy): JP2 + water mask, bright-spot candidates, "
+                        "filtering saved labels… Large images can take 30s–a few minutes."
+                    ):
+                        raw, meta = ship_candidates_fullres(
                             tci_path,
-                            default_static_sea_witness_path(ROOT),
-                            project_root=ROOT,
-                            min_cell_hits=int(
-                                st.session_state.get("webui_static_sea_min", 3)
-                            ),
+                            ds_factor=ds_factor,
+                            scl_path=scl_opt,
+                            max_candidates=pool,
+                            require_scl=True,
+                            min_water_fraction=MIN_OPEN_WATER_FRACTION,
                         )
+                else:
+                    with st.spinner(
+                        "AquaForge full-scene tiled detection: overlapping windows, NMS merge, "
+                        "confidence filter. Large JP2s can take several minutes — the app is still working."
+                    ):
+                        raw, meta = aquaforge_tiled_scene_triples(
+                            ROOT, tci_path, det_cfg
+                        )
+                        if meta.get("error") == "aquaforge_weights_missing":
+                            try:
+                                _af_rel = expected_aquaforge_checkpoint_path(
+                                    ROOT
+                                ).relative_to(ROOT)
+                            except ValueError:
+                                _af_rel = expected_aquaforge_checkpoint_path(ROOT)
+                            st.error(
+                                "Full-scene detection needs a trained AquaForge checkpoint. "
+                                f"Expected e.g. `{_af_rel}` — save reviews then **Advanced → Train first AquaForge model**, "
+                                "or set `aquaforge.weights_path` in `detection.yaml`."
+                            )
+                            raw = []
+                        elif raw:
+                            raw = raw[:pool]
+                cands = filter_unlabeled_candidates(
+                    raw,
+                    labels_path,
+                    str(tci_path.resolve()),
+                    tolerance_px=2.0,
+                    project_root=ROOT,
+                )
+                if st.session_state.get("webui_static_sea_suppress", True):
+                    cands = filter_candidates_by_static_sea_witness(
+                        cands,
+                        tci_path,
+                        default_static_sea_witness_path(ROOT),
+                        project_root=ROOT,
+                        min_cell_hits=int(
+                            st.session_state.get("webui_static_sea_min", 3)
+                        ),
+                    )
+                if use_legacy_candidate_pipeline(det_cfg):
                     mp = default_model_path(ROOT)
                     mt_mod = mp.stat().st_mtime if mp.is_file() else 0.0
                     clf = (
@@ -1661,7 +1694,6 @@ def main() -> None:
                         if mlp_mod
                         else None
                     )
-                    det_cfg = load_detection_settings(ROOT)
                     if cands:
                         try:
                             cands = rank_candidates_from_config(
@@ -1685,22 +1717,34 @@ def main() -> None:
                                         )
                                     except Exception:
                                         pass
-                    st.session_state.detector_ranked_unlabeled_pool = list(cands)
-                    cands = cands[:max_k]
-                    st.session_state.detector_candidates = cands
-                    st.session_state.meta = meta
-                    st.session_state.idx = 0
-                    st.session_state.tci_loaded = str(tci_path.resolve())
-                    st.session_state.last_scene_key = scene_key
-                    if not cands:
-                        if raw:
-                            st.warning(
-                                "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another scene."
-                            )
+                st.session_state.detector_ranked_unlabeled_pool = list(cands)
+                cands = cands[:max_k]
+                st.session_state.detector_candidates = cands
+                st.session_state.meta = meta
+                st.session_state.idx = 0
+                st.session_state.tci_loaded = str(tci_path.resolve())
+                st.session_state.last_scene_key = scene_key
+                if not cands:
+                    if raw:
+                        st.warning(
+                            "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another scene."
+                        )
+                    elif isinstance(meta, dict) and meta.get(
+                        "candidate_source"
+                    ) == "aquaforge_tiled":
+                        _em = str(meta.get("error") or "").strip()
+                        if _em and _em != "aquaforge_weights_missing":
+                            st.warning(f"AquaForge tiled detection: {_em}")
                         else:
                             st.warning(
-                                "No bright spots on open water. Try another image or relax detector settings."
+                                "No vessels detected above the current confidence threshold, or the scene is empty. "
+                                "Try lowering `aquaforge.conf_threshold` / `tiled_min_proposal_confidence` in `detection.yaml`, "
+                                "or verify weights."
                             )
+                    else:
+                        st.warning(
+                            "No bright spots on open water. Try another image or relax detector settings."
+                        )
             except AutoWakeError as e:
                 st.error(str(e))
                 st.session_state.last_scene_key = scene_key
