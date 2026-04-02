@@ -23,6 +23,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from aquaforge.unified.constants import NUM_LANDMARKS
+from aquaforge.unified._pt_graph_loader import (
+    backbone_inner_to_feature_list,
+    iter_pretrained_early_conv_params,
+    load_backbone_body_from_pt,
+)
 
 ARCH_CNN = "cnn"
 ARCH_AQUAFORGE_BACKBONE = "aquaforge_backbone"
@@ -38,48 +43,6 @@ def canonical_model_arch(name: str) -> str:
     raise ValueError(
         f"Unknown model_arch {name!r}; use {ARCH_CNN!r} or {ARCH_AQUAFORGE_BACKBONE!r} in checkpoint meta."
     )
-
-
-# ``module.type`` strings where we stop and take features (upstream detect/segment heads, etc.).
-_PRETRAINED_GRAPH_HEAD_STOP_TYPES: frozenset[str] = frozenset(
-    {
-        "Detect",
-        "Segment",
-        "Pose",
-        "OBB",
-        "YOLOEDetect",
-        "v10Detect",
-        "RTDETRDecoder",
-    }
-)
-
-
-def _backbone_body_inner_to_feature_list(
-    inner: Any,
-    x: torch.Tensor,
-) -> list[torch.Tensor]:
-    """
-    Run the embedded pretrained graph (``inner.model``) up to — but not including — task heads.
-
-    Returns feature tensors that would feed detection heads (typically 3 scales).
-    """
-    layer_cache: list[Any] = []
-    save = getattr(inner, "save", [])
-    for m in inner.model:
-        if m.f != -1:
-            x = (
-                layer_cache[m.f]
-                if isinstance(m.f, int)
-                else [x if j == -1 else layer_cache[j] for j in m.f]
-            )
-        mt = getattr(m, "type", "") or type(m).__name__
-        if mt in _PRETRAINED_GRAPH_HEAD_STOP_TYPES:
-            if isinstance(m.f, int):
-                return [layer_cache[m.f]]
-            return [layer_cache[j] for j in m.f]
-        x = m(x)
-        layer_cache.append(x if m.i in save else None)
-    return [x]
 
 
 def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]:
@@ -229,12 +192,6 @@ class AquaForgeBackbone(nn.Module):
         hidden: int = 256,
     ) -> None:
         super().__init__()
-        try:
-            from ultralytics import YOLO
-        except ImportError as e:
-            raise ImportError(
-                "AquaForgeBackbone requires requirements-ml.txt (pretrained graph loader)."
-            ) from e
 
         self.model_arch = ARCH_AQUAFORGE_BACKBONE
         self.imgsz = int(imgsz)
@@ -242,14 +199,13 @@ class AquaForgeBackbone(nn.Module):
         self.hidden = int(hidden)
         self.backbone_init_path = str(backbone_pt)
 
-        _wrapped = YOLO(str(backbone_pt))
-        self.backbone_body = _wrapped.model
+        self.backbone_body = load_backbone_body_from_pt(backbone_pt)
         self.backbone_body.eval()
 
         with torch.no_grad():
             dummy = torch.zeros(1, 3, self.imgsz, self.imgsz)
             feats = _take_last_three_scales(
-                _backbone_body_inner_to_feature_list(self.backbone_body, dummy)
+                backbone_inner_to_feature_list(self.backbone_body, dummy)
             )
             dims = [int(f.shape[1]) for f in feats]
 
@@ -276,7 +232,7 @@ class AquaForgeBackbone(nn.Module):
         self.wake_head = nn.Linear(self.hidden, 2)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        feats = _take_last_three_scales(_backbone_body_inner_to_feature_list(self.backbone_body, x))
+        feats = _take_last_three_scales(backbone_inner_to_feature_list(self.backbone_body, x))
         p3, p4, p5 = [self.neck_proj[i](feats[i]) for i in range(3)]
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
@@ -361,16 +317,10 @@ def seed_cnn_encoder_from_backbone_pt(model: AquaForgeMultiTask, backbone_pt: An
 
     For full ``aquaforge_backbone`` training use :class:`AquaForgeBackbone` instead.
     """
-    try:
-        from ultralytics import YOLO
-    except ImportError:
-        return 0
-    _ld = YOLO(str(backbone_pt))
-    src_seq = getattr(getattr(_ld, "model", None), "model", None)
-    if src_seq is None:
-        return 0
     dst_params = list(model.encoder.seq.parameters())
-    src_params = [p for p in src_seq.parameters() if p.dim() > 0]
+    src_params = list(iter_pretrained_early_conv_params(backbone_pt))
+    if not src_params:
+        return 0
     n = 0
     for a, b in zip(dst_params, src_params):
         if a.shape == b.shape:
