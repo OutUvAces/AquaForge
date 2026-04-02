@@ -1,6 +1,6 @@
 # AquaForge
 
-**Sentinel-2 vessel detection** with a **human-in-the-loop** Streamlit review UI. The app runs **AquaForge end-to-end** on each scene: **tiled sliding-window inference** with overlap, **NMS** on proposals, then masks, keypoints, heading, and measurements from the unified model. There is **no** separate bright-spot candidate finder, ocean-mask pre-filter, YOLO marine backend, chip MLP ranking, ensemble, or `force_legacy` path.
+**Sentinel-2 vessel detection** with a **human-in-the-loop** Streamlit review UI. **AquaForge is the only detector:** each scene is processed with **tiled sliding-window inference** (overlap, batched forward, NMS) to build the review queue; per-spot views run **full model decode** (mask, landmarks, heading, wake hint) with **no** probability gating, hybrid ranking, or alternate candidate pipelines. There is no bright-spot finder, ocean-mask pre-filter, legacy YOLO marine stack, or `force_legacy` path.
 
 - **Weights:** `data/models/aquaforge/aquaforge.pt` (and optional ONNX via YAML).
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.

@@ -358,7 +358,6 @@ def rank_score_at_point(
     pred_af = get_cached_aquaforge_predictor(project_root, settings)
     py = float(aquaforge_confidence_only(pred_af, tci_path, cx, cy))
     return {
-        "vessel_gate_proba": None,
         "yolo_confidence": py,
         "rank_score": py,
     }

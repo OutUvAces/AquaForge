@@ -11,7 +11,6 @@ from aquaforge.detection_config import (
     DetectionSettings,
     load_detection_settings,
     merged_onnx_providers,
-    spot_overlays_enabled,
 )
 
 
@@ -22,7 +21,6 @@ class TestDetectionConfig(unittest.TestCase):
             s = load_detection_settings(root)
             self.assertEqual(s.aquaforge.chip_batch_size, 6)
             self.assertEqual(s.onnx_runtime.graph_optimization_level, "all")
-            self.assertTrue(spot_overlays_enabled(s))
 
     def test_yaml_ignores_legacy_top_level_reads_aquaforge(self) -> None:
         """Historical ``backend`` / ``yolo`` keys are ignored; ``aquaforge`` still parses."""
@@ -40,18 +38,20 @@ class TestDetectionConfig(unittest.TestCase):
             s = load_detection_settings(root)
             self.assertEqual(s.aquaforge.chip_half, 288)
             self.assertAlmostEqual(s.aquaforge.conf_threshold, 0.22)
-            self.assertTrue(spot_overlays_enabled(s))
 
-    def test_min_vessel_gate_yaml_alias(self) -> None:
+    def test_yaml_ignores_removed_gate_keys(self) -> None:
+        """Legacy probability-gate YAML keys are not loaded into settings."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cfg = root / "data" / "config"
             cfg.mkdir(parents=True)
             (cfg / "detection.yaml").write_text(
-                "sota_min_hybrid_proba_for_expensive: 0.33\n", encoding="utf-8"
+                "min_vessel_proba_for_full_decode: 0.33\n"
+                "sota_min_hybrid_proba_for_expensive: 0.44\n",
+                encoding="utf-8",
             )
             s = load_detection_settings(root)
-            self.assertAlmostEqual(float(s.min_vessel_proba_for_full_decode or 0), 0.33)
+            self.assertFalse(hasattr(s, "min_vessel_proba_for_full_decode"))
 
     def test_ui_flags_from_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as td:

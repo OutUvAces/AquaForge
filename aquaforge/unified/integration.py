@@ -40,7 +40,6 @@ def run_aquaforge_spot_inference(
     *,
     spot_col_off: int,
     spot_row_off: int,
-    vessel_gate_proba: float | None = None,
 ) -> dict[str, Any]:
     # spot_col_off / spot_row_off kept for callers; crop geometry always uses the model chip
     # (ar.chip_col_off / ar.chip_row_off) so landmarks and mask align with inference.
@@ -83,12 +82,6 @@ def run_aquaforge_spot_inference(
     }
 
     warnings: list[str] = []
-    skip_expensive = False
-    hp_thr = settings.min_vessel_proba_for_full_decode
-    if hp_thr is not None and vessel_gate_proba is not None:
-        if float(vessel_gate_proba) < float(hp_thr):
-            skip_expensive = True
-            warnings.append("skipped_aquaforge_low_vessel_proba")
 
     pred = get_cached_aquaforge_predictor(project_root, settings)
     if pred is None:
@@ -111,32 +104,27 @@ def run_aquaforge_spot_inference(
     ir0 = int(ar.chip_row_off)
     _ = spot_col_off, spot_row_off
 
-    if not skip_expensive:
-        poly_crop = polygon_fullres_to_crop(ar.polygon_fullres, ic0, ir0)
-        if poly_crop:
-            out["yolo_polygon_crop"] = [[float(x), float(y)] for x, y in poly_crop]
-        if ar.polygon_fullres:
-            out["yolo_polygon_fullres"] = [
-                [float(x), float(y)] for x, y in ar.polygon_fullres
-            ]
-            dims = mask_oriented_dimensions_m(ar.polygon_fullres, tci_path)
-            if dims is not None:
-                lm, wm, ar_ = dims
-                out["yolo_length_m"] = float(lm)
-                out["yolo_width_m"] = float(wm)
-                out["yolo_aspect"] = float(ar_)
+    poly_crop = polygon_fullres_to_crop(ar.polygon_fullres, ic0, ir0)
+    if poly_crop:
+        out["yolo_polygon_crop"] = [[float(x), float(y)] for x, y in poly_crop]
+    if ar.polygon_fullres:
+        out["yolo_polygon_fullres"] = [
+            [float(x), float(y)] for x, y in ar.polygon_fullres
+        ]
+        dims = mask_oriented_dimensions_m(ar.polygon_fullres, tci_path)
+        if dims is not None:
+            lm, wm, ar_ = dims
+            out["yolo_length_m"] = float(lm)
+            out["yolo_width_m"] = float(wm)
+            out["yolo_aspect"] = float(ar_)
 
     kp = _kp_result_from_aquaforge(ar)
     out["keypoints_json"] = keypoints_to_jsonable(kp)
-    if (
-        not skip_expensive
-        and ar.landmarks_fullres
-        and len(ar.landmarks_fullres) > 0
-    ):
+    if ar.landmarks_fullres and len(ar.landmarks_fullres) > 0:
         out["landmarks_xy_fullres"] = [
             [float(x), float(y), float(c)] for x, y, c in ar.landmarks_fullres
         ]
-    if kp is not None and kp.xy_fullres and not skip_expensive:
+    if kp is not None and kp.xy_fullres:
         out["keypoints_xy_conf_crop"] = [
             [
                 float(x) - float(ic0),
@@ -151,7 +139,7 @@ def run_aquaforge_spot_inference(
 
     h_kp = None
     kp_trust = 0.0
-    if kp is not None and not skip_expensive:
+    if kp is not None:
         bow, stern = kp.bow_stern(0, 1)
         bow_c, stern_c = kp.bow_stern_confidences(0, 1)
         if bow_c is not None:
@@ -192,7 +180,7 @@ def run_aquaforge_spot_inference(
     out["heading_fused_deg"] = fused
     out["heading_fusion_source"] = src
 
-    if ar.wake_dxdy is not None and not skip_expensive:
+    if ar.wake_dxdy is not None:
         dx, dy = ar.wake_dxdy
         aux_deg = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
         out["aquaforge_wake_aux_deg"] = float(aux_deg)

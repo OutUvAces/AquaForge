@@ -50,7 +50,7 @@ def small_vessel_length_hint(extra: dict[str, Any] | None) -> float:
 
 def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
     """
-    0–1 score from **review-export** fields only (no forward pass): borderline hybrid score, clouds,
+    0–1 score from **review-export** fields only (no forward pass): borderline combined proba, clouds,
     hand-placed locator, weak heading trust, tiny length proxy — aligns training weight with what the
     operator already saw in the UI.
     """
@@ -167,7 +167,7 @@ def review_ui_active_learning_priority(
     review_category: str | None = None,
 ) -> float:
     """
-    Score ≥ 1.0 for oversampling: uncertain hybrid scores, small YOLO length proxies, weak keypoint
+    Score ≥ 1.0 for oversampling: uncertain fused scores, small saved length proxies, weak keypoint
     trust, obscuration — tuned for **Sentinel-2 small/medium vessels** and ambiguous coastlines.
 
     This is a heuristic **sampling** prior, not a loss; it does not appear in published MT schedules.
@@ -244,7 +244,6 @@ def teacher_sota_dict(
     *,
     spot_col_off: int,
     spot_row_off: int,
-    vessel_gate_proba: float | None = None,
 ) -> dict[str, Any]:
     """Run AquaForge spot inference (same stack as the review UI) for teacher heading targets."""
     from aquaforge.detection_config import load_detection_settings
@@ -259,7 +258,6 @@ def teacher_sota_dict(
         settings,
         spot_col_off=int(spot_col_off),
         spot_row_off=int(spot_row_off),
-        vessel_gate_proba=vessel_gate_proba,
     )
 
 
@@ -299,8 +297,6 @@ def hydrate_teacher_signals(
     samples: list[Any],
     budget: int,
     chip_half: int,
-    *,
-    vessel_gate_proba_by_id: dict[str, float] | None = None,
 ) -> int:
     """
     In-place: set ``teacher_heading_sc`` and ``teacher_valid`` on the first ``budget`` samples
@@ -310,7 +306,6 @@ def hydrate_teacher_signals(
     """
     if budget <= 0 or not samples:
         return 0
-    vessel_gate_proba_by_id = vessel_gate_proba_by_id or {}
     ranked = sorted(samples, key=lambda s: float(getattr(s, "al_priority", 1.0)), reverse=True)
     seen: set[str] = set()
     n_ok = 0
@@ -334,7 +329,6 @@ def hydrate_teacher_signals(
                 setattr(s, "teacher_heading_sc", None)
                 setattr(s, "teacher_valid", 0.0)
                 continue
-            hp = vessel_gate_proba_by_id.get(rid)
             sota = teacher_sota_dict(
                 project_root,
                 Path(getattr(s, "tci_path")),
@@ -342,7 +336,6 @@ def hydrate_teacher_signals(
                 float(getattr(s, "cy")),
                 spot_col_off=int(c0),
                 spot_row_off=int(r0),
-                vessel_gate_proba=hp,
             )
             th = teacher_heading_sin_cos(sota)
             if th is None:

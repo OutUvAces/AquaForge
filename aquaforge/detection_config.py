@@ -25,7 +25,6 @@ __all__ = [
     "example_detection_yaml_path",
     "load_detection_settings",
     "merged_onnx_providers",
-    "spot_overlays_enabled",
 ]
 
 
@@ -69,8 +68,6 @@ class AquaForgeSection:
 class DetectionSettings:
     aquaforge: AquaForgeSection = field(default_factory=AquaForgeSection)
     onnx_runtime: OnnxRuntimeSection = field(default_factory=OnnxRuntimeSection)
-    # Skip full mask/keypoint decode when AquaForge P(vessel) at the spot is below this (0–1).
-    min_vessel_proba_for_full_decode: float | None = None
     onnx_providers: list[str] | None = None
     ui_require_checkbox_for_sota: bool = False
     ui_lazy_sota_overlays: bool = False
@@ -198,18 +195,6 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
     if not isinstance(data, dict):
         return DetectionSettings()
 
-    sh = data.get("min_vessel_proba_for_full_decode")
-    if sh is None or sh == "":
-        sh = data.get("sota_min_hybrid_proba_for_expensive")
-    gate_proba: float | None
-    if sh is None or sh == "":
-        gate_proba = None
-    else:
-        try:
-            gate_proba = float(sh)
-        except (TypeError, ValueError):
-            gate_proba = None
-
     gop = data.get("onnx_providers")
     global_onnx_prov: list[str] | None = None
     if isinstance(gop, list) and all(isinstance(x, str) for x in gop):
@@ -224,13 +209,7 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
             if isinstance(data.get("onnx_runtime"), dict)
             else None
         ),
-        min_vessel_proba_for_full_decode=gate_proba,
         onnx_providers=global_onnx_prov,
         ui_require_checkbox_for_sota=bool(data.get("ui_require_checkbox_for_sota", False)),
         ui_lazy_sota_overlays=bool(data.get("ui_lazy_sota_overlays", False)),
     )
-
-
-def spot_overlays_enabled(_settings: DetectionSettings) -> bool:
-    """True when the review UI may draw AquaForge-derived spot overlays (single-detector app)."""
-    return True

@@ -91,7 +91,6 @@ from aquaforge.detection_config import (
     default_detection_yaml_path,
     example_detection_yaml_path,
     load_detection_settings,
-    spot_overlays_enabled,
 )
 from aquaforge.model_manager import (
     clear_aquaforge_predictor_cache,
@@ -1359,9 +1358,7 @@ def main() -> None:
             _render_retrain_aquaforge_section(ROOT, labels_path)
             _render_train_first_aquaforge_section(ROOT, labels_path)
             st.markdown("---")
-            if spot_overlays_enabled(_det_adv) and getattr(
-                _det_adv, "ui_require_checkbox_for_sota", False
-            ):
+            if getattr(_det_adv, "ui_require_checkbox_for_sota", False):
                 st.checkbox(
                     "Allow full AquaForge inference on spots (uses more CPU/GPU)",
                     key="vd_advanced_spot_hints",
@@ -1492,7 +1489,7 @@ def main() -> None:
                             "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another scene."
                         )
                     elif isinstance(meta, dict) and meta.get(
-                        "candidate_source"
+                        "detection_source"
                     ) == "aquaforge_tiled":
                         _em = str(meta.get("error") or "").strip()
                         if _em and _em != "aquaforge_weights_missing":
@@ -2047,37 +2044,34 @@ def _render_review_deck(
     with _hl:
         st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
     with _hr:
-        if spot_overlays_enabled(det_settings):
-            # Default overlays: outline, heading, landmarks, wake (all on).
-            for _xk, _dv in (
-                ("vd_ov_hull", True),
-                ("vd_ov_mark", True),
-                ("vd_ov_dir", True),
-                ("vd_ov_wake", True),
-            ):
-                if _xk not in st.session_state:
-                    st.session_state[_xk] = _dv
-            st.markdown('<div class="vd-overlay-exp">', unsafe_allow_html=True)
-            with st.expander("On image", expanded=False):
-                st.toggle("Outline", key="vd_ov_hull")
-                st.toggle("Direction", key="vd_ov_dir")
-                st.toggle("Keypoints", key="vd_ov_mark")
-                st.toggle("Wake", key="vd_ov_wake")
-                st.caption(
-                    "**Outline** = cyan hull/mask edge. **Direction** = **yellow arrow** — estimated "
-                    "heading (bow direction vs. north), not the mask."
-                )
-            st.markdown("</div>", unsafe_allow_html=True)
+        # Default overlays: outline, heading, landmarks, wake (all on).
+        for _xk, _dv in (
+            ("vd_ov_hull", True),
+            ("vd_ov_mark", True),
+            ("vd_ov_dir", True),
+            ("vd_ov_wake", True),
+        ):
+            if _xk not in st.session_state:
+                st.session_state[_xk] = _dv
+        st.markdown('<div class="vd-overlay-exp">', unsafe_allow_html=True)
+        with st.expander("On image", expanded=False):
+            st.toggle("Outline", key="vd_ov_hull")
+            st.toggle("Direction", key="vd_ov_dir")
+            st.toggle("Keypoints", key="vd_ov_mark")
+            st.toggle("Wake", key="vd_ov_wake")
+            st.caption(
+                "**Outline** = cyan hull/mask edge. **Direction** = **yellow arrow** — estimated "
+                "heading (bow direction vs. north), not the mask."
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # Optional consent: global toggle lives under sidebar **Advanced** when YAML requires it.
     _sota_allow = True
-    if spot_overlays_enabled(det_settings) and det_settings.ui_require_checkbox_for_sota:
+    if det_settings.ui_require_checkbox_for_sota:
         _sota_allow = bool(st.session_state.get("vd_advanced_spot_hints", False))
 
     # Performance: background warm — AquaForge off the main thread when inference may run soon.
-    _need_warm = spot_overlays_enabled(det_settings) and (
-        not det_settings.ui_require_checkbox_for_sota or _sota_allow
-    )
+    _need_warm = not det_settings.ui_require_checkbox_for_sota or _sota_allow
     if _need_warm:
         _af_ck = resolve_aquaforge_checkpoint_path(ROOT, det_settings.aquaforge)
         _af_onx = resolve_aquaforge_onnx_path(ROOT, det_settings.aquaforge)
@@ -2107,11 +2101,7 @@ def _render_review_deck(
     _scl_sota = Path(str(_mscl)) if _mscl else None
     if _scl_sota is not None and not _scl_sota.is_file():
         _scl_sota = None
-    _hyb_sig: tuple[float | None, ...] = ()
-    if det_settings.min_vessel_proba_for_full_decode is not None:
-        _hyb_sig = (round(af_gate_prob, 6),)
-    # Include idx + fine coords so SOTA cache never reuses another spot’s inference when
-    # windows round the same (arrow/mask would look “stuck” across Next).
+    # Cache key: idx + fine coords so overlay inference never reuses another spot when windows round the same.
     sota_sig = (
         _detection_yaml_mtime(ROOT),
         mt,
@@ -2119,34 +2109,30 @@ def _render_review_deck(
         round(cx, 7),
         round(cy, 7),
         "aquaforge",
-        "sota_ov6",
+        "spot_ov7",
         int(sc0),
         int(sr0),
         int(scw),
         int(sch),
-    ) + _hyb_sig + (
-        (_sota_allow,) if det_settings.ui_require_checkbox_for_sota else ()
-    )
+    ) + ((_sota_allow,) if det_settings.ui_require_checkbox_for_sota else ())
     sota_k = f"vd_sota_{spot_k}"
     sota: dict = {}
-    if spot_overlays_enabled(det_settings):
-        if det_settings.ui_require_checkbox_for_sota and not _sota_allow:
-            st.session_state[sota_k] = {}
-            st.session_state[sota_k + "_sig"] = sota_sig
-        elif st.session_state.get(sota_k + "_sig") != sota_sig:
-            st.session_state[sota_k] = run_spot_inference(
-                ROOT,
-                tci_p,
-                cx,
-                cy,
-                det_settings,
-                spot_col_off=int(sc0),
-                spot_row_off=int(sr0),
-                scl_path=_scl_sota,
-                vessel_gate_proba=af_gate_prob,
-            )
-            st.session_state[sota_k + "_sig"] = sota_sig
-        sota = st.session_state.get(sota_k, {}) or {}
+    if det_settings.ui_require_checkbox_for_sota and not _sota_allow:
+        st.session_state[sota_k] = {}
+        st.session_state[sota_k + "_sig"] = sota_sig
+    elif st.session_state.get(sota_k + "_sig") != sota_sig:
+        st.session_state[sota_k] = run_spot_inference(
+            ROOT,
+            tci_p,
+            cx,
+            cy,
+            det_settings,
+            spot_col_off=int(sc0),
+            spot_row_off=int(sr0),
+            scl_path=_scl_sota,
+        )
+        st.session_state[sota_k + "_sig"] = sota_sig
+    sota = st.session_state.get(sota_k, {}) or {}
 
     pool = st.session_state.get("detector_ranked_unlabeled_pool") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
@@ -2278,9 +2264,7 @@ def _render_review_deck(
         meters_per_pixel=gavg,
         draw_footprint_outline=False,
     )
-    if spot_overlays_enabled(det_settings) and sota and (
-        _show_hull or _show_mark or _show_wake
-    ):
+    if sota and (_show_hull or _show_mark or _show_wake):
         _sc0i = int(sc0)
         _sr0i = int(sr0)
         _poly = None
@@ -2398,12 +2382,7 @@ def _render_review_deck(
     else:
         extent_sq2 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
-    if (
-        _show_dir
-        and spot_overlays_enabled(det_settings)
-        and isinstance(sota, dict)
-        and sota
-    ):
+    if _show_dir and isinstance(sota, dict) and sota:
         _arrow_h: float | None = None
         for _hk in (
             "heading_fused_deg",
@@ -2529,7 +2508,7 @@ def _render_review_deck(
             use_column_width=False,
             cursor="crosshair",
         )
-        if spot_overlays_enabled(det_settings) and sota:
+        if sota:
             _render_spot_measurements_panel(
                 sota=dict(sota) if isinstance(sota, dict) else {},
                 det_settings=det_settings,

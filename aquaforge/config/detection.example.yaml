@@ -24,9 +24,6 @@
 #   execution_mode: parallel
 #   graph_optimization_level: all
 
-# Skip full mask/keypoint decode when AquaForge P(vessel) at the spot is below this (0–1).
-# min_vessel_proba_for_full_decode: 0.2
-# (Alias still accepted: sota_min_hybrid_proba_for_expensive.)
 # onnx_providers: ["CUDAExecutionProvider", "CPUExecutionProvider"]
 # ui_require_checkbox_for_sota: false
 # ui_lazy_sota_overlays: false

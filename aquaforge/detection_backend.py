@@ -27,7 +27,8 @@ def aquaforge_tiled_scene_triples(
     from aquaforge.raster_rgb import raster_dimensions
 
     meta: dict[str, Any] = {
-        "candidate_source": "aquaforge_tiled",
+        # End-to-end tiled AquaForge produces the review-queue detections (not a separate candidate stage).
+        "detection_source": "aquaforge_tiled",
         "downsample_factor": 1,
         "mask": "full_scene_tiled",
         "scl_path": None,
@@ -61,9 +62,8 @@ def run_spot_inference(
     spot_col_off: int,
     spot_row_off: int,
     scl_path: Path | None = None,
-    vessel_gate_proba: float | None = None,
 ) -> dict[str, Any]:
-    """AquaForge-only spot diagnostics for the review UI (mask, heading, landmarks, wake hint)."""
+    """Full AquaForge chip decode for the review UI (no probability gating or alternate paths)."""
     from aquaforge.unified.integration import run_aquaforge_spot_inference
 
     _ = scl_path
@@ -75,5 +75,4 @@ def run_spot_inference(
         settings,
         spot_col_off=int(spot_col_off),
         spot_row_off=int(spot_row_off),
-        vessel_gate_proba=vessel_gate_proba,
     )

@@ -1,8 +1,10 @@
 """
-AquaForge inference: one forward per chip → mask, landmarks, heading, wake auxiliary.
+AquaForge inference — **only** path for vessel geometry in this app.
 
-Supports PyTorch ``.pt`` checkpoints (training export) and multi-output ONNX via
-``aquaforge.onnx_session_cache`` (INT8 optional).
+* **Full scene:** :meth:`AquaForgePredictor.run_tiled_scene_candidates` (overlap grid, batching, NMS).
+* **Single location:** :meth:`AquaForgePredictor.predict_at_candidate` for review chips.
+
+PyTorch ``.pt`` or multi-output ONNX via ``aquaforge.onnx_session_cache`` (INT8 optional).
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from aquaforge.detection_config import AquaForgeSection, DetectionSettings, merg
 
 @dataclass
 class AquaForgeSpotResult:
-    """Aligned with marine YOLO spot fields where possible (polygon full-res, confidence)."""
+    """One chip decode: hull polygon, score, landmarks, heading, wake auxiliary."""
 
     confidence: float
     polygon_fullres: list[tuple[float, float]] | None
