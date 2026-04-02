@@ -1,11 +1,10 @@
 """
-YAML-driven settings for **AquaForge** tiled detection and ONNX runtime tuning only.
+AquaForge inference settings only — YAML + ORT tuning. No separate ``detection`` stack.
 
-Default path: ``<project_root>/data/config/detection.yaml``.
-Override with env ``AF_DETECTION_CONFIG`` or ``VD_DETECTION_CONFIG`` (absolute path).
+Default file: ``<project_root>/data/config/detection.yaml`` (filename kept for existing installs).
+Override with ``AF_DETECTION_CONFIG`` or ``VD_DETECTION_CONFIG`` (absolute path).
 
-Unknown top-level keys (historical ``backend``, ``yolo``, hybrid/gate fields, etc.) are ignored.
-External pose ONNX is configured via :mod:`aquaforge.keypoints_config` in tooling scripts, not here.
+Unknown top-level YAML keys (historical backend / hybrid / gating) are ignored.
 """
 
 from __future__ import annotations
@@ -17,18 +16,18 @@ from typing import Any
 
 __all__ = [
     "AquaForgeSection",
-    "DetectionSettings",
+    "AquaForgeSettings",
     "OnnxRuntimeSection",
-    "default_detection_yaml_path",
-    "example_detection_yaml_path",
-    "load_detection_settings",
+    "default_aquaforge_yaml_path",
+    "example_aquaforge_yaml_path",
+    "load_aquaforge_settings",
     "merged_onnx_providers",
 ]
 
 
 @dataclass
 class OnnxRuntimeSection:
-    """CPU thread and graph options for ``onnxruntime.InferenceSession`` (additive YAML)."""
+    """CPU thread and graph options for ``onnxruntime.InferenceSession``."""
 
     intra_op_num_threads: int = 0
     inter_op_num_threads: int = 0
@@ -39,12 +38,9 @@ class OnnxRuntimeSection:
 @dataclass
 class AquaForgeSection:
     """
-    Unified multi-task vessel model (segmentation + landmarks + heading + wake hint).
+    Multi-task vessel model: segmentation, landmarks, heading, wake auxiliary.
 
-    Full-scene **tiled** inference proposes detections; there is no separate candidate finder.
-
-    Default weight search: ``data/models/aquaforge/aquaforge.pt`` or ``best.pt``.
-    ONNX optional when ``use_onnx_inference: true``.
+    Full-scene **tiled** inference is the only way detections are proposed — no legacy candidate stage.
     """
 
     weights_path: str | None = None
@@ -63,7 +59,9 @@ class AquaForgeSection:
 
 
 @dataclass
-class DetectionSettings:
+class AquaForgeSettings:
+    """Everything needed to run tiled scene + per-chip AquaForge (Torch or ONNX)."""
+
     aquaforge: AquaForgeSection = field(default_factory=AquaForgeSection)
     onnx_runtime: OnnxRuntimeSection = field(default_factory=OnnxRuntimeSection)
     onnx_providers: list[str] | None = None
@@ -72,22 +70,21 @@ class DetectionSettings:
 
 
 def merged_onnx_providers(
-    settings: DetectionSettings,
+    settings: AquaForgeSettings,
     section_providers: list[str] | None,
 ) -> list[str] | None:
-    """Global ``onnx_providers`` wins over section-level lists (additive GPU path)."""
+    """Global ``onnx_providers`` wins over section-level lists."""
     if settings.onnx_providers:
         return list(settings.onnx_providers)
     return section_providers
 
 
-def default_detection_yaml_path(project_root: Path) -> Path:
+def default_aquaforge_yaml_path(project_root: Path) -> Path:
     return project_root / "data" / "config" / "detection.yaml"
 
 
-def example_detection_yaml_path() -> Path:
-    """Packaged example (under ``aquaforge/config/``); same layout as deployed ``detection.yaml``."""
-    return Path(__file__).resolve().parent / "config" / "detection.example.yaml"
+def example_aquaforge_yaml_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "config" / "detection.example.yaml"
 
 
 def _parse_aquaforge(d: dict[str, Any] | None) -> AquaForgeSection:
@@ -165,10 +162,10 @@ def _parse_onnx_runtime(d: dict[str, Any] | None) -> OnnxRuntimeSection:
     )
 
 
-def load_detection_settings(project_root: Path) -> DetectionSettings:
+def load_aquaforge_settings(project_root: Path) -> AquaForgeSettings:
     """
-    Load YAML from env ``AF_DETECTION_CONFIG`` or ``VD_DETECTION_CONFIG``,
-    else ``data/config/detection.yaml``. Missing or invalid file → defaults.
+    Load YAML from env ``AF_DETECTION_CONFIG`` / ``VD_DETECTION_CONFIG`` or default path.
+    Missing or invalid file → defaults.
     """
     raw_env = (
         os.environ.get("AF_DETECTION_CONFIG", "").strip()
@@ -177,10 +174,10 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
     if raw_env:
         path = Path(raw_env)
     else:
-        path = default_detection_yaml_path(project_root)
+        path = default_aquaforge_yaml_path(project_root)
 
     if not path.is_file():
-        return DetectionSettings()
+        return AquaForgeSettings()
 
     try:
         import yaml
@@ -188,17 +185,17 @@ def load_detection_settings(project_root: Path) -> DetectionSettings:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except Exception:
-        return DetectionSettings()
+        return AquaForgeSettings()
 
     if not isinstance(data, dict):
-        return DetectionSettings()
+        return AquaForgeSettings()
 
     gop = data.get("onnx_providers")
     global_onnx_prov: list[str] | None = None
     if isinstance(gop, list) and all(isinstance(x, str) for x in gop):
         global_onnx_prov = list(gop)
 
-    return DetectionSettings(
+    return AquaForgeSettings(
         aquaforge=_parse_aquaforge(
             data.get("aquaforge") if isinstance(data.get("aquaforge"), dict) else None
         ),

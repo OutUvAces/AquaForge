@@ -23,14 +23,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
-from aquaforge.detection_backend import (
-    aquaforge_tiled_scene_triples,
-    run_spot_inference,
+from aquaforge.unified.inference import (
+    run_aquaforge_spot_decode,
+    run_aquaforge_tiled_scene_triples,
 )
-from aquaforge.detection_config import (
-    DetectionSettings,
-    load_detection_settings,
-)
+from aquaforge.unified.settings import AquaForgeSettings, load_aquaforge_settings
 from aquaforge.labels import (
     iter_vessel_size_feedback,
     paths_same_underlying_file,
@@ -345,7 +342,7 @@ def rank_score_at_point(
     cy: float,
     clf: Any,
     chip_bundle: dict[str, Any] | None,
-    settings: DetectionSettings,
+    settings: AquaForgeSettings,
 ) -> dict[str, Any]:
     """
     Single-candidate scores for benchmarks: ``rank_score`` is AquaForge vessel probability (0–1).
@@ -483,7 +480,7 @@ def _append_heading_errors(
 def run_tiled_recall_vs_ranking_labels(
     project_root: Path,
     jsonl_path: Path,
-    settings: DetectionSettings,
+    settings: AquaForgeSettings,
     *,
     match_radius_px: float = 96.0,
 ) -> dict[str, Any]:
@@ -511,7 +508,7 @@ def run_tiled_recall_vs_ranking_labels(
             errors.append(f"missing_tci:{tci}")
             continue
         scenes += 1
-        raw, meta = aquaforge_tiled_scene_triples(project_root, tci, settings)
+        raw, meta = run_aquaforge_tiled_scene_triples(project_root, tci, settings)
         err = meta.get("error")
         if err:
             errors.append(f"{tci.name}:{err}")
@@ -542,7 +539,7 @@ def run_detection_evaluation(
     project_root: Path,
     jsonl_path: Path,
     *,
-    settings_sota: DetectionSettings,
+    aquaforge_settings: AquaForgeSettings,
     max_spots: int | None = None,
 ) -> EvalRunResult:
     """
@@ -550,7 +547,7 @@ def run_detection_evaluation(
     metrics from AquaForge spot inference.
     """
     notes: list[str] = []
-    chip_half = int(settings_sota.aquaforge.chip_half)
+    chip_half = int(aquaforge_settings.aquaforge.chip_half)
 
     rows, n_skip = collect_ranking_labeled_rows(jsonl_path, project_root)
     if n_skip:
@@ -566,7 +563,7 @@ def run_detection_evaluation(
             row.cy,
             None,
             None,
-            settings_sota,
+            aquaforge_settings,
         )
         rs = ss.get("rank_score")
         if rs is not None:
@@ -604,12 +601,12 @@ def run_detection_evaluation(
             g.dimension_markers, g.cx, g.cy, chip_half
         )
 
-        sota = run_spot_inference(
+        sota = run_aquaforge_spot_decode(
             project_root,
             g.tci_path,
             g.cx,
             g.cy,
-            settings_sota,
+            aquaforge_settings,
             spot_col_off=int(sc0),
             spot_row_off=int(sr0),
             scl_path=scl_path,
@@ -714,7 +711,7 @@ def _heading_cell_median_kp(bucket: HeadingErrorBucket) -> str:
 def format_eval_report(
     res: EvalRunResult,
     *,
-    settings_sota: DetectionSettings,
+    aquaforge_settings: AquaForgeSettings,
     bold_best: bool = False,
 ) -> str:
     """
@@ -732,7 +729,7 @@ def format_eval_report(
     iou_aq = fmt_eval_num(_mean_list(res.mask_ious), ndigits=4)
     lines: list[str] = [
         "## AquaForge — detection evaluation",
-        f"**Chip half (px):** `{settings_sota.aquaforge.chip_half}`",
+        f"**Chip half (px):** `{aquaforge_settings.aquaforge.chip_half}`",
         "",
         f"Labeled points (binary): {res.n_labeled_points}",
         f"Vessel geometry rows: {res.n_geometry_spots}",
@@ -791,7 +788,7 @@ def _ranking_has_pearson(res: EvalRunResult) -> bool:
 def _key_takeaways_and_summary_lines(
     res: EvalRunResult,
     *,
-    settings_sota: DetectionSettings,
+    aquaforge_settings: AquaForgeSettings,
     jsonl_path: str | None,
 ) -> tuple[str, str]:
     """
@@ -855,7 +852,7 @@ def _key_takeaways_and_summary_lines(
         "| Field | Value |",
         "| :--- | :--- |",
         f"| JSONL | `{jl}` |",
-        f"| AquaForge chip half (px) | `{settings_sota.aquaforge.chip_half}` |",
+        f"| AquaForge chip half (px) | `{aquaforge_settings.aquaforge.chip_half}` |",
         f"| Geometry spots | {res.n_geometry_spots} |",
         f"| Binary labeled points | {res.n_labeled_points} |",
         f"| Heading GT rows | {res.n_heading_gt} |",
@@ -871,7 +868,7 @@ def _key_takeaways_and_summary_lines(
 def format_eval_summary_markdown(
     res: EvalRunResult,
     *,
-    settings_sota: DetectionSettings,
+    aquaforge_settings: AquaForgeSettings,
     jsonl_path: str | None = None,
 ) -> str:
     """
@@ -879,16 +876,16 @@ def format_eval_summary_markdown(
     best-per-row bolding and numeric column alignment.
     """
     takeaways, glance = _key_takeaways_and_summary_lines(
-        res, settings_sota=settings_sota, jsonl_path=jsonl_path
+        res, aquaforge_settings=aquaforge_settings, jsonl_path=jsonl_path
     )
-    body = format_eval_report(res, settings_sota=settings_sota, bold_best=True)
+    body = format_eval_report(res, aquaforge_settings=aquaforge_settings, bold_best=True)
     return takeaways + "\n\n" + glance + "\n---\n\n" + body
 
 
 def format_demo_console_summary(
     res: EvalRunResult,
     *,
-    settings_sota: DetectionSettings,
+    aquaforge_settings: AquaForgeSettings,
     jsonl_path: str,
     max_spots: int,
 ) -> str:
@@ -897,7 +894,7 @@ def format_demo_console_summary(
     lines = [
         "=== AquaForge quick eval demo ===",
         f"JSONL: {jsonl_path}",
-        f"Chip half (px): {settings_sota.aquaforge.chip_half}",
+        f"Chip half (px): {aquaforge_settings.aquaforge.chip_half}",
         f"Cap: {max_spots} geometry spot(s)",
         f"Geometry spots evaluated: {res.n_geometry_spots}",
         f"Binary labeled points: {res.n_labeled_points} | Heading GT rows: {res.n_heading_gt}",
@@ -1066,7 +1063,7 @@ def main_cli(argv: list[str] | None = None) -> int:
         os.environ["AF_DETECTION_CONFIG"] = p
         os.environ["VD_DETECTION_CONFIG"] = p
 
-    settings_sota = load_detection_settings(root)
+    aquaforge_settings = load_aquaforge_settings(root)
 
     jsonl_paths: list[Path]
     if args.labels_dir:
@@ -1089,7 +1086,7 @@ def main_cli(argv: list[str] | None = None) -> int:
                 run_tiled_recall_vs_ranking_labels(
                     root,
                     jp,
-                    settings_sota,
+                    aquaforge_settings,
                     match_radius_px=float(args.tiled_recall_radius),
                 )
             )
@@ -1113,14 +1110,14 @@ def main_cli(argv: list[str] | None = None) -> int:
             res = run_detection_evaluation(
                 root,
                 jp,
-                settings_sota=settings_sota,
+                aquaforge_settings=aquaforge_settings,
                 max_spots=spot_cap,
             )
             if args.demo:
                 tr.append(
                     format_demo_console_summary(
                         res,
-                        settings_sota=settings_sota,
+                        aquaforge_settings=aquaforge_settings,
                         jsonl_path=str(jp),
                         max_spots=int(spot_cap) if spot_cap is not None else 0,
                     )
@@ -1129,12 +1126,12 @@ def main_cli(argv: list[str] | None = None) -> int:
                 tr.append(
                     format_eval_summary_markdown(
                         res,
-                        settings_sota=settings_sota,
+                        aquaforge_settings=aquaforge_settings,
                         jsonl_path=str(jp),
                     )
                 )
             else:
-                tr.append(f"### {jp}\n" + format_eval_report(res, settings_sota=settings_sota))
+                tr.append(f"### {jp}\n" + format_eval_report(res, aquaforge_settings=aquaforge_settings))
             jd = eval_result_to_jsonable(res)
             jd["jsonl"] = str(jp)
             jd["detector"] = "aquaforge"

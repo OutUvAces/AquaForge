@@ -34,7 +34,7 @@ EXTRA_PRED_MLP_PROBA = "pred_mlp_proba"
 EXTRA_PRED_COMBINED_PROBA = "pred_combined_proba"
 EXTRA_MODEL_RUN_ID = "model_run_id"
 
-# Optional spot-overlay audit fields (AquaForge mask metrics use yolo_* key names for schema stability).
+# Optional spot-overlay audit fields (historical ``yolo_*`` JSONL key names — values are AquaForge outputs).
 EXTRA_PRED_YOLO_CONF = "pred_yolo_confidence"
 EXTRA_PRED_YOLO_LENGTH_M = "pred_yolo_length_m"
 EXTRA_PRED_YOLO_WIDTH_M = "pred_yolo_width_m"

@@ -24,7 +24,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from aquaforge.chip_io import read_chip_bgr_centered
-from aquaforge.detection_config import OnnxRuntimeSection
+from aquaforge.unified.settings import OnnxRuntimeSection
 from aquaforge.keypoints_config import KeypointsSection
 from aquaforge.onnx_session_cache import get_ort_session
 

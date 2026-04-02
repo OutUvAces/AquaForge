@@ -6,7 +6,7 @@
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
 - **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
 
-Core package: [`aquaforge/`](aquaforge/) — `detection_config.py`, `detection_backend.py`, `unified/inference.py` (sole tiled scene path), `unified/external_pose_onnx.py` (optional third-party pose tooling only), `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, and packaged YAML under `aquaforge/config/`.
+Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** (end-to-end tiled scene + `run_aquaforge_spot_decode` for chips), **`unified/settings.py`** (YAML: still `data/config/detection.yaml`), `unified/external_pose_onnx.py` (optional third-party pose tooling only), `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, and packaged YAML under `aquaforge/config/`. There is **no** `detection_backend` / `detection_config` layer — only AquaForge.
 
 ---
 
@@ -79,7 +79,7 @@ Default image command runs a short [`scripts/train_aquaforge.py`](scripts/train_
 
 ## Contributing & tests
 
-- Prefer changes that keep **one** detector path (`aquaforge_tiled_scene_triples` + `unified/inference`).
+- Prefer changes that keep **one** detector path: `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
 - **`py -3 -m pytest`** and `py -3 -m py_compile` on touched modules.
 
 ---

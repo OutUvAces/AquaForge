@@ -56,7 +56,7 @@ def clear_aquaforge_predictor_cache() -> None:
         _aquaforge_predictors.clear()
 
 
-def warm_sota_models(project_root: Path, settings: Any) -> None:
+def warm_aquaforge_predictor(project_root: Path, settings: Any) -> None:
     """Performance: pre-load AquaForge when weights exist."""
     get_cached_aquaforge_predictor(project_root, settings)
 
@@ -66,7 +66,7 @@ def schedule_background_warm(project_root: Path, settings: Any) -> None:
 
     def _run() -> None:
         try:
-            warm_sota_models(project_root, settings)
+            warm_aquaforge_predictor(project_root, settings)
         except Exception as e:
             logger.debug("Background AquaForge warm-up skipped: %s", e)
 

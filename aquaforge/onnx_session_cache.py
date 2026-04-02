@@ -23,7 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from aquaforge.detection_config import OnnxRuntimeSection
+from aquaforge.unified.settings import OnnxRuntimeSection
 
 logger = logging.getLogger(__name__)
 

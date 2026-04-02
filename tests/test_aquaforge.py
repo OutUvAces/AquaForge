@@ -15,7 +15,7 @@ class TestAquaForgeIntegration(unittest.TestCase):
         from tempfile import TemporaryDirectory
         from unittest.mock import patch
 
-        from aquaforge.detection_config import DetectionSettings
+        from aquaforge.unified.settings import AquaForgeSettings
         from aquaforge.unified.integration import run_aquaforge_spot_inference
 
         with TemporaryDirectory() as td:
@@ -31,7 +31,7 @@ class TestAquaForgeIntegration(unittest.TestCase):
                     tci,
                     10.0,
                     20.0,
-                    DetectionSettings(),
+                    AquaForgeSettings(),
                     spot_col_off=0,
                     spot_row_off=0,
                 )

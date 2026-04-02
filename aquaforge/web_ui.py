@@ -83,15 +83,6 @@ from aquaforge.review_schema import (
     enrich_extra_with_predictions,
     model_run_fingerprint,
 )
-from aquaforge.detection_backend import (
-    aquaforge_tiled_scene_triples,
-    run_spot_inference,
-)
-from aquaforge.detection_config import (
-    default_detection_yaml_path,
-    example_detection_yaml_path,
-    load_detection_settings,
-)
 from aquaforge.model_manager import (
     clear_aquaforge_predictor_cache,
     get_cached_aquaforge_predictor,
@@ -106,6 +97,13 @@ from aquaforge.unified.inference import (
     expected_aquaforge_checkpoint_path,
     resolve_aquaforge_checkpoint_path,
     resolve_aquaforge_onnx_path,
+    run_aquaforge_spot_decode,
+    run_aquaforge_tiled_scene_triples,
+)
+from aquaforge.unified.settings import (
+    default_aquaforge_yaml_path,
+    example_aquaforge_yaml_path,
+    load_aquaforge_settings,
 )
 from aquaforge.review_overlay import (
     annotate_locator_spot_outline,
@@ -208,7 +206,7 @@ def _detector_fetch_pool_size(max_k: int) -> int:
 
 
 def _detection_yaml_mtime(project_root: Path) -> float:
-    p = default_detection_yaml_path(project_root)
+    p = default_aquaforge_yaml_path(project_root)
     try:
         return float(p.stat().st_mtime) if p.is_file() else 0.0
     except OSError:
@@ -1138,7 +1136,7 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
     """
     Shown when AquaForge is the active backend but no ``.pt`` is found — short first training job.
     """
-    det = load_detection_settings(project_root)
+    det = load_aquaforge_settings(project_root)
     if resolve_aquaforge_checkpoint_path(project_root, det.aquaforge) is not None:
         return
     st.markdown("##### Train first AquaForge model")
@@ -1245,7 +1243,7 @@ def _sidebar_spot_finding_settings() -> None:
         )
         # AquaForge is the default; no backend picker. Optional YAML is for power users / ML tuning only.
         with st.expander("Optional: advanced config", expanded=False):
-            ex_p = example_detection_yaml_path()
+            ex_p = example_aquaforge_yaml_path()
             st.caption(
                 f"Copy **`{ex_p}`** → **`data/config/detection.yaml`** only if you tune paths or ORT threads. "
                 "Install **`pip install -r requirements-ml.txt`** for full on-image inference."
@@ -1353,7 +1351,7 @@ def main() -> None:
                 st.info(
                     "Add a `*TCI_10m*.jp2` under **data/** or download one below."
                 )
-            _det_adv = load_detection_settings(ROOT)
+            _det_adv = load_aquaforge_settings(ROOT)
             _render_retrain_aquaforge_section(ROOT, labels_path)
             _render_train_first_aquaforge_section(ROOT, labels_path)
             st.markdown("---")
@@ -1393,7 +1391,7 @@ def main() -> None:
         return
 
     assert choice is not None
-    _vd_af_cfg = load_detection_settings(ROOT)
+    _vd_af_cfg = load_aquaforge_settings(ROOT)
     if resolve_aquaforge_checkpoint_path(ROOT, _vd_af_cfg.aquaforge) is None:
         try:
             _af_rel = expected_aquaforge_checkpoint_path(ROOT).relative_to(ROOT)
@@ -1446,13 +1444,13 @@ def main() -> None:
             st.session_state.last_scene_key = scene_key
         else:
             try:
-                det_cfg = load_detection_settings(ROOT)
+                det_cfg = load_aquaforge_settings(ROOT)
                 pool = _detector_fetch_pool_size(max_k)
                 with st.spinner(
                     "AquaForge full-scene tiled detection: overlapping windows, NMS merge, "
                     "confidence filter. Large JP2s can take several minutes — the app is still working."
                 ):
-                    raw, meta = aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
+                    raw, meta = run_aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
                     if meta.get("error") == "aquaforge_weights_missing":
                         try:
                             _af_rel = expected_aquaforge_checkpoint_path(
@@ -1605,7 +1603,7 @@ def _render_hundred_cell_overview(
 
         try:
             mtime_ns = tci_p.stat().st_mtime_ns
-            det_ov = load_detection_settings(ROOT)
+            det_ov = load_aquaforge_settings(ROOT)
             ov_rgb, ov_meta = build_overview_composite(
                 tci_p,
                 project_root=ROOT,
@@ -1616,7 +1614,7 @@ def _render_hundred_cell_overview(
                 max_overview_dim=DEFAULT_OVERVIEW_MAX_DIM,
                 max_candidates=DEFAULT_OVERVIEW_MAX_CANDIDATES,
                 min_water_fraction=MIN_OPEN_WATER_FRACTION,
-                detection_settings=det_ov,
+                aquaforge_settings=det_ov,
             )
         except Exception as e:
             st.warning(str(e))
@@ -2031,7 +2029,7 @@ def _render_review_deck(
 
     tci_p = Path(tci_loaded)
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
-    det_settings = load_detection_settings(ROOT)
+    det_settings = load_aquaforge_settings(ROOT)
     _af_pred_gate = get_cached_aquaforge_predictor(ROOT, det_settings)
     af_gate_prob = float(aquaforge_confidence_only(_af_pred_gate, tci_p, cx, cy))
     p_comb = af_gate_prob
@@ -2120,7 +2118,7 @@ def _render_review_deck(
         st.session_state[sota_k] = {}
         st.session_state[sota_k + "_sig"] = sota_sig
     elif st.session_state.get(sota_k + "_sig") != sota_sig:
-        st.session_state[sota_k] = run_spot_inference(
+        st.session_state[sota_k] = run_aquaforge_spot_decode(
             ROOT,
             tci_p,
             cx,
@@ -3085,13 +3083,13 @@ def _commit_review_label(
             cx_save = float(cx)
             cy_save = float(cy)
 
-    _dset_fp = load_detection_settings(ROOT)
+    _dset_fp = load_aquaforge_settings(ROOT)
     _af_pred_sv = get_cached_aquaforge_predictor(ROOT, _dset_fp)
     sv_comb = float(
         aquaforge_confidence_only(_af_pred_sv, Path(tci_loaded), cx_save, cy_save)
     )
     _fp_paths: list[Path] = []
-    _cfg_fp = default_detection_yaml_path(ROOT)
+    _cfg_fp = default_aquaforge_yaml_path(ROOT)
     if _cfg_fp.is_file():
         _fp_paths.append(_cfg_fp)
     _af_ck_save = resolve_aquaforge_checkpoint_path(ROOT, _dset_fp.aquaforge)

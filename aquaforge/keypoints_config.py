@@ -1,5 +1,5 @@
 """
-ShipStructure / pose ONNX options (standalone — not part of :class:`DetectionSettings`).
+ShipStructure / pose ONNX options (standalone — not part of :class:`AquaForgeSettings`).
 
 Used by :mod:`aquaforge.unified.external_pose_onnx` and export/validation scripts.
 """

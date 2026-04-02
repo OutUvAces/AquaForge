@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aquaforge.detection_config import DetectionSettings
+from aquaforge.unified.settings import AquaForgeSettings
 from aquaforge.evaluation import (
     EvalRunResult,
     HeadingErrorBucket,
@@ -50,11 +50,11 @@ class TestEvalEmptyJsonl(unittest.TestCase):
             res = run_detection_evaluation(
                 root,
                 jp,
-                settings_sota=DetectionSettings(),
+                aquaforge_settings=AquaForgeSettings(),
             )
             self.assertEqual(res.n_labeled_points, 0)
             self.assertEqual(res.n_geometry_spots, 0)
-            txt = format_eval_report(res, settings_sota=DetectionSettings())
+            txt = format_eval_report(res, aquaforge_settings=AquaForgeSettings())
             self.assertIn("Labeled points", txt)
         finally:
             jp.unlink(missing_ok=True)
@@ -96,7 +96,7 @@ class TestEvalReportJson(unittest.TestCase):
             res = run_detection_evaluation(
                 root,
                 jp,
-                settings_sota=DetectionSettings(),
+                aquaforge_settings=AquaForgeSettings(),
             )
             d = eval_result_to_jsonable(res)
             self.assertIn("pearson_r", d)
@@ -118,9 +118,9 @@ class TestEvalReportJson(unittest.TestCase):
             res = run_detection_evaluation(
                 root,
                 jp,
-                settings_sota=DetectionSettings(),
+                aquaforge_settings=AquaForgeSettings(),
             )
-            txt = format_eval_report(res, settings_sota=DetectionSettings())
+            txt = format_eval_report(res, aquaforge_settings=AquaForgeSettings())
             self.assertIn("Ranking (Pearson", txt)
             self.assertIn("| AquaForge |", txt)
             self.assertIn("Hull overlap", txt)
@@ -166,11 +166,11 @@ class TestSummaryMarkdown(unittest.TestCase):
             res = run_detection_evaluation(
                 root,
                 jp,
-                settings_sota=DetectionSettings(),
+                aquaforge_settings=AquaForgeSettings(),
             )
             md = format_eval_summary_markdown(
                 res,
-                settings_sota=DetectionSettings(),
+                aquaforge_settings=AquaForgeSettings(),
                 jsonl_path=str(jp),
             )
             self.assertIn("### Key Takeaways", md)
@@ -203,7 +203,7 @@ class TestSummaryMarkdown(unittest.TestCase):
         )
         md = format_eval_summary_markdown(
             res,
-            settings_sota=DetectionSettings(),
+            aquaforge_settings=AquaForgeSettings(),
             jsonl_path="fixture.jsonl",
         )
         self.assertIn("**0.9000**", md)

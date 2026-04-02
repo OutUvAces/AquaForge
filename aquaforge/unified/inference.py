@@ -18,7 +18,11 @@ from typing import Any, Sequence
 import numpy as np
 
 from aquaforge.unified.constants import NUM_LANDMARKS
-from aquaforge.detection_config import AquaForgeSection, DetectionSettings, merged_onnx_providers
+from aquaforge.unified.settings import (
+    AquaForgeSection,
+    AquaForgeSettings,
+    merged_onnx_providers,
+)
 
 
 @dataclass
@@ -280,7 +284,7 @@ class AquaForgePredictor:
         *,
         torch_model: Any | None,
         onnx_path: Path | None,
-        settings: DetectionSettings,
+        settings: AquaForgeSettings,
         af: AquaForgeSection,
         device: Any | None = None,
     ) -> None:
@@ -638,7 +642,7 @@ def expected_aquaforge_checkpoint_path(project_root: Path) -> Path:
 
 def build_aquaforge_predictor(
     project_root: Path,
-    settings: DetectionSettings,
+    settings: AquaForgeSettings,
 ) -> AquaForgePredictor | None:
     af = settings.aquaforge
     onnx_p = resolve_aquaforge_onnx_path(project_root, af)
@@ -677,7 +681,7 @@ def build_aquaforge_predictor(
 def run_aquaforge_tiled_scene_triples(
     project_root: Path,
     tci_path: Path,
-    settings: DetectionSettings,
+    settings: AquaForgeSettings,
 ) -> tuple[list[tuple[float, float, float]], dict[str, Any]]:
     """
     Sole full-scene vessel detection: overlapping tiles, batched forward, NMS on decoded masks.
@@ -722,3 +726,33 @@ def aquaforge_confidence_only(
         return 0.0
     r = predictor.predict_at_candidate(tci_path, cx, cy)
     return float(r.confidence) if r is not None else 0.0
+
+
+def run_aquaforge_spot_decode(
+    project_root: Path,
+    tci_path: Path,
+    cx: float,
+    cy: float,
+    settings: AquaForgeSettings,
+    *,
+    spot_col_off: int,
+    spot_row_off: int,
+    scl_path: Path | None = None,
+) -> dict[str, Any]:
+    """
+    Single-location full AquaForge decode for review UI and offline eval.
+
+    Replaces the removed ``detection_backend.run_spot_inference`` shim — sole spot path.
+    """
+    from aquaforge.unified.integration import run_aquaforge_spot_inference
+
+    _ = scl_path
+    return run_aquaforge_spot_inference(
+        project_root,
+        tci_path,
+        cx,
+        cy,
+        settings,
+        spot_col_off=int(spot_col_off),
+        spot_row_off=int(spot_row_off),
+    )

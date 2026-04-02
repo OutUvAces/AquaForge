@@ -15,7 +15,7 @@ from typing import Any
 
 from aquaforge.unified.inference import AquaForgeSpotResult
 from aquaforge.model_manager import get_cached_aquaforge_predictor
-from aquaforge.detection_config import DetectionSettings
+from aquaforge.unified.settings import AquaForgeSettings
 from aquaforge.unified.external_pose_onnx import KeypointResult, keypoints_to_jsonable
 
 
@@ -36,7 +36,7 @@ def run_aquaforge_spot_inference(
     tci_path: Path,
     cx: float,
     cy: float,
-    settings: DetectionSettings,
+    settings: AquaForgeSettings,
     *,
     spot_col_off: int,
     spot_row_off: int,

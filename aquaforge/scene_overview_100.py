@@ -13,11 +13,11 @@ from typing import Any
 
 import numpy as np
 
-from aquaforge.detection_backend import aquaforge_tiled_scene_triples
-from aquaforge.detection_config import (
-    DetectionSettings,
-    default_detection_yaml_path,
-    load_detection_settings,
+from aquaforge.unified.inference import run_aquaforge_tiled_scene_triples
+from aquaforge.unified.settings import (
+    AquaForgeSettings,
+    default_aquaforge_yaml_path,
+    load_aquaforge_settings,
 )
 from aquaforge.raster_rgb import read_rgba_downsampled
 from aquaforge.unified.inference import (
@@ -269,7 +269,7 @@ def paint_detection_marks(
     rgb[:] = np.asarray(im)
 
 
-def _aquaforge_fingerprint(project_root: Path, settings: DetectionSettings) -> tuple[Any, ...]:
+def _aquaforge_fingerprint(project_root: Path, settings: AquaForgeSettings) -> tuple[Any, ...]:
     """Invalidate overview detection cache when weights or detection YAML change."""
     af = settings.aquaforge
     w_path = resolve_aquaforge_checkpoint_path(project_root, af)
@@ -282,7 +282,7 @@ def _aquaforge_fingerprint(project_root: Path, settings: DetectionSettings) -> t
         om = int(onx_path.stat().st_mtime_ns) if onx_path is not None else 0
     except OSError:
         om = 0
-    yp = default_detection_yaml_path(project_root)
+    yp = default_aquaforge_yaml_path(project_root)
     try:
         ym = int(yp.stat().st_mtime_ns) if yp.is_file() else 0
     except OSError:
@@ -341,8 +341,8 @@ def _cached_overview_detections(
     max_candidates: int,
 ) -> tuple[tuple, ...]:
     root = Path(project_root_resolved)
-    settings = load_detection_settings(root)
-    raw, _meta = aquaforge_tiled_scene_triples(root, Path(tci_resolved), settings)
+    settings = load_aquaforge_settings(root)
+    raw, _meta = run_aquaforge_tiled_scene_triples(root, Path(tci_resolved), settings)
     raw = raw[: int(max_candidates)]
     return tuple((float(a), float(b), float(c)) for a, b, c in raw)
 
@@ -357,7 +357,7 @@ def build_overview_composite(
     max_overview_dim: int = DEFAULT_OVERVIEW_MAX_DIM,
     max_candidates: int = DEFAULT_OVERVIEW_MAX_CANDIDATES,
     min_water_fraction: float = 0.01,
-    detection_settings: DetectionSettings | None = None,
+    aquaforge_settings: AquaForgeSettings | None = None,
     ds_factor: int = 4,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
@@ -381,7 +381,7 @@ def build_overview_composite(
     apply_land_dimming(rgb, water)
     draw_grid_on_rgb(rgb)
 
-    settings = detection_settings or load_detection_settings(project_root)
+    settings = aquaforge_settings or load_aquaforge_settings(project_root)
     fp = _aquaforge_fingerprint(project_root, settings)
     det_tuple = _cached_overview_detections(
         tci_resolved,

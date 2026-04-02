@@ -246,10 +246,10 @@ def teacher_sota_dict(
     spot_row_off: int,
 ) -> dict[str, Any]:
     """Run AquaForge spot inference (same stack as the review UI) for teacher heading targets."""
-    from aquaforge.detection_config import load_detection_settings
     from aquaforge.unified.integration import run_aquaforge_spot_inference
+    from aquaforge.unified.settings import load_aquaforge_settings
 
-    settings = load_detection_settings(project_root)
+    settings = load_aquaforge_settings(project_root)
     return run_aquaforge_spot_inference(
         project_root,
         tci_path,

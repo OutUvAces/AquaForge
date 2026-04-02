@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from aquaforge.detection_config import load_detection_settings
+from aquaforge.unified.settings import load_aquaforge_settings
 from aquaforge.model_manager import get_cached_aquaforge_predictor
 from aquaforge.unified.inference import aquaforge_confidence_only
 from aquaforge.unified.labeled_rows import (
@@ -78,7 +78,7 @@ def evaluate_aquaforge_vs_binary_labels(
         model_side=model_side,
         src_half=src_half,
     )
-    settings = load_detection_settings(root)
+    settings = load_aquaforge_settings(root)
     thr_af = float(threshold) if threshold is not None else float(settings.aquaforge.conf_threshold)
 
     base: dict[str, Any] = {
