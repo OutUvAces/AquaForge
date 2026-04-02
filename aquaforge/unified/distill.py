@@ -8,7 +8,7 @@ into AquaForge's own heading head.
 **Active learning**: priority scores come from review-UI ``extra`` fields (model uncertainty, small
 vessel proxies, low heading trust, cloud flags, optional manual training boost). The trainer
 oversamples high-priority rows; :func:`hydrate_teacher_signals` fills teacher heading targets on the
-same ranked queue each epoch.
+same priority queue each epoch.
 """
 
 from __future__ import annotations
@@ -309,10 +309,10 @@ def hydrate_teacher_signals(
     """
     if budget <= 0 or not samples:
         return 0
-    ranked = sorted(samples, key=lambda s: float(getattr(s, "al_priority", 1.0)), reverse=True)
+    priority_ordered = sorted(samples, key=lambda s: float(getattr(s, "al_priority", 1.0)), reverse=True)
     seen: set[str] = set()
     n_ok = 0
-    for s in ranked:
+    for s in priority_ordered:
         if n_ok >= budget:
             break
         rid = str(getattr(s, "record_id", ""))

@@ -21,10 +21,10 @@ import numpy as np
 
 from aquaforge.labels import TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY
 from aquaforge.vessel_markers import MARKER_ROLES
-from aquaforge.unified.labeled_rows import RankingLabeledRow, collect_ranking_labeled_rows
+from aquaforge.unified.labeled_rows import ReviewLabeledRow, collect_review_labeled_rows
 from aquaforge.training_data import (
-    RANKING_CHIP_MODEL_SIDE as DEFAULT_MODEL_SIDE,
-    RANKING_CHIP_SRC_HALF as DEFAULT_SRC_HALF,
+    REVIEW_CHIP_MODEL_SIDE as DEFAULT_MODEL_SIDE,
+    REVIEW_CHIP_SRC_HALF as DEFAULT_SRC_HALF,
 )
 from aquaforge.training_data import (
     chip_to_vector as _chip_to_vector,
@@ -88,7 +88,7 @@ def _float_value(extra: dict[str, Any], key: str) -> float | None:
 
 
 def _stack_features(
-    rows: Sequence[RankingLabeledRow],
+    rows: Sequence[ReviewLabeledRow],
     *,
     model_side: int,
     src_half: int,
@@ -129,7 +129,7 @@ def train_review_multitask_joblib(
         else:
             progress(msg)
 
-    rows, n_skip = collect_ranking_labeled_rows(
+    rows, n_skip = collect_review_labeled_rows(
         jsonl_path,
         project_root,
         model_side=model_side,

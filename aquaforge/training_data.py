@@ -135,8 +135,8 @@ def jsonl_to_numpy(
 
 
 # Flat RGB chip for multitask training (concatenated with :func:`extract_crop_features`).
-RANKING_CHIP_MODEL_SIDE = 48
-RANKING_CHIP_SRC_HALF = 64
+REVIEW_CHIP_MODEL_SIDE = 48
+REVIEW_CHIP_SRC_HALF = 64
 
 
 def read_chip_square_rgb(
@@ -144,8 +144,8 @@ def read_chip_square_rgb(
     cx: float,
     cy: float,
     *,
-    model_side: int = RANKING_CHIP_MODEL_SIDE,
-    src_half: int = RANKING_CHIP_SRC_HALF,
+    model_side: int = REVIEW_CHIP_MODEL_SIDE,
+    src_half: int = REVIEW_CHIP_SRC_HALF,
 ) -> np.ndarray:
     """Read a square RGB window and resize to ``model_side`` × ``model_side`` (uint8)."""
     import cv2
@@ -167,10 +167,10 @@ def ensure_chip_cached(
     cx: float,
     cy: float,
     *,
-    model_side: int = RANKING_CHIP_MODEL_SIDE,
-    src_half: int = RANKING_CHIP_SRC_HALF,
+    model_side: int = REVIEW_CHIP_MODEL_SIDE,
+    src_half: int = REVIEW_CHIP_SRC_HALF,
 ) -> Path:
-    """Write or reuse ``data/chips/.../*.npz`` for this TCI + center (ranking chip geometry)."""
+    """Write or reuse ``data/chips/.../*.npz`` for this TCI + center (review chip geometry)."""
     from aquaforge.chip_cache import chip_npz_path, save_chip_npz
 
     path = chip_npz_path(

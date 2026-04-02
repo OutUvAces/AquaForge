@@ -103,7 +103,7 @@ class TestEvalReportJson(unittest.TestCase):
             self.assertIn("heading_errors", d)
             self.assertEqual(d.get("detector"), "aquaforge")
             self.assertIn("pct_fusion_better_than_wake_ambiguity", d)
-            self.assertIn("n_ranking_scored", d)
+            self.assertIn("n_pearson_scored_points", d)
         finally:
             jp.unlink(missing_ok=True)
 
@@ -121,7 +121,7 @@ class TestEvalReportJson(unittest.TestCase):
                 aquaforge_settings=AquaForgeSettings(),
             )
             txt = format_eval_report(res, aquaforge_settings=AquaForgeSettings())
-            self.assertIn("Ranking (Pearson", txt)
+            self.assertIn("Pearson r (vessel probability", txt)
             self.assertIn("| AquaForge |", txt)
             self.assertIn("Hull overlap", txt)
             self.assertIn("N/A", txt)
@@ -190,7 +190,7 @@ class TestSummaryMarkdown(unittest.TestCase):
             n_geometry_spots=3,
             n_heading_gt=2,
             pearson_r=0.9,
-            n_ranking_scored=12,
+            n_pearson_scored_points=12,
             heading_errors=hb,
             rel_length_errors=[0.08],
             rel_width_errors=[],

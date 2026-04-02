@@ -53,7 +53,7 @@ For validating a third-party pose ONNX on chips (not part of scene detection), s
 
 ## Benchmarking
 
-[`aquaforge/evaluation.py`](aquaforge/evaluation.py) scores **AquaForge** ranking and geometry against labeled JSONL (Pearson **r**, heading MAE, mask IoU where ground truth exists).
+[`aquaforge/evaluation.py`](aquaforge/evaluation.py) scores **AquaForge** vessel probability and geometry against labeled JSONL (Pearson **r**, heading MAE, mask IoU where ground truth exists).
 
 ```bash
 py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl -o eval_report.txt

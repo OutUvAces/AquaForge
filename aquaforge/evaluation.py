@@ -1,8 +1,8 @@
 """
-Offline benchmarking: AquaForge detection / ranking on labeled JSONL.
+Offline benchmarking: AquaForge detection and calibration on labeled review JSONL.
 
 Ground truth:
-  * Binary vessel labels on point rows (same filter as ranking training).
+  * Binary vessel labels on point rows (same filter as chip / multitask training rows).
   * ``vessel_size_feedback``: ``heading_deg_from_north``, human/graphic/estimated L×W,
     ``dimension_markers`` (bow/stern-derived heading when stored heading missing, hull quad vs AquaForge mask).
 
@@ -33,7 +33,7 @@ from aquaforge.labels import (
     paths_same_underlying_file,
     resolve_stored_asset_path,
 )
-from aquaforge.unified.labeled_rows import collect_ranking_labeled_rows
+from aquaforge.unified.labeled_rows import collect_review_labeled_rows
 from aquaforge.review_overlay import read_locator_and_spot_rgb_matching_stretch
 
 
@@ -374,7 +374,7 @@ class EvalRunResult:
     n_geometry_spots: int
     n_heading_gt: int
     pearson_r: float | None
-    n_ranking_scored: int
+    n_pearson_scored_points: int
     heading_errors: HeadingErrorBucket
     rel_length_errors: list[float]
     rel_width_errors: list[float]
@@ -394,7 +394,6 @@ class EvalRunResult:
     mean_rel_width_error: float | None = None
     mean_mask_iou: float | None = None
     n_mask_iou: int = 0
-    corr_rank_vs_label: float | None = None
     n_heading_eval: int = 0
     n_heading_wake_eval: int = 0
     n_dim_eval: int = 0
@@ -418,7 +417,7 @@ def eval_result_to_jsonable(res: EvalRunResult) -> dict[str, Any]:
         "n_heading_gt": res.n_heading_gt,
         "pearson_r": res.pearson_r,
         "detector": "aquaforge",
-        "n_ranking_scored": res.n_ranking_scored,
+        "n_pearson_scored_points": res.n_pearson_scored_points,
         "heading_errors": hb,
         "mean_rel_length_error": res.mean_rel_length_error,
         "mean_rel_width_error": res.mean_rel_width_error,
@@ -442,7 +441,6 @@ def eval_result_to_jsonable(res: EvalRunResult) -> dict[str, Any]:
         "n_fusion_vs_wake_pairs": res.n_fusion_vs_wake_pairs,
         "notes": list(res.notes),
         "summary": {
-            "corr_rank_vs_label": res.corr_rank_vs_label,
             "mean_abs_heading_error_keypoint": res.mean_abs_heading_error_keypoint,
             "mean_abs_heading_error_fused": res.mean_abs_heading_error_fused,
         },
@@ -474,7 +472,7 @@ def _append_heading_errors(
         bucket.fused.append(ef)
 
 
-def run_tiled_recall_vs_ranking_labels(
+def run_tiled_recall_vs_binary_labels(
     project_root: Path,
     jsonl_path: Path,
     settings: AquaForgeSettings,
@@ -482,7 +480,7 @@ def run_tiled_recall_vs_ranking_labels(
     match_radius_px: float = 96.0,
 ) -> dict[str, Any]:
     """
-    Benchmark **full-scene tiled** AquaForge against human ranking labels (vessel = 1).
+    Benchmark **full-scene tiled** AquaForge against human binary point labels (vessel = 1).
 
     One tiled pass per unique TCI; a vessel label counts as a hit if any detection centroid lies
     within ``match_radius_px`` (full-image pixels). This is a recall-oriented proxy, not full
@@ -490,7 +488,7 @@ def run_tiled_recall_vs_ranking_labels(
     """
     from collections import defaultdict
 
-    rows, n_skip = collect_ranking_labeled_rows(jsonl_path, project_root)
+    rows, n_skip = collect_review_labeled_rows(jsonl_path, project_root)
     by_tci: dict[Path, list[tuple[float, float, int]]] = defaultdict(list)
     for r in rows:
         by_tci[r.tci_path].append((r.cx, r.cy, int(r.y)))
@@ -521,8 +519,8 @@ def run_tiled_recall_vs_ranking_labels(
                 matched += 1
     return {
         "jsonl": str(jsonl_path),
-        "ranking_rows_used": len(rows),
-        "ranking_rows_skipped": n_skip,
+        "labeled_point_rows_used": len(rows),
+        "labeled_point_rows_skipped": n_skip,
         "unique_scenes": scenes,
         "match_radius_px": R,
         "n_vessel_positive_labels": vessel_pts,
@@ -546,9 +544,9 @@ def run_detection_evaluation(
     notes: list[str] = []
     chip_half = int(aquaforge_settings.aquaforge.chip_half)
 
-    rows, n_skip = collect_ranking_labeled_rows(jsonl_path, project_root)
+    rows, n_skip = collect_review_labeled_rows(jsonl_path, project_root)
     if n_skip:
-        notes.append(f"ranking_rows_skipped:{n_skip}")
+        notes.append(f"review_labeled_rows_skipped:{n_skip}")
 
     pearson_rs: list[float] = []
     pearson_ys: list[float] = []
@@ -568,7 +566,7 @@ def run_detection_evaluation(
             pearson_ys.append(float(row.y))
 
     pr_aq = _corrcoef_safe(pearson_rs, pearson_ys)
-    n_rank = len(pearson_rs)
+    n_pearson_scored = len(pearson_rs)
 
     geo = collect_vessel_geometry_ground_truth(
         jsonl_path, project_root, chip_half=chip_half
@@ -670,7 +668,7 @@ def run_detection_evaluation(
         n_geometry_spots=len(geo),
         n_heading_gt=n_heading_gt,
         pearson_r=pr_aq,
-        n_ranking_scored=n_rank,
+        n_pearson_scored_points=n_pearson_scored,
         heading_errors=heading_bucket,
         rel_length_errors=rel_len_list,
         rel_width_errors=rel_wid_list,
@@ -688,7 +686,6 @@ def run_detection_evaluation(
         mean_rel_width_error=_mean_list(rel_wid_list),
         mean_mask_iou=_mean_list(iou_list),
         n_mask_iou=len(iou_list),
-        corr_rank_vs_label=pr_aq,
         n_heading_eval=len(aq.keypoint),
         n_heading_wake_eval=len(aq.wake_line),
         n_dim_eval=len(rel_len_list),
@@ -732,12 +729,12 @@ def format_eval_report(
         f"Vessel geometry rows: {res.n_geometry_spots}",
         f"Rows with heading GT (stored or bow/stern markers): {res.n_heading_gt}",
         "",
-        "### Ranking (Pearson r vs binary label)",
+        "### Pearson r (vessel probability vs binary label)",
         "",
         hdr,
         sep,
         f"| Pearson r | {r_aq} |",
-        f"| N scored | {res.n_ranking_scored} |",
+        f"| N scored | {res.n_pearson_scored_points} |",
         "",
         "### Heading — circular MAE (deg; wake uses min of two directions)",
         "",
@@ -778,8 +775,8 @@ def format_eval_report(
     return "\n".join(lines) + "\n"
 
 
-def _ranking_has_pearson(res: EvalRunResult) -> bool:
-    return res.n_ranking_scored > 0 and res.pearson_r is not None
+def _has_pearson_on_labeled_points(res: EvalRunResult) -> bool:
+    return res.n_pearson_scored_points > 0 and res.pearson_r is not None
 
 
 def _key_takeaways_and_summary_lines(
@@ -791,7 +788,7 @@ def _key_takeaways_and_summary_lines(
     """
     Return (key_takeaways_block, at_a_glance_table) markdown fragments without trailing double newline.
     """
-    has_r = _ranking_has_pearson(res)
+    has_r = _has_pearson_on_labeled_points(res)
     scored_txt = "AquaForge" if has_r else "(none)"
 
     takeaway_lines = [
@@ -821,7 +818,9 @@ def _key_takeaways_and_summary_lines(
 
     v = res.pearson_r
     if v is not None and math.isfinite(float(v)):
-        takeaway_lines.append(f"- **Ranking:** Pearson **r** (AquaForge rank score): **{float(v):.4f}**.")
+        takeaway_lines.append(
+            f"- **Labels:** Pearson **r** (AquaForge vessel probability vs binary label): **{float(v):.4f}**."
+        )
 
     takeaway_lines.extend(
         [
@@ -831,7 +830,7 @@ def _key_takeaways_and_summary_lines(
             f"- **Dataset:** {res.n_geometry_spots} geometry spot(s), "
             f"{res.n_labeled_points} binary-labeled point row(s), "
             f"{res.n_heading_gt} with heading GT.",
-            f"- **Ranking (Pearson):** {scored_txt}.",
+            f"- **Pearson r (labeled points):** {scored_txt}.",
             "",
         ]
     )
@@ -853,7 +852,7 @@ def _key_takeaways_and_summary_lines(
         f"| Geometry spots | {res.n_geometry_spots} |",
         f"| Binary labeled points | {res.n_labeled_points} |",
         f"| Heading GT rows | {res.n_heading_gt} |",
-        f"| Pearson ranking | {scored_txt} |",
+        f"| Pearson r (vs binary label) | {scored_txt} |",
         f"| % fused beats wake (AquaForge) | {fusion_cell} |",
         "",
         "_Wide tables scroll horizontally on narrow GitHub / mobile views._",
@@ -895,7 +894,7 @@ def format_demo_console_summary(
         f"Cap: {max_spots} geometry spot(s)",
         f"Geometry spots evaluated: {res.n_geometry_spots}",
         f"Binary labeled points: {res.n_labeled_points} | Heading GT rows: {res.n_heading_gt}",
-        "Pearson r (AquaForge rank score): "
+        "Pearson r (vessel probability vs binary label): "
         f"{fmt_eval_num(res.pearson_r, ndigits=4)}",
         "Heading MAE (deg): wake / keypoint / fused: "
         f"{fmt_eval_num(circular_mae_deg(aq.wake_line), ndigits=2)} / "
@@ -986,12 +985,12 @@ def _print_profile_rollups(pr: Any) -> None:
         tt = float(stat[2])
         file_tot[filename] = file_tot.get(filename, 0.0) + tt
     total_tt = sum(file_tot.values()) or 1e-9
-    ranked = sorted(file_tot.items(), key=lambda x: -x[1])[:30]
+    top_files = sorted(file_tot.items(), key=lambda x: -x[1])[:30]
     print(
         "--- Profile: by file (tottime % of total self-time across profiled code) ---",
         flush=True,
     )
-    for fn, t in ranked:
+    for fn, t in top_files:
         pct = 100.0 * t / total_tt
         disp = fn.replace("\\", "/")
         if len(disp) > 96:
@@ -1007,7 +1006,7 @@ def main_cli(argv: list[str] | None = None) -> int:
     import argparse
 
     ap = argparse.ArgumentParser(
-        description="Benchmark AquaForge ranking and spot metrics on labeled JSONL."
+        description="Benchmark AquaForge vessel probability and spot metrics on labeled JSONL."
     )
     ap.add_argument("--project-root", type=Path, default=Path.cwd())
     ap.add_argument(
@@ -1044,7 +1043,7 @@ def main_cli(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--tiled-recall",
         action="store_true",
-        help="Full-scene tiled AquaForge vs ranking labels (recall proxy within --tiled-recall-radius px)",
+        help="Full-scene tiled AquaForge vs binary point labels (recall proxy within --tiled-recall-radius px)",
     )
     ap.add_argument(
         "--tiled-recall-radius",
@@ -1080,7 +1079,7 @@ def main_cli(argv: list[str] | None = None) -> int:
                 continue
             print(f"Tiled recall: {jp} ...", flush=True)
             out_payload.append(
-                run_tiled_recall_vs_ranking_labels(
+                run_tiled_recall_vs_binary_labels(
                     root,
                     jp,
                     aquaforge_settings,

@@ -15,8 +15,8 @@ from aquaforge.unified.label_agreement import (
     evaluate_aquaforge_vs_binary_labels,
 )
 from aquaforge.unified.labeled_rows import (
-    collect_ranking_labeled_points,
-    collect_ranking_labeled_rows,
+    collect_review_labeled_points,
+    collect_review_labeled_rows,
 )
 
 
@@ -67,7 +67,7 @@ class TestCollectPoints(unittest.TestCase):
                 for r in rows:
                     f.write(json.dumps(r) + "\n")
             (Path(td) / "aquaforge").mkdir(exist_ok=True)
-            pts, sk = collect_ranking_labeled_points(p, Path(td))
+            pts, sk = collect_review_labeled_points(p, Path(td))
             self.assertEqual(sk, 0)
             self.assertEqual(len(pts), 2)
             self.assertEqual(pts[0].y, 1)
@@ -94,7 +94,7 @@ class TestCollectPoints(unittest.TestCase):
             with p.open("w", encoding="utf-8") as f:
                 f.write(json.dumps(row) + "\n")
             (Path(td) / "aquaforge").mkdir(exist_ok=True)
-            rows, sk = collect_ranking_labeled_rows(p, Path(td))
+            rows, sk = collect_review_labeled_rows(p, Path(td))
             self.assertEqual(sk, 0)
             self.assertEqual(len(rows), 1)
             self.assertTrue(rows[0].extra.get("wake_present"))

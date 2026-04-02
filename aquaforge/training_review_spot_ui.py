@@ -210,7 +210,7 @@ def render_training_spot_marker_editor(
         current_cy_full=float(cy),
         queue_auto_fullres=[],
         queue_manual_fullres=[],
-        ranked_extra_fullres=[],
+        off_batch_detector_centers_fullres=[],
         labeled_reviewed_fullres=labeled_review_fr,
     )
 

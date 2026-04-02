@@ -655,7 +655,7 @@ def annotate_locator_spot_outline(
     current_cy_full: float | None = None,
     queue_auto_fullres: list[tuple[float, float]] | None = None,
     queue_manual_fullres: list[tuple[float, float]] | None = None,
-    ranked_extra_fullres: list[tuple[float, float]] | None = None,
+    off_batch_detector_centers_fullres: list[tuple[float, float]] | None = None,
     labeled_reviewed_fullres: list[tuple[float, float]] | None = None,
     near_px: float = 4.0,
 ) -> np.ndarray:
@@ -695,7 +695,7 @@ def annotate_locator_spot_outline(
 
     qa = queue_auto_fullres or []
     qm = queue_manual_fullres or []
-    ex = ranked_extra_fullres or []
+    ex = off_batch_detector_centers_fullres or []
     lab_done = labeled_reviewed_fullres or []
     q_all = [*qa, *qm]
     cur = (

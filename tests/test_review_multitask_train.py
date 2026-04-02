@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from aquaforge.unified.labeled_rows import RankingLabeledRow
+from aquaforge.unified.labeled_rows import ReviewLabeledRow
 from aquaforge.review_multitask_train import (
     _binary_value,
     _float_value,
@@ -30,7 +30,7 @@ class TestTargetParsing(unittest.TestCase):
 
 class TestTrainSmoke(unittest.TestCase):
     @patch("aquaforge.review_multitask_train._stack_features")
-    @patch("aquaforge.review_multitask_train.collect_ranking_labeled_rows")
+    @patch("aquaforge.review_multitask_train.collect_review_labeled_rows")
     def test_saves_bundle(
         self,
         mock_collect: object,
@@ -39,7 +39,7 @@ class TestTrainSmoke(unittest.TestCase):
         rows = []
         for i in range(12):
             rows.append(
-                RankingLabeledRow(
+                ReviewLabeledRow(
                     Path("/fake/t.jp2"),
                     10.0 + i,
                     20.0,

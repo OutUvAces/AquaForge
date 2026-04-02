@@ -2,7 +2,7 @@
 Streamlit UI: pick a scene, refresh, review spots.
 
 **Left panel (starts closed):** **Scene** + **Refresh spot list** only at top; everything else under
-**Advanced** (retrain AquaForge, finding spots, download, ranking helpers, exports, duplicates, label fixer,
+**Advanced** (retrain AquaForge, finding spots, download, optional review-multitask helpers, exports, duplicates, label fixer,
 whole-scene map, optional heavy-inference consent).
 
 **Main:** large close-up, **On image** toggles (defaults: outline, direction, keypoints, wake on), optional readouts
@@ -491,7 +491,7 @@ def _render_catalog_panel() -> None:
                     st.error(str(e))
 
 
-def _ranking_models_expander(labels_path: Path) -> None:
+def _review_multitask_models_expander(labels_path: Path) -> None:
     """Optional sklearn heads on review ``extra`` fields; vessel listing is always AquaForge tiled."""
     with st.expander("Extra-field models (optional)", expanded=False):
         try:
@@ -528,7 +528,7 @@ def _ranking_models_expander(labels_path: Path) -> None:
                 ]
             )
 
-        last_rep = st.session_state.get("last_ranking_retrain_report")
+        last_rep = st.session_state.get("last_review_multitask_train_report")
         if last_rep and isinstance(last_rep, dict) and last_rep.get("markdown"):
             with st.container():
                 st.markdown("**Last train**")
@@ -537,7 +537,7 @@ def _ranking_models_expander(labels_path: Path) -> None:
         if st.button(
             "Train multi-task + check AquaForge vs labels",
             use_container_width=True,
-            key="retrain_rankers",
+            key="retrain_review_multitask_and_agreement",
             help="Refresh sklearn heads on extra fields; report AquaForge binary agreement on labeled points.",
         ):
             after_ag: dict | None = None
@@ -578,7 +578,7 @@ def _ranking_models_expander(labels_path: Path) -> None:
                     f"**{multitask_report.get('n_rows', '?')}** rows."
                 )
             full_md = "\n\n".join(md_parts)
-            st.session_state["last_ranking_retrain_report"] = {"markdown": full_md}
+            st.session_state["last_review_multitask_train_report"] = {"markdown": full_md}
             st.markdown(full_md)
 
 
@@ -1364,7 +1364,7 @@ def main() -> None:
             _sidebar_spot_finding_settings()
             with st.expander("Download satellite image", expanded=False):
                 _render_catalog_panel()
-            _ranking_models_expander(labels_path)
+            _review_multitask_models_expander(labels_path)
             _exports_and_analytics_expander(labels_path)
             render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
             if st.button(
@@ -1473,7 +1473,7 @@ def main() -> None:
                     tolerance_px=2.0,
                     project_root=ROOT,
                 )
-                st.session_state.detector_ranked_unlabeled_pool = list(cands)
+                st.session_state.detector_unlabeled_pool_all = list(cands)
                 cands = cands[:max_k]
                 st.session_state.detector_candidates = cands
                 st.session_state.meta = meta
@@ -2130,9 +2130,9 @@ def _render_review_deck(
         st.session_state[af_spot_state_k + "_sig"] = af_spot_sig
     af_spot = st.session_state.get(af_spot_state_k, {}) or {}
 
-    pool = st.session_state.get("detector_ranked_unlabeled_pool") or []
+    pool = st.session_state.get("detector_unlabeled_pool_all") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
-    ranked_extra: list[tuple[float, float]] = []
+    off_batch_centers: list[tuple[float, float]] = []
     for item in pool:
         if len(item) < 2:
             continue
@@ -2141,7 +2141,7 @@ def _render_review_deck(
             abs(px - qx) <= 4.0 and abs(py - qy) <= 4.0 for qx, qy in qset
         ):
             continue
-        ranked_extra.append((px, py))
+        off_batch_centers.append((px, py))
 
     def _is_cur(x: float, y: float) -> bool:
         return abs(x - cx) <= 3.0 and abs(y - cy) <= 3.0
@@ -2175,7 +2175,7 @@ def _render_review_deck(
         current_cy_full=float(cy),
         queue_auto_fullres=queue_auto_fr,
         queue_manual_fullres=queue_manual_fr,
-        ranked_extra_fullres=ranked_extra,
+        off_batch_detector_centers_fullres=off_batch_centers,
         labeled_reviewed_fullres=labeled_review_fr,
     )
 

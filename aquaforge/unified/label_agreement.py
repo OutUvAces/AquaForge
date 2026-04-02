@@ -17,7 +17,7 @@ from aquaforge.unified.inference import aquaforge_confidence_only
 from aquaforge.unified.labeled_rows import (
     DEFAULT_MODEL_SIDE,
     DEFAULT_SRC_HALF,
-    collect_ranking_labeled_points,
+    collect_review_labeled_points,
 )
 
 
@@ -72,7 +72,7 @@ def evaluate_aquaforge_vs_binary_labels(
     if not root.joinpath("aquaforge").is_dir():
         root = jsonl_path.resolve().parents[2]
 
-    points, n_skipped_collect = collect_ranking_labeled_points(
+    points, n_skipped_collect = collect_review_labeled_points(
         jsonl_path,
         root,
         model_side=model_side,

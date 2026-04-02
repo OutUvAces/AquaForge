@@ -10,7 +10,7 @@ of curriculum weights from detached per-task losses (our stabiliser, not third-p
 **Review → train loop** — Save labels in Streamlit; exported JSONL rows carry ``al_priority`` (uncertain
 scores, small-ship cues, clouds, manual map picks, optional ``af_training_priority`` in ``extra``).
 :class:`torch.utils.data.WeightedRandomSampler` (unless ``--no-priority-sampling``) oversamples those
-chips. Each epoch, ``hydrate_teacher_signals`` ranks the same priorities and runs an **AquaForge**
+chips. Each epoch, ``hydrate_teacher_signals`` walks the same priority queue and runs an **AquaForge**
 teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation. **Self-training**:
 ``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
 want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).

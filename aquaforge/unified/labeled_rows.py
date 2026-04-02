@@ -13,19 +13,19 @@ from typing import Any
 
 from aquaforge.labels import iter_reviews, resolve_stored_asset_path
 from aquaforge.training_data import (
-    RANKING_CHIP_MODEL_SIDE,
-    RANKING_CHIP_SRC_HALF,
+    REVIEW_CHIP_MODEL_SIDE,
+    REVIEW_CHIP_SRC_HALF,
     _binary_training_label,
     extract_crop_features,
     read_chip_square_rgb,
 )
 
-DEFAULT_MODEL_SIDE = RANKING_CHIP_MODEL_SIDE
-DEFAULT_SRC_HALF = RANKING_CHIP_SRC_HALF
+DEFAULT_MODEL_SIDE = REVIEW_CHIP_MODEL_SIDE
+DEFAULT_SRC_HALF = REVIEW_CHIP_SRC_HALF
 
 
 @dataclass(frozen=True)
-class RankingLabeledPoint:
+class ReviewLabeledPoint:
     """One supervised point used for training / evaluation."""
 
     tci_path: Path
@@ -35,7 +35,7 @@ class RankingLabeledPoint:
 
 
 @dataclass
-class RankingLabeledRow:
+class ReviewLabeledRow:
     """Point label plus ``extra`` from JSONL (manual fields for multi-task training)."""
 
     tci_path: Path
@@ -44,8 +44,8 @@ class RankingLabeledRow:
     y: int
     extra: dict[str, Any]
 
-    def as_point(self) -> RankingLabeledPoint:
-        return RankingLabeledPoint(
+    def as_point(self) -> ReviewLabeledPoint:
+        return ReviewLabeledPoint(
             tci_path=self.tci_path,
             cx=self.cx,
             cy=self.cy,
@@ -53,13 +53,13 @@ class RankingLabeledRow:
         )
 
 
-def collect_ranking_labeled_rows(
+def collect_review_labeled_rows(
     jsonl_path: Path,
     project_root: Path | None = None,
     *,
     model_side: int = DEFAULT_MODEL_SIDE,
     src_half: int = DEFAULT_SRC_HALF,
-) -> tuple[list[RankingLabeledRow], int]:
+) -> tuple[list[ReviewLabeledRow], int]:
     """
     Load labeled rows with ``extra`` preserved. Skips rows without TCI or unreadable crops.
     """
@@ -67,7 +67,7 @@ def collect_ranking_labeled_rows(
     if not root.joinpath("aquaforge").is_dir():
         root = jsonl_path.resolve().parents[2]
 
-    out: list[RankingLabeledRow] = []
+    out: list[ReviewLabeledRow] = []
     n_skip = 0
     for rec in iter_reviews(jsonl_path):
         y = _binary_training_label(rec)
@@ -92,7 +92,7 @@ def collect_ranking_labeled_rows(
         ex = rec.get("extra")
         extra_copy = dict(ex) if isinstance(ex, dict) else {}
         out.append(
-            RankingLabeledRow(
+            ReviewLabeledRow(
                 tci_path=path,
                 cx=cx,
                 cy=cy,
@@ -103,14 +103,14 @@ def collect_ranking_labeled_rows(
     return out, n_skip
 
 
-def collect_ranking_labeled_points(
+def collect_review_labeled_points(
     jsonl_path: Path,
     project_root: Path | None = None,
     *,
     model_side: int = DEFAULT_MODEL_SIDE,
     src_half: int = DEFAULT_SRC_HALF,
-) -> tuple[list[RankingLabeledPoint], int]:
-    rows, n_skip = collect_ranking_labeled_rows(
+) -> tuple[list[ReviewLabeledPoint], int]:
+    rows, n_skip = collect_review_labeled_rows(
         jsonl_path,
         project_root,
         model_side=model_side,

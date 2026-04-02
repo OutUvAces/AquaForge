@@ -25,7 +25,7 @@ Real runs append full metric tables after the `---` rule. End-to-end detection i
 | Geometry spots | 120 |
 | Binary labeled points | 200 |
 | Heading GT rows | 95 |
-| Pearson ranking | AquaForge |
+| Pearson r (vs binary label) | AquaForge |
 | % fused beats wake (AquaForge) | 32.0% (n=50) |
 
 _Wide tables scroll horizontally on narrow GitHub / mobile views._
@@ -34,4 +34,4 @@ _Wide tables scroll horizontally on narrow GitHub / mobile views._
 
 ## AquaForge — detection evaluation
 
-*(Full ranking, heading, fusion-benefit, measurement, and IoU tables follow in actual output.)*
+*(Full Pearson/heading, fusion-benefit, measurement, and IoU tables follow in actual output.)*
