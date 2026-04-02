@@ -1,11 +1,11 @@
 """
-Compatibility for ``streamlit-drawable-canvas`` with Streamlit >= 1.41.
+Drawable-canvas support for Streamlit >= 1.41.
 
 That package calls ``streamlit.elements.image.image_to_url(...)``; Streamlit moved
 the implementation to ``streamlit.elements.lib.image_utils`` and now passes a
 ``LayoutConfig`` instead of a bare pixel width.
 
-Call :func:`apply_streamlit_drawable_canvas_compat` once before importing ``st_canvas``.
+Call :func:`apply_streamlit_drawable_canvas_patch` once before importing ``st_canvas``.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from __future__ import annotations
 _applied = False
 
 
-def apply_streamlit_drawable_canvas_compat() -> None:
-    """Patch ``streamlit.elements.image`` with a legacy ``image_to_url`` shim. Idempotent."""
+def apply_streamlit_drawable_canvas_patch() -> None:
+    """Patch ``streamlit.elements.image`` for drawable-canvas ``image_to_url``. Idempotent."""
     global _applied
     if _applied:
         return

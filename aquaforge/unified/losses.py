@@ -839,10 +839,6 @@ def aquaforge_self_training_loss(
     return total, logs
 
 
-# Backward-compatible name for tests / callers.
-heading_sin_cos_loss = heading_combined_circular_loss
-
-
 def stage_weights_for_epoch(epoch: int, stage_schedule: list[tuple[int, dict[str, float]]]) -> dict[str, float]:
     """Piecewise constant stage multipliers (epoch start inclusive)."""
     active: dict[str, float] = {}

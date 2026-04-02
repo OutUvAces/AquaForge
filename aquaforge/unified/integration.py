@@ -1,7 +1,7 @@
 """
 Map AquaForge chip inference into a single spot-overlay dict for the review UI and evaluation.
 
-All keys use an ``aquaforge_`` prefix — no legacy detector or YOLO field names.
+All keys use an ``aquaforge_`` prefix for detector outputs (single AquaForge pipeline).
 Heading fusion prefers the direct regression head when confident, else geodesic bow→stern from
 landmarks 0/1. Wake auxiliary is a segment hint from the model (no separate wake ONNX).
 """

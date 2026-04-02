@@ -269,7 +269,7 @@ def append_vessel_size_feedback(
     ``estimated_length_m`` is the **longer** ground edge of the rotated footprint;
     ``estimated_width_m`` the **shorter** edge (same convention as the review UI).
 
-    Optional **dimension_markers** are spot-crop pixel points (bow/stern/side/bridge; legacy port/starboard/wake point)
+    Optional **dimension_markers** are spot-crop pixel points (bow/stern/side/bridge; also port/starboard/wake point)
     with derived **graphic_*** and **heading_*** fields when computed in the UI.
 
     **transhipment_side_by_side** marks two vessels in one detection (STS / alongside).

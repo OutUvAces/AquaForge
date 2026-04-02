@@ -40,8 +40,7 @@ def extract_crop_features(
 def marker_role_bits_from_extra(extra: dict[str, Any] | None) -> np.ndarray:
     """
     Length matches :data:`vessel_markers.MARKER_ROLES`: ``1.0`` if that role appears in
-    ``extra["dimension_markers"]``. Legacy **port** /
-    **starboard** points set the **side** bit.
+    ``extra["dimension_markers"]``. **port** / **starboard** points set the **side** bit.
 
     Use with :func:`extract_crop_features` for future supervision (e.g. hull / length regression).
     The baseline ship classifier uses radiometry only; this stays available for multi-task training.

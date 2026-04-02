@@ -25,14 +25,14 @@ class TestBinaryLabel(unittest.TestCase):
         for c in ("not_vessel", "cloud", "land"):
             self.assertEqual(_binary_training_label({"review_category": c}), 0)
 
-    def test_legacy_sun_glint_row_negative(self) -> None:
-        """Older JSONL may still contain removed category ``sun_glint``."""
+    def test_sun_glint_row_negative(self) -> None:
+        """Removed category ``sun_glint`` maps to negative training label."""
         self.assertEqual(_binary_training_label({"review_category": "sun_glint"}), 0)
 
     def test_ambiguous_skipped(self) -> None:
         self.assertIsNone(_binary_training_label({"review_category": "ambiguous"}))
 
-    def test_legacy_is_vessel(self) -> None:
+    def test_is_vessel_field(self) -> None:
         self.assertEqual(_binary_training_label({"is_vessel": True}), 1)
         self.assertEqual(_binary_training_label({"is_vessel": False}), 0)
 
@@ -157,7 +157,7 @@ class TestMarkerRoleBits(unittest.TestCase):
         self.assertEqual(b[0], 1.0)
         self.assertEqual(b[1], 1.0)
 
-    def test_legacy_port_starboard_sets_side_bit(self) -> None:
+    def test_port_starboard_sets_side_bit(self) -> None:
         b = marker_role_bits_from_extra(
             {
                 "dimension_markers": [

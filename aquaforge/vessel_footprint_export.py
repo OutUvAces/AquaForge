@@ -32,7 +32,7 @@ def save_vessel_footprint_png(
     """
     Write one PNG: contrast-stretched spot crop, red footprint, dimension callouts.
 
-    Prefers ``dimension_markers`` (min-area box), then legacy ``manual_quad_crop``; otherwise PCA.
+    Prefers ``dimension_markers`` (min-area box), then ``manual_quad_crop`` from extra; otherwise PCA.
 
     Returns ``(ok, message)`` — ``ok`` False if TCI missing or outline could not be drawn.
     """
@@ -100,7 +100,7 @@ def save_vessel_footprint_png(
     ax.set_axis_off()
     src_txt = {
         "markers": "Dimension markers (min-area box)",
-        "manual": "Manual outline (legacy JSONL)",
+        "manual": "Manual outline (stored quad)",
         "pca": "Auto PCA bright blob",
     }.get(source, source)
     cap = (

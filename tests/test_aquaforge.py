@@ -138,12 +138,12 @@ class TestAquaForgeLosses(unittest.TestCase):
             import torch
         except ImportError:
             self.skipTest("torch not installed")
-        from aquaforge.unified.losses import heading_sin_cos_loss
+        from aquaforge.unified.losses import heading_combined_circular_loss
 
         pred = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
         gt = torch.tensor([0.0], dtype=torch.float32)
         valid = torch.tensor([1.0], dtype=torch.float32)
-        loss = heading_sin_cos_loss(pred, gt, valid)
+        loss = heading_combined_circular_loss(pred, gt, valid)
         self.assertTrue(torch.isfinite(loss))
         self.assertGreaterEqual(float(loss), 0.0)
 

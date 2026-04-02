@@ -73,11 +73,6 @@ def find_scl_for_tci(tci_path: str | Path) -> Path | None:
     return None
 
 
-def guess_scl_path_for_tci(tci_path: str | Path) -> Path | None:
-    """Backwards-compatible alias for :func:`find_scl_for_tci`."""
-    return find_scl_for_tci(tci_path)
-
-
 def downsample_scl(scl_path: str | Path, height: int, width: int) -> np.ndarray:
     """Read SCL resampled to (height, width) with nearest neighbor (preserve class IDs)."""
     import rasterio
@@ -158,6 +153,6 @@ def ocean_clear_mask(
 
 
 def heuristic_water_mask(gray: np.ndarray) -> np.ndarray:
-    """Fallback when SCL is missing: median intensity (legacy)."""
+    """Fallback when SCL is missing: median-intensity water guess."""
     med = float(np.median(gray))
     return gray < med * 1.05

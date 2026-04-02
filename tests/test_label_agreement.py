@@ -1,4 +1,4 @@
-"""AquaForge vs binary labels; labeled row collection (no legacy CV / spectral ranking path)."""
+"""AquaForge vs binary labels; labeled row collection."""
 
 from __future__ import annotations
 

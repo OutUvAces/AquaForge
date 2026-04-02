@@ -15,13 +15,13 @@ teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation.
 ``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
 want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).
 
-YOLO11/12 backbone path: ``--architecture yolo_unified``, ``--freeze-backbone-epochs``.
+Ultralytics backbone: ``--architecture yolo_unified`` (vendor graph for backbone+neck only), ``--freeze-backbone-epochs``.
 
-Requires: pip install -r requirements-ml.txt (``ultralytics`` for YOLO-unified).
+Requires: pip install -r requirements-ml.txt (``ultralytics`` for ``yolo_unified``).
 
 Examples:
   py -3 scripts/train_aquaforge.py --project-root . --epochs 12 --batch-size 4
-  py -3 scripts/train_aquaforge.py --architecture yolo_unified --yolo-weights yolo11n.pt \\
+  py -3 scripts/train_aquaforge.py --architecture yolo_unified --ultralytics-weights yolo11n.pt \\
       --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
   py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
       --no-dynamic-balance
@@ -58,7 +58,12 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--lr-backbone", type=float, default=None, help="LR for YOLO inner (default: lr/4).")
+    ap.add_argument(
+        "--lr-backbone",
+        type=float,
+        default=None,
+        help="LR for embedded Ultralytics graph when using yolo_unified (default: lr/4).",
+    )
     ap.add_argument("--imgsz", type=int, default=512)
     ap.add_argument("--chip-half", type=int, default=320)
     ap.add_argument(
@@ -66,19 +71,19 @@ def main() -> None:
         type=str,
         default="cnn",
         choices=("cnn", "yolo_unified"),
-        help="cnn = in-repo encoder; yolo_unified = Ultralytics YOLO11/12 backbone+neck + our heads.",
+        help="cnn = in-repo encoder; yolo_unified = Ultralytics backbone+neck + AquaForge heads.",
     )
     ap.add_argument(
-        "--yolo-weights",
+        "--ultralytics-weights",
         type=str,
         default="yolo11n.pt",
-        help="Ultralytics checkpoint for yolo_unified (download or local path).",
+        help="Ultralytics .pt used to build the inner graph when model_arch is yolo_unified.",
     )
     ap.add_argument(
         "--freeze-backbone-epochs",
         type=int,
         default=0,
-        help="For yolo_unified: freeze inner YOLO (ultra) for this many epochs; then train end-to-end.",
+        help="For yolo_unified: freeze embedded Ultralytics graph for this many epochs; then train e2e.",
     )
     ap.add_argument(
         "--output",
@@ -87,10 +92,10 @@ def main() -> None:
         help="Checkpoint path (default: data/models/aquaforge/aquaforge.pt)",
     )
     ap.add_argument(
-        "--yolo-encoder",
+        "--ultralytics-seed-encoder",
         type=Path,
         default=None,
-        help="cnn only: optional yolo11*-seg.pt to partially copy early conv weights into our trunk.",
+        help="cnn only: optional Ultralytics .pt to seed early conv weights into the CNN trunk.",
     )
     ap.add_argument(
         "--no-dynamic-balance",
@@ -191,7 +196,7 @@ def main() -> None:
     from aquaforge.unified.model import (
         AquaForgeMultiTask,
         build_model,
-        load_partial_yolo_encoder,
+        seed_cnn_encoder_from_ultralytics,
         set_ultra_requires_grad,
     )
     from aquaforge.labels import default_labels_path
@@ -281,19 +286,19 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     arch = str(args.architecture).strip().lower()
-    yolo_w = Path(args.yolo_weights)
+    ultra_ckpt = Path(args.ultralytics_weights)
     if arch == "yolo_unified":
         model = build_model(
             imgsz=int(args.imgsz),
             n_landmarks=NUM_LANDMARKS,
             model_arch="yolo_unified",
-            yolo_weights=yolo_w if yolo_w.is_file() else args.yolo_weights,
+            ultralytics_checkpoint=ultra_ckpt if ultra_ckpt.is_file() else args.ultralytics_weights,
         ).to(device)
     else:
         model = AquaForgeMultiTask(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS).to(device)
-        if args.yolo_encoder and Path(args.yolo_encoder).is_file():
-            n = load_partial_yolo_encoder(model, Path(args.yolo_encoder))
-            print(f"Partial YOLO encoder copy: {n} tensor(s) matched", flush=True)
+        if args.ultralytics_seed_encoder and Path(args.ultralytics_seed_encoder).is_file():
+            n = seed_cnn_encoder_from_ultralytics(model, Path(args.ultralytics_seed_encoder))
+            print(f"Ultralytics→CNN encoder seed: {n} tensor(s) matched", flush=True)
 
     lr_head = float(args.lr)
     lr_bb = float(args.lr_backbone) if args.lr_backbone is not None else lr_head * 0.25
@@ -450,8 +455,8 @@ def main() -> None:
         },
     }
     if arch == "yolo_unified":
-        ypath = yolo_w.resolve() if yolo_w.is_file() else str(args.yolo_weights)
-        meta["yolo_init_path"] = str(ypath)
+        upath = ultra_ckpt.resolve() if ultra_ckpt.is_file() else str(args.ultralytics_weights)
+        meta["ultralytics_init_path"] = str(upath)
 
     # Write via a Python file object: PyTorchFileWriter(path) in C++ often fails on Windows with
     # error 123 (ERROR_INVALID_NAME) for paths under OneDrive, spaces, or mixed separators; the

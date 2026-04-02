@@ -318,7 +318,7 @@ def spot_window_for_eval(
     cx: float,
     cy: float,
 ) -> tuple[int, int, Path | None]:
-    """Legacy window hint for spot eval layout; AquaForge crop coords use the model chip."""
+    """Spot crop origin (full-image px) for eval layout; chip size follows AquaForge settings."""
     from aquaforge.raster_gsd import chip_pixels_for_ground_side_meters
 
     spot_px, _, _, _ = chip_pixels_for_ground_side_meters(
@@ -335,7 +335,7 @@ def spot_window_for_eval(
     return int(sc0), int(sr0), tci_path
 
 
-def rank_score_at_point(
+def aquaforge_confidence_at_point(
     project_root: Path,
     tci_path: Path,
     cx: float,
@@ -345,8 +345,8 @@ def rank_score_at_point(
     settings: AquaForgeSettings,
 ) -> dict[str, Any]:
     """
-    Single-candidate scores for benchmarks: ``aquaforge_confidence`` is vessel probability (0–1).
-    ``clf`` / ``chip_bundle`` are unused (reserved for callers).
+    AquaForge vessel probability at one full-image pixel (benchmarks / Pearson vs binary labels).
+    ``clf`` / ``chip_bundle`` are unused; pass ``None``.
     """
     _ = clf, chip_bundle
     from aquaforge.unified.inference import aquaforge_confidence_only
@@ -540,7 +540,7 @@ def run_detection_evaluation(
     max_spots: int | None = None,
 ) -> EvalRunResult:
     """
-    Ranking Pearson r (AquaForge fused rank score vs binary labels) and geometry / heading
+    Pearson r between AquaForge vessel probability and binary labels, plus geometry / heading
     metrics from AquaForge spot inference.
     """
     notes: list[str] = []
@@ -553,7 +553,7 @@ def run_detection_evaluation(
     pearson_rs: list[float] = []
     pearson_ys: list[float] = []
     for row in rows:
-        ss = rank_score_at_point(
+        ss = aquaforge_confidence_at_point(
             project_root,
             row.tci_path,
             row.cx,

@@ -19,15 +19,15 @@ from aquaforge.pixels import distance_meters
 # ``end``: two hull endpoints when bow vs stern is unknown (keel length + ambiguous heading ±180°).
 MARKER_ROLES: tuple[str, ...] = ("bow", "stern", "end", "side", "bridge")
 
-# Legacy JSONL may still list port / starboard / wake as point roles.
-MARKER_ROLES_LEGACY_POINT: frozenset[str] = frozenset(
+# Stored labels may use port / starboard / wake as point roles (same geometry as side / image wake flag).
+MARKER_ROLES_EXTENDED_STORAGE: frozenset[str] = frozenset(
     {"port", "starboard", "wake"}
 )
 
-# Roles treated as “beam” samples: at most two kept (newest) per hull for ``side``; legacy port+starboard pair.
+# Roles treated as “beam” samples: at most two kept (newest) per hull for ``side``; port+starboard pair.
 SIDE_LIKE_ROLES: frozenset[str] = frozenset({"side", "port", "starboard"})
 
-# Wake point markers (legacy) — not for hull extent; image-level wake uses ``wake_present`` in review extra.
+# Wake point markers — not for hull extent; image-level wake uses ``wake_present`` in review extra.
 MARKER_ROLES_EXCLUDED_FROM_HULL_EXTENT: frozenset[str] = frozenset({"wake"})
 
 
@@ -55,8 +55,8 @@ def paired_side_marker_dicts(
     hull_index: int,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """
-    Two beam-edge points for the keel-aligned quad: last two ``side`` markers, or legacy port+starboard.
-    Does not mix a single ``side`` with one legacy side.
+    Two beam-edge points for the keel-aligned quad: last two ``side`` markers, or port+starboard.
+    Does not mix a single ``side`` with one port/starboard-only point.
     """
     sub = markers_for_hull(markers, hull_index)
     sides_only = [m for m in sub if m.get("role") == "side"]
@@ -194,7 +194,7 @@ def quad_crop_from_dimension_markers(
     """
     Hull quadrilateral in spot-crop pixels.
 
-    When **bow**, **stern**, and **two side** points are set (or legacy port + starboard), builds the
+    When **bow**, **stern**, and **two side** points are set (or port + starboard), builds the
     **keel-aligned** rectangle whose four edges pass through those points — see
     :func:`quad_edges_through_bow_stern_port_starboard`.
 
@@ -331,7 +331,7 @@ def markers_by_role(
     """Last marker wins for each role (within ``hull_index``). ``side`` is omitted (two points via :func:`paired_side_marker_dicts`)."""
     out: dict[str, dict[str, Any]] = {}
     hi = int(hull_index)
-    _by_r_roles = frozenset(MARKER_ROLES) | MARKER_ROLES_LEGACY_POINT
+    _by_r_roles = frozenset(MARKER_ROLES) | MARKER_ROLES_EXTENDED_STORAGE
     for m in markers:
         if marker_hull_index(m) != hi:
             continue
@@ -401,12 +401,12 @@ def metrics_from_markers(
     """
     Derive length (m), width (m), heading (° from north), and notes from placed markers.
 
-    **Heading priority:** (1) bow + stern → bearing stern→bow; (2) legacy **wake point** + stern → astern + 180°;
+    **Heading priority:** (1) bow + stern → bearing stern→bow; (2) **wake point** + stern → astern + 180°;
     (3) bridge + bow → bearing bridge→bow (forward for many tankers with aft bridge).
 
     **Length:** bow–stern distance when both present.
 
-    **Width:** chord between two **side** markers, or legacy port–starboard.
+    **Width:** chord between two **side** markers, or port–starboard.
 
     ``wake_present`` (UI checkbox) is recorded in ``notes`` for training; it does not imply a geometry by itself.
 

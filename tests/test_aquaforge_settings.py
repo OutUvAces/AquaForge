@@ -22,16 +22,15 @@ class TestAquaForgeSettings(unittest.TestCase):
             self.assertEqual(s.aquaforge.chip_batch_size, 6)
             self.assertEqual(s.onnx_runtime.graph_optimization_level, "all")
 
-    def test_yaml_ignores_legacy_top_level_reads_aquaforge(self) -> None:
-        """Historical ``backend`` / ``yolo`` keys are ignored; ``aquaforge`` still parses."""
+    def test_yaml_ignores_unknown_top_level_reads_aquaforge(self) -> None:
+        """Unknown top-level keys are ignored; ``aquaforge:`` still parses."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cfg = root / "data" / "config"
             cfg.mkdir(parents=True)
             (cfg / "detection.yaml").write_text(
-                "backend: yolo_fusion\n"
-                "force_legacy: true\n"
-                "yolo:\n  chip_half: 256\n"
+                "obsolete_backend: fusion_stub\n"
+                "obsolete_nested:\n  chip_half: 256\n"
                 "aquaforge:\n  chip_half: 288\n  conf_threshold: 0.22\n",
                 encoding="utf-8",
             )
@@ -39,15 +38,15 @@ class TestAquaForgeSettings(unittest.TestCase):
             self.assertEqual(s.aquaforge.chip_half, 288)
             self.assertAlmostEqual(s.aquaforge.conf_threshold, 0.22)
 
-    def test_yaml_ignores_removed_gate_keys(self) -> None:
-        """Legacy probability-gate YAML keys are not loaded into settings."""
+    def test_yaml_ignores_unknown_gate_like_keys(self) -> None:
+        """Stale probability-gate-style YAML keys are not loaded into settings."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             cfg = root / "data" / "config"
             cfg.mkdir(parents=True)
             (cfg / "detection.yaml").write_text(
                 "min_vessel_proba_for_full_decode: 0.33\n"
-                "sota_min_hybrid_proba_for_expensive: 0.44\n",
+                "obsolete_expensive_decode_threshold: 0.44\n",
                 encoding="utf-8",
             )
             s = load_aquaforge_settings(root)

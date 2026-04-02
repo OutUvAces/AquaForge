@@ -29,7 +29,7 @@ _MAX_NATIVE_FULL_TILE_PX = 35_000_000
 def load_image_rgba_raster_preview(
     path: str | Path, max_dim: int = 2400
 ) -> tuple[np.ndarray, int, int, int, int]:
-    """Legacy: downsampled read (JPEG/PNG or forced preview)."""
+    """Downsampled read for JPEG/PNG/WebP or preview-sized rasters."""
     path = Path(path)
     suffix = path.suffix.lower()
 

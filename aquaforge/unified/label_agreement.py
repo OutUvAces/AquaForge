@@ -1,7 +1,7 @@
 """
 Compare AquaForge chip confidence to binary human labels (diagnostics only).
 
-Spectral logistic CV and legacy fusion scorers were removed — AquaForge is the only detector.
+AquaForge chip confidence is the only detector signal used here.
 """
 
 from __future__ import annotations
@@ -64,8 +64,8 @@ def evaluate_aquaforge_vs_binary_labels(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """
-    Score AquaForge P(vessel) at each labeled point vs binary label. Ignores legacy kwargs
-    (``lr_model_path``, ``chip_mlp_path``, ``mode``, ``w_lr``, ``w_mlp``, etc.).
+    Score AquaForge P(vessel) at each labeled point vs binary label. Extra kwargs are ignored
+    (e.g. ``lr_model_path``, ``chip_mlp_path``, ``mode``, ``w_lr``, ``w_mlp``).
     """
     _ = kwargs
     root = project_root or jsonl_path.resolve().parent.parent.parent

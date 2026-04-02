@@ -14,8 +14,8 @@ import numpy as np
 
 from aquaforge.locator_coords import LetterboxSquareMeta
 
-# Legacy ratio spot:locator ≈ 1:10 when locator side was derived as spot_px × this factor.
-# The web UI now sets locator extent via a separate 10 km ground target (see web_ui.REVIEW_LOCATOR_TARGET_SIDE_M).
+# Spot vs locator scale when locator side was spot_px × this factor (≈1:10). The UI also uses a
+# fixed 10 km ground target for the locator (see web_ui.REVIEW_LOCATOR_TARGET_SIDE_M).
 LOCATOR_CHIP_SCALE = 10
 
 # Ground limit for the red outline (longest edge of the rotated rectangle), meters.

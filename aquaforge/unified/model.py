@@ -1,10 +1,13 @@
 """
 AquaForge unified multi-task models.
 
+Naming: only ``model_arch == "yolo_unified"`` retains a ``yolo_*`` token (Ultralytics vendor graph);
+checkpoint paths and helpers use ``ultralytics_*`` / :class:`AquaForgeUltralyticsBackbone`.
+
 We provide two architectures (checkpoint ``meta["model_arch"]`` selects at load time):
 
 1. **cnn** — ``AquaForgeMultiTask``: lightweight in-repo CNN (default for CPU-only dev, no Ultralytics).
-2. **yolo_unified** — ``AquaForgeUnifiedYOLO``: YOLO11/12 **backbone+neck** tensors taken *just before*
+2. **yolo_unified** — ``AquaForgeUltralyticsBackbone``: Ultralytics YOLO11/12 **backbone+neck** tensors taken *just before*
    the vendor detection head, passed through our **delta-neck** mixer: aligned scales are concatenated
    with **cross-scale difference maps** (coarser−fine), then depthwise-refined — not a softmax gate or
    classic FPN top-down sum. **custom** heads: hull mask, landmark heatmaps, global keypoint readout,
@@ -24,8 +27,8 @@ import torch.nn.functional as F
 
 from aquaforge.unified.constants import NUM_LANDMARKS
 
-# Ultralytics module.type strings seen before the final detection / segmentation head.
-_YOLO_HEAD_TYPES: frozenset[str] = frozenset(
+# Ultralytics ``module.type`` strings for heads we stop before (vendor detect/segment/pose, etc.).
+_ULTRALYTICS_VENDOR_HEAD_TYPES: frozenset[str] = frozenset(
     {
         "Detect",
         "Segment",
@@ -38,14 +41,14 @@ _YOLO_HEAD_TYPES: frozenset[str] = frozenset(
 )
 
 
-def forward_yolo_to_detect_inputs(
+def forward_ultralytics_inner_to_feature_list(
     inner: Any,
     x: torch.Tensor,
 ) -> list[torch.Tensor]:
     """
-    Run the internal YOLO graph (``yolo.model``) up to — but not including — Detect/Segment/etc.
+    Run the embedded Ultralytics graph (``inner.model``) up to — but not including — vendor heads.
 
-    Returns the list of feature tensors that would be passed into that head (typically 3 scales).
+    Returns feature tensors that would feed Detect/Segment/etc. (typically 3 scales).
     Mirrors Ultralytics ``BaseModel._predict_once`` routing (``m.f``, ``save``, ``m.i``).
     """
     y: list[Any] = []
@@ -54,7 +57,7 @@ def forward_yolo_to_detect_inputs(
         if m.f != -1:
             x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
         mt = getattr(m, "type", "") or type(m).__name__
-        if mt in _YOLO_HEAD_TYPES:
+        if mt in _ULTRALYTICS_VENDOR_HEAD_TYPES:
             if isinstance(m.f, int):
                 return [y[m.f]]
             return [y[j] for j in m.f]
@@ -72,7 +75,7 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
         return [fs[0], fs[1], fs[1]]
     if len(fs) == 1:
         return [fs[0], fs[0], fs[0]]
-    raise RuntimeError("AquaForge YOLO backbone produced no 4D feature maps")
+    raise RuntimeError("AquaForge Ultralytics backbone produced no 4D feature maps")
 
 
 # --- AquaForge **delta-neck** (YOLO neck → our tensor) ---
@@ -193,12 +196,13 @@ class _DeltaNeckMixer(nn.Module):
         return self.seq(x)
 
 
-class AquaForgeUnifiedYOLO(nn.Module):
+class AquaForgeUltralyticsBackbone(nn.Module):
     """
-    YOLO backbone + neck → our fused feature map → seg (upsampled), KP heatmaps, global KP/heading/wake.
+    Ultralytics backbone + neck → AquaForge delta-neck → seg, KP heatmaps, global KP/heading/wake.
 
-    ``yolo_weights`` is any Ultralytics ``.pt`` (e.g. ``yolo11n.pt``, ``yolo11s-seg.pt``) used to build
-    the inner ``nn.Module`` graph; weights are then trained jointly (or frozen for a warmup).
+    ``ultralytics_checkpoint`` is any Ultralytics ``.pt`` (e.g. ``yolo11n.pt``) used to build
+    the inner ``nn.Module`` graph; AquaForge heads are trained jointly (or the inner graph is frozen
+    for a warmup epoch range).
     """
 
     def __init__(
@@ -206,7 +210,7 @@ class AquaForgeUnifiedYOLO(nn.Module):
         imgsz: int = 640,
         n_landmarks: int = NUM_LANDMARKS,
         *,
-        yolo_weights: str | Path,
+        ultralytics_checkpoint: str | Path,
         hidden: int = 256,
     ) -> None:
         super().__init__()
@@ -214,22 +218,22 @@ class AquaForgeUnifiedYOLO(nn.Module):
             from ultralytics import YOLO
         except ImportError as e:
             raise ImportError(
-                "AquaForgeUnifiedYOLO requires ultralytics (pip install -r requirements-ml.txt)"
+                "AquaForgeUltralyticsBackbone requires ultralytics (pip install -r requirements-ml.txt)"
             ) from e
 
         self.model_arch = "yolo_unified"
         self.imgsz = int(imgsz)
         self.n_landmarks = int(n_landmarks)
         self.hidden = int(hidden)
-        self.yolo_init_path = str(yolo_weights)
+        self.ultralytics_init_path = str(ultralytics_checkpoint)
 
-        y = YOLO(str(yolo_weights))
+        y = YOLO(str(ultralytics_checkpoint))
         self.ultra = y.model
         self.ultra.eval()
 
         with torch.no_grad():
             dummy = torch.zeros(1, 3, self.imgsz, self.imgsz)
-            feats = _take_last_three_scales(forward_yolo_to_detect_inputs(self.ultra, dummy))
+            feats = _take_last_three_scales(forward_ultralytics_inner_to_feature_list(self.ultra, dummy))
             dims = [int(f.shape[1]) for f in feats]
 
         self.neck_proj = nn.ModuleList(
@@ -255,7 +259,7 @@ class AquaForgeUnifiedYOLO(nn.Module):
         self.wake_head = nn.Linear(self.hidden, 2)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        feats = _take_last_three_scales(forward_yolo_to_detect_inputs(self.ultra, x))
+        feats = _take_last_three_scales(forward_ultralytics_inner_to_feature_list(self.ultra, x))
         p3, p4, p5 = [self.neck_proj[i](feats[i]) for i in range(3)]
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
@@ -283,13 +287,17 @@ def build_model(
     n_landmarks: int = NUM_LANDMARKS,
     *,
     model_arch: str = "cnn",
-    yolo_weights: str | Path | None = None,
+    ultralytics_checkpoint: str | Path | None = None,
 ) -> nn.Module:
     arch = str(model_arch).strip().lower()
     if arch == "yolo_unified":
-        if not yolo_weights:
-            raise ValueError("yolo_unified requires yolo_weights= path to a .pt checkpoint")
-        return AquaForgeUnifiedYOLO(imgsz=imgsz, n_landmarks=n_landmarks, yolo_weights=yolo_weights)
+        if not ultralytics_checkpoint:
+            raise ValueError(
+                "model_arch yolo_unified requires ultralytics_checkpoint= path to a vendor .pt file"
+            )
+        return AquaForgeUltralyticsBackbone(
+            imgsz=imgsz, n_landmarks=n_landmarks, ultralytics_checkpoint=ultralytics_checkpoint
+        )
     return AquaForgeMultiTask(imgsz=imgsz, n_landmarks=n_landmarks)
 
 
@@ -309,15 +317,17 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     imgsz = int(meta.get("imgsz", 512))
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
     arch = str(meta.get("model_arch", "cnn")).strip().lower()
-    ypath = meta.get("yolo_init_path")
+    upath = meta.get("ultralytics_init_path")
     if arch == "yolo_unified":
-        if not ypath:
-            ypath = "yolo11n.pt"
-        m = AquaForgeUnifiedYOLO(imgsz=imgsz, n_landmarks=nl, yolo_weights=str(ypath))
+        if not upath:
+            upath = "yolo11n.pt"
+        m = AquaForgeUltralyticsBackbone(
+            imgsz=imgsz, n_landmarks=nl, ultralytics_checkpoint=str(upath)
+        )
     else:
         m = AquaForgeMultiTask(imgsz=imgsz, n_landmarks=nl)
     fv = int(meta.get("format_version", 1))
-    # yolo_unified v3 introduces delta-neck; older state_dict keys differ — load non-strict.
+    # format_version < 3: delta-neck layout; state_dict keys differ — load non-strict.
     if arch == "yolo_unified" and fv < 3:
         m.load_state_dict(ckpt["state_dict"], strict=False)
     else:
@@ -325,17 +335,17 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     return m, meta
 
 
-def load_partial_yolo_encoder(model: AquaForgeMultiTask, yolo_pt: Any) -> int:
+def seed_cnn_encoder_from_ultralytics(model: AquaForgeMultiTask, ultralytics_pt: Any) -> int:
     """
-    Best-effort: copy weights from first Ultralytics conv/BN layers into the **CNN** encoder only.
+    Best-effort: copy weights from early Ultralytics conv/BN layers into the **CNN** encoder only.
 
-    For full YOLO fusion use ``AquaForgeUnifiedYOLO`` instead.
+    For full ``yolo_unified`` training use :class:`AquaForgeUltralyticsBackbone` instead.
     """
     try:
         from ultralytics import YOLO
     except ImportError:
         return 0
-    y = YOLO(str(yolo_pt))
+    y = YOLO(str(ultralytics_pt))
     src_seq = getattr(getattr(y, "model", None), "model", None)
     if src_seq is None:
         return 0
@@ -356,8 +366,3 @@ def set_ultra_requires_grad(ultra: Any, requires: bool) -> None:
     """Freeze or unfreeze the embedded Ultralytics submodule (backbone+neck+unused head params)."""
     for p in ultra.parameters():
         p.requires_grad = requires
-
-
-def yolo_backbone_param_prefixes() -> tuple[str, ...]:
-    """Parameter name prefixes belonging to the Ultralytics inner model."""
-    return ("ultra.",)

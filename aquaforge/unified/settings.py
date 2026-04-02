@@ -40,7 +40,7 @@ class AquaForgeSection:
     """
     Multi-task vessel model: segmentation, landmarks, heading, wake auxiliary.
 
-    Full-scene **tiled** inference is the only way detections are proposed — no legacy candidate stage.
+    Full-scene **tiled** inference is the only way vessel candidates are proposed.
     """
 
     weights_path: str | None = None

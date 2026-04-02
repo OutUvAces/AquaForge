@@ -1,7 +1,7 @@
 # Sample: `--summary-markdown` style (illustrative)
 
 Below is a **shortened** example of GitHub-flavored output from `run_detection_eval.py --summary-markdown`.
-Real runs append full metric tables after the `---` rule. The detector is **AquaForge only** (no legacy ranking backends).
+Real runs append full metric tables after the `---` rule. End-to-end detection is **AquaForge only**.
 
 ### Key Takeaways
 
@@ -9,7 +9,7 @@ Real runs append full metric tables after the `---` rule. The detector is **Aqua
 
 - **Fusion:** Improved heading vs ambiguous wake by **≥5°** in **32.0%** of cases (n=50; AquaForge, undirected wake baseline).
 - **Keypoint:** Beat ambiguous wake by **≥5°** in **18.0%** of cases (n=50; AquaForge).
-- **Ranking:** Pearson **r** (AquaForge rank score vs binary labels) **0.4120**.
+- **Labels:** Pearson **r** (AquaForge vessel probability vs binary labels) **0.4120**.
 
 #### Scope
 

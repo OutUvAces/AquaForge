@@ -686,7 +686,7 @@ def run_aquaforge_tiled_scene_triples(
     """
     Sole full-scene vessel detection: overlapping tiles, batched forward, NMS on decoded masks.
 
-    No legacy candidate finders or alternate backends — AquaForge only.
+    Scene candidates come only from AquaForge tiled decode (no alternate backends).
     """
     from aquaforge.model_manager import get_cached_aquaforge_predictor
     from aquaforge.raster_rgb import raster_dimensions

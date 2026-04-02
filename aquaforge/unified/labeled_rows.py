@@ -1,8 +1,8 @@
 """
 Human point labels from review JSONL for multitask training and AquaForge agreement checks.
 
-Not a detector — only parses and validates rows against readable TCIs. Legacy ranking / hybrid
-pipelines were removed; AquaForge tiled inference is the sole detection path.
+Not a detector — only parses and validates rows against readable TCIs. AquaForge tiled inference
+is the sole scene-detection path.
 """
 
 from __future__ import annotations

@@ -192,7 +192,7 @@ notebook (run next to your JSONL + JP2s):
      c) Interpolate / freeze untrained joints in the loss.
 
 3) Export training chips
-   - Crop a square around (cx, cy) with chip_half matching yolo.chip_half (e.g. 320 px).
+   - Crop a square around (cx, cy) with chip_half matching AquaForge settings (e.g. 320 px).
    - Resize to onnx_input_size for the pose model (e.g. 384).
    - Store joint x,y in model input space (0..S-1) and visibility 0/1/2 per MMPose.
 

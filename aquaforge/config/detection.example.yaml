@@ -1,7 +1,7 @@
 # Copy to data/config/detection.yaml (create folder if needed).
 #
 # AquaForge is the only detector: full-scene tiled inference (overlap + NMS). Unknown top-level
-# keys from older configs (e.g. backend, yolo, keypoints, wake_fusion) are ignored at load time.
+# keys are ignored at load time.
 
 # aquaforge:
 #   weights_path: data/models/aquaforge/aquaforge.pt

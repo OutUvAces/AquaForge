@@ -183,7 +183,7 @@ REVIEW_LOCATOR_TARGET_SIDE_M = 10000.0
 # Close-up (main focus) — single large square in the calm review layout.
 CHIP_DISPLAY_MAIN = 820
 CHIP_DISPLAY_SIDE = 288
-# Back-compat: some helpers still reference one name for letterboxing.
+# Alias: letterboxing helpers use this name for the main chip width.
 CHIP_DISPLAY_PX = CHIP_DISPLAY_MAIN
 OVERVIEW_MOSAIC_DISPLAY_W = 1040
 DETECTION_POOL_MIN = 32

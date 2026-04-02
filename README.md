@@ -1,6 +1,6 @@
 # AquaForge
 
-**Sentinel-2 vessel detection** with a **human-in-the-loop** Streamlit review UI. **AquaForge is the only detector:** each scene is processed with **tiled sliding-window inference** (overlap, batched forward, NMS) to build the review queue; per-spot views run **full model decode** (mask, landmarks, heading, wake hint) with **no** probability gating, hybrid ranking, or alternate candidate pipelines. There is no bright-spot finder, ocean-mask pre-filter, legacy YOLO marine stack, or `force_legacy` path.
+**Sentinel-2 vessel detection** with a **human-in-the-loop** Streamlit review UI. **AquaForge is the only end-to-end detector:** each scene uses **tiled sliding-window inference** (overlap, batched forward, NMS) for the review queue; each spot uses **full AquaForge decode** (mask, landmarks, heading, wake). There is no alternate candidate pipeline, bright-spot finder, or pre-detector routing outside [`unified/inference.py`](aquaforge/unified/inference.py).
 
 - **Weights:** `data/models/aquaforge/aquaforge.pt` (and optional ONNX via YAML).
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
@@ -41,7 +41,7 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — CNN or YOLO backbone + unified heads; export with `scripts/export_aquaforge_onnx.py`. There is no separate ship-ranking or spectral baseline trainer in-repo; detection is AquaForge only.
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder, or **`--architecture yolo_unified`** with **`--ultralytics-weights`** (Ultralytics `.pt` for backbone+neck only; AquaForge heads on top). New checkpoints store **`meta["ultralytics_init_path"]`** for that graph. If you have an older `.pt` whose meta only contains a prior init-path key, set **`ultralytics_init_path`** in `meta` to that same filesystem path before loading, or retrain once. Export with `scripts/export_aquaforge_onnx.py`. Inference always uses AquaForge tiled scene + per-spot decode.
 
 ---
 
