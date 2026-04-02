@@ -20,8 +20,11 @@ __all__ = [
     "OnnxRuntimeSection",
     "default_aquaforge_yaml_path",
     "example_aquaforge_yaml_path",
+    "expected_aquaforge_checkpoint_path",
     "load_aquaforge_settings",
     "merged_onnx_providers",
+    "resolve_aquaforge_checkpoint_path",
+    "resolve_aquaforge_onnx_path",
 ]
 
 
@@ -85,6 +88,39 @@ def default_aquaforge_yaml_path(project_root: Path) -> Path:
 
 def example_aquaforge_yaml_path() -> Path:
     return Path(__file__).resolve().parent.parent / "config" / "detection.example.yaml"
+
+
+def resolve_aquaforge_checkpoint_path(project_root: Path, af: AquaForgeSection) -> Path | None:
+    """Resolved ``.pt`` for predictor build (YAML ``weights_path`` or default under ``data/models/aquaforge``)."""
+    if af.weights_path:
+        p = Path(str(af.weights_path))
+        if p.is_file():
+            return p
+    d = project_root / "data" / "models" / "aquaforge"
+    for name in ("aquaforge.pt", "best.pt"):
+        cand = d / name
+        if cand.is_file():
+            return cand
+    return None
+
+
+def resolve_aquaforge_onnx_path(project_root: Path, af: AquaForgeSection) -> Path | None:
+    """Optional ONNX next to checkpoint dir (ORT inference when enabled in YAML)."""
+    if af.onnx_path:
+        p = Path(str(af.onnx_path))
+        if p.is_file():
+            return p
+    d = project_root / "data" / "models" / "aquaforge"
+    for name in ("aquaforge.onnx", "aquaforge_quant.onnx"):
+        cand = d / name
+        if cand.is_file():
+            return cand
+    return None
+
+
+def expected_aquaforge_checkpoint_path(project_root: Path) -> Path:
+    """Default training output path (may not exist) — for UI hints."""
+    return project_root / "data" / "models" / "aquaforge" / "aquaforge.pt"
 
 
 def _parse_aquaforge(d: dict[str, Any] | None) -> AquaForgeSection:

@@ -84,6 +84,7 @@ from aquaforge.review_schema import (
     model_run_fingerprint,
 )
 from aquaforge.model_manager import (
+    aquaforge_chip_vessel_confidence,
     clear_aquaforge_predictor_cache,
     get_cached_aquaforge_predictor,
     schedule_background_warm,
@@ -93,17 +94,16 @@ from aquaforge.evaluation import (
     spot_geometry_gt_from_labels,
 )
 from aquaforge.unified.inference import (
-    aquaforge_confidence_only,
-    expected_aquaforge_checkpoint_path,
-    resolve_aquaforge_checkpoint_path,
-    resolve_aquaforge_onnx_path,
     run_aquaforge_spot_decode,
     run_aquaforge_tiled_scene_triples,
 )
 from aquaforge.unified.settings import (
     default_aquaforge_yaml_path,
     example_aquaforge_yaml_path,
+    expected_aquaforge_checkpoint_path,
     load_aquaforge_settings,
+    resolve_aquaforge_checkpoint_path,
+    resolve_aquaforge_onnx_path,
 )
 from aquaforge.review_overlay import (
     annotate_locator_spot_outline,
@@ -3020,7 +3020,7 @@ def _commit_review_label(
     _dset_fp = load_aquaforge_settings(ROOT)
     _af_pred_sv = get_cached_aquaforge_predictor(ROOT, _dset_fp)
     sv_comb = float(
-        aquaforge_confidence_only(_af_pred_sv, Path(tci_loaded), cx_save, cy_save)
+        aquaforge_chip_vessel_confidence(_af_pred_sv, Path(tci_loaded), cx_save, cy_save)
     )
     _fp_paths: list[Path] = []
     _cfg_fp = default_aquaforge_yaml_path(ROOT)

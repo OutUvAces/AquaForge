@@ -18,12 +18,10 @@ from aquaforge.unified.settings import (
     AquaForgeSettings,
     default_aquaforge_yaml_path,
     load_aquaforge_settings,
-)
-from aquaforge.raster_rgb import read_rgba_downsampled
-from aquaforge.unified.inference import (
     resolve_aquaforge_checkpoint_path,
     resolve_aquaforge_onnx_path,
 )
+from aquaforge.raster_rgb import read_rgba_downsampled
 from aquaforge.s2_masks import ocean_clear_mask, scl_resampled_to_tci_grid
 
 GRID_DIVISIONS = 10

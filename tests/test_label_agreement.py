@@ -102,7 +102,7 @@ class TestCollectPoints(unittest.TestCase):
 
 
 class TestEvaluateInSample(unittest.TestCase):
-    @patch("aquaforge.unified.label_agreement.aquaforge_confidence_only")
+    @patch("aquaforge.unified.label_agreement.aquaforge_chip_vessel_confidence")
     @patch("aquaforge.unified.label_agreement.get_cached_aquaforge_predictor")
     @patch("aquaforge.unified.labeled_rows.read_chip_square_rgb")
     @patch("aquaforge.unified.labeled_rows.extract_crop_features")

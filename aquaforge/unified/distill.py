@@ -248,12 +248,12 @@ def teacher_aquaforge_spot_dict(
     spot_col_off: int,
     spot_row_off: int,
 ) -> dict[str, Any]:
-    """Run AquaForge spot inference (same stack as the review UI) for teacher heading targets."""
-    from aquaforge.unified.integration import run_aquaforge_spot_inference
+    """Run AquaForge spot decode (same as review UI) for teacher heading targets."""
+    from aquaforge.unified.inference import run_aquaforge_spot_decode
     from aquaforge.unified.settings import load_aquaforge_settings
 
     settings = load_aquaforge_settings(project_root)
-    return run_aquaforge_spot_inference(
+    return run_aquaforge_spot_decode(
         project_root,
         tci_path,
         cx,

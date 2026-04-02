@@ -15,18 +15,18 @@ class TestAquaForgeIntegration(unittest.TestCase):
         from tempfile import TemporaryDirectory
         from unittest.mock import patch
 
+        from aquaforge.unified.inference import run_aquaforge_spot_decode
         from aquaforge.unified.settings import AquaForgeSettings
-        from aquaforge.unified.integration import run_aquaforge_spot_inference
 
         with TemporaryDirectory() as td:
             root = Path(td)
             tci = root / "x.jp2"
             tci.write_bytes(b"")
             with patch(
-                "aquaforge.unified.integration.get_cached_aquaforge_predictor",
+                "aquaforge.model_manager.get_cached_aquaforge_predictor",
                 return_value=None,
             ):
-                out = run_aquaforge_spot_inference(
+                out = run_aquaforge_spot_decode(
                     root,
                     tci,
                     10.0,

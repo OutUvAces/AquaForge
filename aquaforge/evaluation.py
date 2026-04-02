@@ -178,7 +178,7 @@ def _heading_from_bow_stern_markers(
     cy: float,
     chip_half: int,
 ) -> float | None:
-    from aquaforge.unified.external_pose_onnx import heading_deg_bow_to_stern
+    from aquaforge.unified.spot_landmarks import heading_bow_stern_deg
     from aquaforge.vessel_markers import markers_by_role, markers_for_hull
 
     sub = markers_for_hull(dimension_markers, 1)
@@ -193,7 +193,7 @@ def _heading_from_bow_stern_markers(
         by = float(bow["y"]) + r0
         sx = float(stern["x"]) + c0
         sy = float(stern["y"]) + r0
-        return float(heading_deg_bow_to_stern((bx, by), (sx, sy), tci_path))
+        return float(heading_bow_stern_deg((bx, by), (sx, sy), tci_path))
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -349,11 +349,13 @@ def aquaforge_confidence_at_point(
     ``clf`` / ``chip_bundle`` are unused; pass ``None``.
     """
     _ = clf, chip_bundle
-    from aquaforge.unified.inference import aquaforge_confidence_only
-    from aquaforge.model_manager import get_cached_aquaforge_predictor
+    from aquaforge.model_manager import (
+        aquaforge_chip_vessel_confidence,
+        get_cached_aquaforge_predictor,
+    )
 
     pred_af = get_cached_aquaforge_predictor(project_root, settings)
-    py = float(aquaforge_confidence_only(pred_af, tci_path, cx, cy))
+    py = float(aquaforge_chip_vessel_confidence(pred_af, tci_path, cx, cy))
     return {"aquaforge_confidence": py}
 
 

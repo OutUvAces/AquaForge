@@ -6,7 +6,7 @@
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
 - **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
 
-Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** (end-to-end tiled scene + `run_aquaforge_spot_decode` for chips), **`unified/settings.py`** (YAML: `data/config/detection.yaml`), `unified/external_pose_onnx.py` (optional third-party pose tooling only), `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, and packaged YAML under `aquaforge/config/`. There is **no** alternate detector path or `detection_backend` layer. Saved **`extra`** vessel audit keys are **`pred_aquaforge_*`** (and `aquaforge_detector_snapshot`); in-memory spots use **`aquaforge_*`**. The vessel detector is **AquaForge only** (no auxiliary sklearn heads or alternate detector backends).
+Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** exposes **`run_aquaforge_tiled_scene_triples`** and **`run_aquaforge_spot_decode`** as the **only** application-level vessel detection entry points (tiled overlap + NMS, then per-spot decode). **`unified/settings.py`** loads `data/config/detection.yaml`. Supporting modules: `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `unified/spot_landmarks.py`, and packaged YAML under `aquaforge/config/`. There is **no** `detection_backend`, hybrid routing, or legacy probability fields (`pred_lr_proba`, `pred_mlp_proba`, etc.). Saved **`extra`** audit keys are **`pred_aquaforge_*`** (and `aquaforge_detector_snapshot`); in-memory spots use **`aquaforge_*`**.
 
 ---
 
@@ -45,9 +45,9 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ---
 
-## External pose ONNX (optional tooling)
+## External pose ONNX (optional dev tooling)
 
-For validating a third-party pose ONNX on chips (not part of scene detection), see `scripts/export_shipstructure_to_onnx.py` and [`aquaforge/unified/external_pose_onnx.py`](aquaforge/unified/external_pose_onnx.py).
+For validating a **third-party** pose ONNX on chips (**not** used for scene detection or the review queue), see [`tooling/pose_onnx.py`](tooling/pose_onnx.py) and `scripts/export_shipstructure_to_onnx.py` / `scripts/validate_quantization.py`.
 
 ---
 

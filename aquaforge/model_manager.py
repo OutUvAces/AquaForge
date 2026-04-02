@@ -15,6 +15,19 @@ _lock = threading.Lock()
 _aquaforge_predictors: dict[tuple[str, int, str, int, bool], Any] = {}
 
 
+def aquaforge_chip_vessel_confidence(
+    predictor: Any,
+    tci_path: Path,
+    cx: float,
+    cy: float,
+) -> float:
+    """P(vessel) at full-image pixel from cached :class:`AquaForgePredictor` (single forward)."""
+    if predictor is None:
+        return 0.0
+    r = predictor.predict_at_candidate(tci_path, cx, cy)
+    return float(r.confidence) if r is not None else 0.0
+
+
 def get_cached_aquaforge_predictor(project_root: Path, settings: Any) -> Any | None:
     """
     Process-wide cached :class:`AquaForgePredictor` (Torch or ONNX per YAML).
@@ -23,8 +36,8 @@ def get_cached_aquaforge_predictor(project_root: Path, settings: Any) -> Any | N
     The same predictor powers single-chip review and
     :meth:`AquaForgePredictor.run_tiled_scene_candidates` for full-scene detection.
     """
-    from aquaforge.unified.inference import (
-        build_aquaforge_predictor,
+    from aquaforge.unified.inference import build_aquaforge_predictor
+    from aquaforge.unified.settings import (
         resolve_aquaforge_checkpoint_path,
         resolve_aquaforge_onnx_path,
     )

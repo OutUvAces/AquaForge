@@ -12,8 +12,10 @@ from typing import Any
 import numpy as np
 
 from aquaforge.unified.settings import load_aquaforge_settings
-from aquaforge.model_manager import get_cached_aquaforge_predictor
-from aquaforge.unified.inference import aquaforge_confidence_only
+from aquaforge.model_manager import (
+    aquaforge_chip_vessel_confidence,
+    get_cached_aquaforge_predictor,
+)
 from aquaforge.unified.labeled_rows import (
     DEFAULT_MODEL_SIDE,
     DEFAULT_SRC_HALF,
@@ -64,8 +66,7 @@ def evaluate_aquaforge_vs_binary_labels(
     **kwargs: Any,
 ) -> dict[str, Any]:
     """
-    Score AquaForge P(vessel) at each labeled point vs binary label. Extra kwargs are ignored
-    (e.g. ``lr_model_path``, ``chip_mlp_path``, ``mode``, ``w_lr``, ``w_mlp``).
+    Score AquaForge P(vessel) at each labeled point vs binary label. Extra kwargs are ignored.
     """
     _ = kwargs
     root = project_root or jsonl_path.resolve().parent.parent.parent
@@ -104,7 +105,7 @@ def evaluate_aquaforge_vs_binary_labels(
     scored_pred: list[int] = []
     n_unscored = 0
     for row in points:
-        py = aquaforge_confidence_only(pred_af, row.tci_path, row.cx, row.cy)
+        py = aquaforge_chip_vessel_confidence(pred_af, row.tci_path, row.cx, row.cy)
         pr = _binary_pred_from_proba(py, threshold=thr_af)
         if pr is None:
             n_unscored += 1

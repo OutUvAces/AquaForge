@@ -1,7 +1,7 @@
 """
 ShipStructure / pose ONNX options (standalone — not part of :class:`AquaForgeSettings`).
 
-Used by :mod:`aquaforge.unified.external_pose_onnx` and export/validation scripts.
+Used by :mod:`tooling.pose_onnx` (optional pose ONNX scripts) and ``detection.yaml`` reference docs.
 """
 
 from __future__ import annotations

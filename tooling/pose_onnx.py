@@ -1,73 +1,33 @@
 """
-Optional **external** vessel keypoint ONNX (validation / tooling only).
+Third-party pose ONNX — **validation / export scripts only**.
 
-Lives under ``unified/`` with AquaForge; **not** part of tiled scene detection. Set
-``KeypointsSection.external_onnx_path`` in export/validation scripts. Weights are not shipped in-repo.
-
-Supported ``output_layout`` values:
-
-- ``auto`` — infer from tensor rank/shape (see :func:`parse_pose_onnx_output`).
-- ``nk2`` / ``nk3`` / ``flat_xyc`` — fixed layouts (see implementation).
-
-Coordinates map to **full-raster** pixels using :func:`aquaforge.chip_io.read_chip_bgr_centered` geometry.
+Not imported by the Streamlit app or tiled scene detection. Uses the same landmark container
+as AquaForge overlays (:class:`aquaforge.unified.spot_landmarks.LandmarkPointsFullres`).
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
 from aquaforge.chip_io import read_chip_bgr_centered
-from aquaforge.unified.settings import OnnxRuntimeSection
 from aquaforge.keypoints_config import KeypointsSection
 from aquaforge.onnx_session_cache import get_ort_session
+from aquaforge.unified.settings import OnnxRuntimeSection
+from aquaforge.unified.spot_landmarks import (
+    LandmarkPointsFullres,
+    heading_bow_stern_deg,
+    landmarks_from_jsonable,
+    landmarks_to_jsonable,
+)
 
+logger = logging.getLogger(__name__)
 
-@dataclass
-class KeypointResult:
-    """Keypoints in **full-raster** pixels; confidence per point (0–1 when model provides it)."""
-
-    xy_fullres: list[tuple[float, float]] = field(default_factory=list)
-    conf: list[float] = field(default_factory=list)
-
-    def bow_stern(
-        self, bow_index: int, stern_index: int
-    ) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
-        bi, si = int(bow_index), int(stern_index)
-        n = len(self.xy_fullres)
-        if n == 0 or bi < 0 or si < 0 or bi >= n or si >= n:
-            return None, None
-        b = self.xy_fullres[bi]
-        s = self.xy_fullres[si]
-        return b, s
-
-    def bow_stern_confidences(
-        self, bow_index: int, stern_index: int
-    ) -> tuple[float | None, float | None]:
-        bi, si = int(bow_index), int(stern_index)
-        n = len(self.conf)
-        bc = float(self.conf[bi]) if bi >= 0 and bi < n else 1.0
-        sc = float(self.conf[si]) if si >= 0 and si < n else 1.0
-        return bc, sc
-
-
-def heading_deg_bow_to_stern(
-    bow_full: tuple[float, float],
-    stern_full: tuple[float, float],
-    raster_path: str | Path,
-) -> float:
-    """Geodesic bearing stern → bow (same convention as human bow/stern markers in review)."""
-    from aquaforge.geodesy_bearing import geodesic_bearing_deg
-
-    sx, sy = stern_full
-    bx, by = bow_full
-    return geodesic_bearing_deg(Path(raster_path), sx, sy, bx, by)
+# Script compatibility (same geodesic as spot_landmarks.heading_bow_stern_deg).
+heading_deg_bow_to_stern = heading_bow_stern_deg
 
 
 def parse_pose_onnx_output(
@@ -130,13 +90,13 @@ def parse_pose_onnx_output(
 
     sa = a0.shape
     if a0.ndim == 3:
-        _, k, c = sa[0], sa[1], sa[2]
+        _, _k, c = sa[0], sa[1], sa[2]
         if c == 3:
             return from_nk3(a0)
         if c == 2:
             return from_nk2(a0)
     if a0.ndim == 2:
-        k, c = sa[0], sa[1]
+        _k, c = sa[0], sa[1]
         if c == 3:
             return from_nk3(a0)
         if c == 2:
@@ -161,8 +121,7 @@ def _model_xy_to_fullres(
     chip_w: int,
     chip_h: int,
     input_size: int,
-) -> KeypointResult:
-    """Map model square coordinates to full raster (handles non-square chips with independent sx/sy)."""
+) -> LandmarkPointsFullres:
     s = float(max(int(input_size), 1))
     sx = float(max(chip_w, 1)) / s
     sy = float(max(chip_h, 1)) / s
@@ -175,7 +134,7 @@ def _model_xy_to_fullres(
         out_xy.append((fx, fy))
         c = float(conf[i]) if i < conf.shape[0] else 1.0
         out_c.append(float(np.clip(c, 0.0, 1.0)))
-    return KeypointResult(xy_fullres=out_xy, conf=out_c)
+    return LandmarkPointsFullres(xy_fullres=out_xy, conf=out_c)
 
 
 def try_predict_keypoints_chip(
@@ -188,13 +147,7 @@ def try_predict_keypoints_chip(
     onnx_path: str | None = None,
     onnx_runtime: OnnxRuntimeSection | None = None,
     onnx_providers: list[str] | None = None,
-) -> tuple[KeypointResult | None, list[str]]:
-    """
-    Like :func:`predict_keypoints_chip` but returns ``(result, warning_codes)``.
-
-    Warning codes are stable strings for UI/logging (e.g. ``keypoints_onnx_missing_file``).
-    On success, the second element is an empty list.
-    """
+) -> tuple[LandmarkPointsFullres | None, list[str]]:
     notes: list[str] = []
     cfg = keypoints_cfg or KeypointsSection()
     path_raw = onnx_path if onnx_path is not None else cfg.external_onnx_path
@@ -228,7 +181,9 @@ def try_predict_keypoints_chip(
     bgr, c0, r0, cw, ch = read_chip_bgr_centered(tci_path, cx_full, cy_full, chip_half)
     if bgr.size == 0 or cw < 2 or ch < 2:
         notes.append("keypoints_empty_chip")
-        logger.warning("Keypoint inference skipped: empty or tiny chip at (%.1f, %.1f).", cx_full, cy_full)
+        logger.warning(
+            "Keypoint inference skipped: empty or tiny chip at (%.1f, %.1f).", cx_full, cy_full
+        )
         return None, notes
 
     import cv2
@@ -264,8 +219,6 @@ def try_predict_keypoints_chip(
     if xy_m.shape[0] > k_expect:
         xy_m = xy_m[:k_expect]
         cf = cf[:k_expect]
-    elif xy_m.shape[0] < k_expect and xy_m.shape[0] > 0:
-        pass
 
     return (
         _model_xy_to_fullres(
@@ -289,14 +242,7 @@ def predict_keypoints_chip(
     chip_half: int = 320,
     keypoints_cfg: KeypointsSection | None = None,
     onnx_path: str | None = None,
-) -> KeypointResult | None:
-    """
-    Run ONNX pose model on a TCI chip centered on the candidate.
-
-    ``onnx_path`` overrides ``keypoints_cfg.external_onnx_path`` when provided.
-    Returns ``None`` if path missing, ORT unavailable, or inference fails.
-    For diagnostics, use :func:`try_predict_keypoints_chip`.
-    """
+) -> LandmarkPointsFullres | None:
     r, _ = try_predict_keypoints_chip(
         tci_path,
         cx_full,
@@ -308,27 +254,9 @@ def predict_keypoints_chip(
     return r
 
 
-def keypoints_to_jsonable(kp: KeypointResult | None) -> list[dict[str, Any]] | None:
-    if kp is None or not kp.xy_fullres:
-        return None
-    out: list[dict[str, Any]] = []
-    for i, (x, y) in enumerate(kp.xy_fullres):
-        c = float(kp.conf[i]) if i < len(kp.conf) else 1.0
-        out.append({"i": i, "x": float(x), "y": float(y), "c": c})
-    return out
+def keypoints_to_jsonable(kp: LandmarkPointsFullres | None) -> list[dict[str, Any]] | None:
+    return landmarks_to_jsonable(kp)
 
 
-def keypoints_from_jsonable(rows: Sequence[dict[str, Any]] | None) -> KeypointResult | None:
-    if not rows:
-        return None
-    xy: list[tuple[float, float]] = []
-    cc: list[float] = []
-    for r in rows:
-        try:
-            xy.append((float(r["x"]), float(r["y"])))
-            cc.append(float(r.get("c", 1.0)))
-        except (KeyError, TypeError, ValueError):
-            continue
-    if not xy:
-        return None
-    return KeypointResult(xy_fullres=xy, conf=cc)
+def keypoints_from_jsonable(rows: Sequence[dict[str, Any]] | None) -> LandmarkPointsFullres | None:
+    return landmarks_from_jsonable(rows)

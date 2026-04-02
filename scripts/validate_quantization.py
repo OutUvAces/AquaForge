@@ -2,7 +2,7 @@
 """
 Compare pose ONNX inference **with vs without** dynamic INT8 quantization (CPU).
 
-Runs :func:`aquaforge.unified.external_pose_onnx.try_predict_keypoints_chip` in each mode
+Runs :func:`tooling.pose_onnx.try_predict_keypoints_chip` in each mode
 (clears ORT session cache between). Reports mean timing and max absolute heading delta when
 bow/stern indices yield a geodesic heading.
 
@@ -54,10 +54,7 @@ def main() -> int:
 
     from aquaforge.keypoints_config import KeypointsSection
     from aquaforge.onnx_session_cache import clear_ort_session_cache
-    from aquaforge.unified.external_pose_onnx import (
-        heading_deg_bow_to_stern,
-        try_predict_keypoints_chip,
-    )
+    from tooling.pose_onnx import heading_deg_bow_to_stern, try_predict_keypoints_chip
 
     def cfg(quantize: bool) -> KeypointsSection:
         return KeypointsSection(
