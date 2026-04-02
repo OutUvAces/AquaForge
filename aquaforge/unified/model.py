@@ -4,14 +4,16 @@ AquaForge unified multi-task models — single training graph, no alternate dete
 Canonical ``meta["model_arch"]`` values:
 
 1. **cnn** — :class:`AquaForgeMultiTask` (in-repo encoder).
-2. **aquaforge_vendor_fpn** — :class:`AquaForgeVendorFpnBackbone`: vendor FPN backbone+neck,
-   then AquaForge delta-neck + heads. Init path: ``vendor_fpn_init_path`` in checkpoint meta.
+2. **aquaforge_backbone** — :class:`AquaForgeBackbone`: pretrained feature graph (backbone+neck),
+   then AquaForge delta-neck + heads. Init path: ``backbone_init_path`` in checkpoint meta.
 
-Unknown ``model_arch`` strings are rejected at build/load time. The vendor FPN branch loads a
-third-party ``.pt`` graph for features only; AquaForge heads and losses are ours end-to-end.
+Unknown ``model_arch`` strings are rejected at build/load time. The backbone branch loads a
+``.pt`` feature graph only; AquaForge heads and losses are end-to-end AquaForge.
 """
 
 from __future__ import annotations
+
+# AquaForge-only model graph: ``cnn`` (in-repo encoder) or ``aquaforge_backbone`` (pretrained feature graph + heads).
 
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,29 +22,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from aquaforge.unified.constants import (
-    DEFAULT_VENDOR_FPN_WEIGHTS,
-    NUM_LANDMARKS,
-)
+from aquaforge.unified.constants import NUM_LANDMARKS
 
 ARCH_CNN = "cnn"
-ARCH_AQUAFORGE_VENDOR_FPN = "aquaforge_vendor_fpn"
+ARCH_AQUAFORGE_BACKBONE = "aquaforge_backbone"
 
 
 def canonical_model_arch(name: str) -> str:
-    """Return ``cnn`` or ``aquaforge_vendor_fpn``; reject anything else (no alternate arch tags)."""
+    """Return ``cnn`` or ``aquaforge_backbone``; reject anything else (no alternate arch tags)."""
     a = str(name).strip().lower()
     if a == ARCH_CNN:
         return ARCH_CNN
-    if a == ARCH_AQUAFORGE_VENDOR_FPN:
-        return ARCH_AQUAFORGE_VENDOR_FPN
+    if a == ARCH_AQUAFORGE_BACKBONE:
+        return ARCH_AQUAFORGE_BACKBONE
     raise ValueError(
-        f"Unknown model_arch {name!r}; use {ARCH_CNN!r} or {ARCH_AQUAFORGE_VENDOR_FPN!r} in checkpoint meta."
+        f"Unknown model_arch {name!r}; use {ARCH_CNN!r} or {ARCH_AQUAFORGE_BACKBONE!r} in checkpoint meta."
     )
 
 
-# Ultralytics ``module.type`` strings for heads we stop before (vendor detect/segment/pose, etc.).
-_ULTRALYTICS_VENDOR_HEAD_TYPES: frozenset[str] = frozenset(
+# ``module.type`` strings where we stop and take features (upstream detect/segment heads, etc.).
+_PRETRAINED_GRAPH_HEAD_STOP_TYPES: frozenset[str] = frozenset(
     {
         "Detect",
         "Segment",
@@ -55,14 +54,14 @@ _ULTRALYTICS_VENDOR_HEAD_TYPES: frozenset[str] = frozenset(
 )
 
 
-def _vendor_graph_inner_to_feature_list(
+def _backbone_body_inner_to_feature_list(
     inner: Any,
     x: torch.Tensor,
 ) -> list[torch.Tensor]:
     """
-    Run the embedded vendor FPN graph (``inner.model``) up to — but not including — vendor heads.
+    Run the embedded pretrained graph (``inner.model``) up to — but not including — task heads.
 
-    Returns feature tensors that would feed Detect/Segment/etc. (typically 3 scales).
+    Returns feature tensors that would feed detection heads (typically 3 scales).
     """
     layer_cache: list[Any] = []
     save = getattr(inner, "save", [])
@@ -74,7 +73,7 @@ def _vendor_graph_inner_to_feature_list(
                 else [x if j == -1 else layer_cache[j] for j in m.f]
             )
         mt = getattr(m, "type", "") or type(m).__name__
-        if mt in _ULTRALYTICS_VENDOR_HEAD_TYPES:
+        if mt in _PRETRAINED_GRAPH_HEAD_STOP_TYPES:
             if isinstance(m.f, int):
                 return [layer_cache[m.f]]
             return [layer_cache[j] for j in m.f]
@@ -92,10 +91,10 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
         return [fs[0], fs[1], fs[1]]
     if len(fs) == 1:
         return [fs[0], fs[0], fs[0]]
-    raise RuntimeError("AquaForge vendor FPN backbone produced no 4D feature maps")
+    raise RuntimeError("AquaForge backbone branch produced no 4D feature maps")
 
 
-# --- AquaForge **delta-neck** (Ultralytics neck tensors → AquaForge mixer) ---
+# --- AquaForge **delta-neck** (multi-scale tensors → AquaForge mixer) ---
 # Cross-scale **difference tensors** (ReLU(coarse−fine)) expose disagreements the mixer can explain;
 # stem is 1×1 compress + 3×3 depthwise, then additive fine/mid injections and channel calibration.
 
@@ -213,12 +212,12 @@ class _DeltaNeckMixer(nn.Module):
         return self.seq(x)
 
 
-class AquaForgeVendorFpnBackbone(nn.Module):
+class AquaForgeBackbone(nn.Module):
     """
-    Vendor FPN backbone + neck → AquaForge delta-neck → seg, KP heatmaps, global KP/heading/wake.
+    Pretrained backbone + neck → AquaForge delta-neck → seg, KP heatmaps, global KP/heading/wake.
 
-    ``vendor_fpn_pt`` is a vendor ``.pt`` path; see ``DEFAULT_VENDOR_FPN_WEIGHTS`` for the usual hub
-    filename when unspecified at load.
+    ``backbone_pt`` must be a readable ``.pt`` used to initialize the feature graph; checkpoint
+    meta stores the same path as ``backbone_init_path``.
     """
 
     def __init__(
@@ -226,7 +225,7 @@ class AquaForgeVendorFpnBackbone(nn.Module):
         imgsz: int = 640,
         n_landmarks: int = NUM_LANDMARKS,
         *,
-        vendor_fpn_pt: str | Path,
+        backbone_pt: str | Path,
         hidden: int = 256,
     ) -> None:
         super().__init__()
@@ -234,23 +233,23 @@ class AquaForgeVendorFpnBackbone(nn.Module):
             from ultralytics import YOLO
         except ImportError as e:
             raise ImportError(
-                "AquaForgeVendorFpnBackbone requires vendor FPN deps (pip install -r requirements-ml.txt)"
+                "AquaForgeBackbone requires requirements-ml.txt (pretrained graph loader)."
             ) from e
 
-        self.model_arch = ARCH_AQUAFORGE_VENDOR_FPN
+        self.model_arch = ARCH_AQUAFORGE_BACKBONE
         self.imgsz = int(imgsz)
         self.n_landmarks = int(n_landmarks)
         self.hidden = int(hidden)
-        self.vendor_fpn_init_path = str(vendor_fpn_pt)
+        self.backbone_init_path = str(backbone_pt)
 
-        vendor = YOLO(str(vendor_fpn_pt))
-        self.vendor_graph = vendor.model
-        self.vendor_graph.eval()
+        _wrapped = YOLO(str(backbone_pt))
+        self.backbone_body = _wrapped.model
+        self.backbone_body.eval()
 
         with torch.no_grad():
             dummy = torch.zeros(1, 3, self.imgsz, self.imgsz)
             feats = _take_last_three_scales(
-                _vendor_graph_inner_to_feature_list(self.vendor_graph, dummy)
+                _backbone_body_inner_to_feature_list(self.backbone_body, dummy)
             )
             dims = [int(f.shape[1]) for f in feats]
 
@@ -277,7 +276,7 @@ class AquaForgeVendorFpnBackbone(nn.Module):
         self.wake_head = nn.Linear(self.hidden, 2)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        feats = _take_last_three_scales(_vendor_graph_inner_to_feature_list(self.vendor_graph, x))
+        feats = _take_last_three_scales(_backbone_body_inner_to_feature_list(self.backbone_body, x))
         p3, p4, p5 = [self.neck_proj[i](feats[i]) for i in range(3)]
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
@@ -305,16 +304,16 @@ def build_model(
     n_landmarks: int = NUM_LANDMARKS,
     *,
     model_arch: str = "cnn",
-    vendor_fpn_pt: str | Path | None = None,
+    backbone_pt: str | Path | None = None,
 ) -> nn.Module:
     arch = canonical_model_arch(model_arch)
-    if arch == ARCH_AQUAFORGE_VENDOR_FPN:
-        if not vendor_fpn_pt:
+    if arch == ARCH_AQUAFORGE_BACKBONE:
+        if not backbone_pt:
             raise ValueError(
-                f"model_arch {ARCH_AQUAFORGE_VENDOR_FPN!r} requires vendor_fpn_pt= path to a vendor .pt file"
+                f"model_arch {ARCH_AQUAFORGE_BACKBONE!r} requires backbone_pt= path to a .pt file"
             )
-        return AquaForgeVendorFpnBackbone(
-            imgsz=imgsz, n_landmarks=n_landmarks, vendor_fpn_pt=vendor_fpn_pt
+        return AquaForgeBackbone(
+            imgsz=imgsz, n_landmarks=n_landmarks, backbone_pt=backbone_pt
         )
     return AquaForgeMultiTask(imgsz=imgsz, n_landmarks=n_landmarks)
 
@@ -336,36 +335,38 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
     arch = canonical_model_arch(str(meta.get("model_arch", ARCH_CNN)))
     meta["model_arch"] = arch
-    upath = meta.get("vendor_fpn_init_path")
-    if arch == ARCH_AQUAFORGE_VENDOR_FPN:
-        if not upath:
-            upath = DEFAULT_VENDOR_FPN_WEIGHTS
-        m = AquaForgeVendorFpnBackbone(
-            imgsz=imgsz, n_landmarks=nl, vendor_fpn_pt=str(upath)
+    bpath = meta.get("backbone_init_path")
+    if arch == ARCH_AQUAFORGE_BACKBONE:
+        if not bpath or not str(bpath).strip():
+            raise ValueError(
+                "Checkpoint meta missing backbone_init_path; required for aquaforge_backbone."
+            )
+        m = AquaForgeBackbone(
+            imgsz=imgsz, n_landmarks=nl, backbone_pt=str(bpath)
         )
     else:
         m = AquaForgeMultiTask(imgsz=imgsz, n_landmarks=nl)
     fv = int(meta.get("format_version", 1))
     # format_version < 3: delta-neck layout; state_dict keys differ — load non-strict.
-    if arch == ARCH_AQUAFORGE_VENDOR_FPN and fv < 3:
+    if arch == ARCH_AQUAFORGE_BACKBONE and fv < 3:
         m.load_state_dict(ckpt["state_dict"], strict=False)
     else:
         m.load_state_dict(ckpt["state_dict"], strict=(fv >= 2))
     return m, meta
 
 
-def seed_cnn_encoder_from_vendor_fpn(model: AquaForgeMultiTask, vendor_fpn_pt: Any) -> int:
+def seed_cnn_encoder_from_backbone_pt(model: AquaForgeMultiTask, backbone_pt: Any) -> int:
     """
-    Best-effort: copy weights from early vendor FPN conv/BN layers into the **CNN** encoder only.
+    Best-effort: copy weights from early pretrained conv/BN layers into the **CNN** encoder only.
 
-    For full ``aquaforge_vendor_fpn`` training use :class:`AquaForgeVendorFpnBackbone` instead.
+    For full ``aquaforge_backbone`` training use :class:`AquaForgeBackbone` instead.
     """
     try:
         from ultralytics import YOLO
     except ImportError:
         return 0
-    vendor = YOLO(str(vendor_fpn_pt))
-    src_seq = getattr(getattr(vendor, "model", None), "model", None)
+    _ld = YOLO(str(backbone_pt))
+    src_seq = getattr(getattr(_ld, "model", None), "model", None)
     if src_seq is None:
         return 0
     dst_params = list(model.encoder.seq.parameters())
@@ -381,7 +382,7 @@ def seed_cnn_encoder_from_vendor_fpn(model: AquaForgeMultiTask, vendor_fpn_pt: A
     return n
 
 
-def set_vendor_graph_requires_grad(vendor_graph: Any, requires: bool) -> None:
-    """Freeze or unfreeze the embedded vendor FPN submodule (backbone+neck+unused head params)."""
-    for p in vendor_graph.parameters():
+def set_backbone_body_requires_grad(backbone_body: Any, requires: bool) -> None:
+    """Freeze or unfreeze the embedded pretrained feature submodule."""
+    for p in backbone_body.parameters():
         p.requires_grad = requires

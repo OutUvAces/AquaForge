@@ -41,7 +41,7 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder (**`--architecture cnn`**, default), or **`--architecture aquaforge_vendor_fpn`** with **`--vendor-fpn-weights`** (defaults to **`DEFAULT_VENDOR_FPN_WEIGHTS`** in `aquaforge/unified/constants.py`). Checkpoints store **`meta["model_arch"]`** as **`cnn`** or **`aquaforge_vendor_fpn`**; set **`meta["vendor_fpn_init_path"]`** for the vendor `.pt` when using the vendor-FPN branch. Export with `scripts/export_aquaforge_onnx.py`. Inference uses AquaForge tiled scene + per-spot decode only.
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN (**`--architecture cnn`**, default), or **`--architecture aquaforge_backbone`** with **`--backbone-weights <path-to-pt>`** (required for that mode; no implicit default weight file). Checkpoints store **`meta["model_arch"]`** as **`cnn`** or **`aquaforge_backbone`** and **`meta["backbone_init_path"]`** when using the backbone branch. Export with `scripts/export_aquaforge_onnx.py`. Detection is only `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
 
 Optional **third-party pose ONNX** for keypoint hints is configured only via **`detection.yaml`** (`keypoints.*`); see [`scripts/export_shipstructure_to_onnx.py`](scripts/export_shipstructure_to_onnx.py) for export notes.
 

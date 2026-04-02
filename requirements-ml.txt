@@ -1,4 +1,4 @@
-# Optional: PyTorch, Ultralytics, ONNX runtime (AquaForge training / GPU inference). Review UI can use CPU-only requirements.txt alone.
+# Optional: PyTorch, pretrained-graph loader, ONNX runtime (AquaForge training / GPU inference). Review UI can use CPU-only requirements.txt alone.
 # Install (from project root):  py -3 -m pip install -r requirements-ml.txt
 #
 # Supported: Python 3.10–3.12 (recommended). 3.13+ may work when PyTorch publishes wheels.
@@ -7,6 +7,7 @@
 
 torch>=2.1.0
 torchvision>=0.16.0
+# Loads standard .pt feature graphs for `aquaforge_backbone` training (pip package name).
 ultralytics>=8.3.0
 huggingface_hub>=0.20.0
 onnxruntime>=1.16.0

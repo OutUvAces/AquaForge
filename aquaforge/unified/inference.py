@@ -3,7 +3,7 @@ AquaForge — single module for vessel **detection** (tiled scene + per-spot dec
 
 **Public API** (``__all__``): only :func:`run_aquaforge_tiled_scene_triples` and
 :func:`run_aquaforge_spot_decode`. All other names are implementation details for
-``model_manager``, training, and tests — not alternate detectors or legacy backends.
+``model_manager``, training, and tests — not a second detector stack.
 """
 
 from __future__ import annotations
@@ -704,7 +704,7 @@ def _aquaforge_spot_to_overlay_dict(
     spot_col_off: int,
     spot_row_off: int,
 ) -> dict[str, Any]:
-    """Build review/eval overlay dict from one AquaForge chip decode (single detector path; no integration shim)."""
+    """Build review/eval overlay dict from one AquaForge chip decode (single detector path)."""
     import math
 
     from aquaforge.chip_io import polygon_fullres_to_crop

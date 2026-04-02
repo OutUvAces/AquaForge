@@ -1,5 +1,5 @@
 """
-Joint AquaForge losses (our design — not Ultralytics defaults).
+Joint AquaForge losses (task-specific design for this codebase).
 
 We combine **task-specific** terms with an explicitly documented blend (not a pasted vendor recipe):
 
@@ -23,7 +23,7 @@ stabiliser, not GradNorm/DWA source dumps.
 **Hull–exterior coherence** — suppresses segmentation mass **outside a dilated GT hull**, a
 proxy for “open water” on centred S2 chips when no SCL band is in the batch.
 
-**Delta-neck** (see :mod:`aquaforge.unified.model`) fuses Ultralytics multi-scale features via **cross-scale
+**Delta-neck** (see :mod:`aquaforge.unified.model`) fuses multi-scale backbone features via **cross-scale
 difference maps**, not a softmax gate or classic FPN top-down add.
 """
 

@@ -50,8 +50,7 @@ from aquaforge.labels import (
 from aquaforge.review_overlay import read_locator_and_spot_rgb_matching_stretch
 
 
-# Labeled JSONL point rows for Pearson / tiled recall / UI agreement — inlined here (legacy
-# `unified/labeled_rows` and `label_agreement` removed; AquaForge-only evaluation path).
+# Labeled JSONL point rows for Pearson / tiled recall / UI agreement (single AquaForge evaluation module).
 DEFAULT_REVIEW_LABEL_MODEL_SIDE = REVIEW_CHIP_MODEL_SIDE
 DEFAULT_REVIEW_LABEL_SRC_HALF = REVIEW_CHIP_SRC_HALF
 

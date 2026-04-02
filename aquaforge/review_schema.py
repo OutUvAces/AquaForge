@@ -14,7 +14,7 @@ Common ``extra`` keys written by the review UI include:
 - ``coastal_or_land_adjacent`` / ``near_coast_proxy`` — optional bool flags to up-weight hard **coastal** chips in training sampling.
 
 Vessel **detector** audit in ``extra`` uses ``aquaforge_*`` keys only (AquaForge snapshot on save;
-no legacy fusion or alternate-detector fields).
+no alternate-detector or fusion fields).
 
 Static-sea persistence uses a separate JSONL (``record_type: "static_sea_witness"``), not point-classifier rows.
 """
