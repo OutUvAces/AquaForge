@@ -47,7 +47,7 @@ class TestReviewUIUncertaintySignal(unittest.TestCase):
         self.assertEqual(coastal_scene_hint(None), 0.0)
         self.assertEqual(coastal_scene_hint({"coastal_or_land_adjacent": True}), 1.0)
         self.assertEqual(small_vessel_length_hint({}), 0.0)
-        self.assertGreater(small_vessel_length_hint({"pred_aquaforge_length_m": 30.0}), 0.5)
+        self.assertGreater(small_vessel_length_hint({"aquaforge_length_m": 30.0}), 0.5)
 
     def test_uncertainty_signal_range(self) -> None:
         from aquaforge.unified.distill import review_ui_uncertainty_signal
@@ -55,7 +55,7 @@ class TestReviewUIUncertaintySignal(unittest.TestCase):
         self.assertEqual(review_ui_uncertainty_signal(None), 0.0)
         self.assertGreater(
             review_ui_uncertainty_signal(
-                {"pred_aquaforge_confidence": 0.5, "partial_cloud_obscuration": True}
+                {"aquaforge_confidence": 0.5, "partial_cloud_obscuration": True}
             ),
             0.4,
         )
@@ -65,7 +65,7 @@ class TestReviewUIUncertaintySignal(unittest.TestCase):
 class TestLandmarksFromHeatmap(unittest.TestCase):
     def test_peak_center_maps_to_chip_center(self) -> None:
         from aquaforge.unified.constants import NUM_LANDMARKS
-        from aquaforge.unified._inference_impl import _landmarks_from_kp_hm_logits
+        from aquaforge.unified.inference import _landmarks_from_kp_hm_logits
 
         h, w = 3, 3
         logits = np.full((NUM_LANDMARKS, h, w), -20.0, dtype=np.float32)
@@ -85,14 +85,14 @@ class TestLandmarksFromHeatmap(unittest.TestCase):
 
 class TestTiledSceneHelpers(unittest.TestCase):
     def test_tile_axis_starts_covers_right_edge(self) -> None:
-        from aquaforge.unified._inference_impl import _tile_axis_starts
+        from aquaforge.unified.inference import _tile_axis_starts
 
         s = _tile_axis_starts(1000, 640, 320)
         self.assertIn(0, s)
         self.assertIn(360, s)
 
     def test_nms_suppresses_overlapping_boxes(self) -> None:
-        from aquaforge.unified._inference_impl import (
+        from aquaforge.unified.inference import (
             AquaForgeSpotResult,
             nms_aquaforge_spot_results,
         )
@@ -133,11 +133,11 @@ class TestAquaForgeConstants(unittest.TestCase):
 
 
 class TestCanonicalModelArch(unittest.TestCase):
-    def test_accepts_cnn_and_ultralytics_branch(self) -> None:
-        from aquaforge.unified.model import ARCH_AQUAFORGE_ULTRALYTICS, ARCH_CNN, canonical_model_arch
+    def test_accepts_cnn_and_vendor_fpn_branch(self) -> None:
+        from aquaforge.unified.model import ARCH_AQUAFORGE_VENDOR_FPN, ARCH_CNN, canonical_model_arch
 
         self.assertEqual(canonical_model_arch("cnn"), ARCH_CNN)
-        self.assertEqual(canonical_model_arch("aquaforge_ultralytics"), ARCH_AQUAFORGE_ULTRALYTICS)
+        self.assertEqual(canonical_model_arch("aquaforge_vendor_fpn"), ARCH_AQUAFORGE_VENDOR_FPN)
 
     def test_rejects_unknown_arch_strings(self) -> None:
         from aquaforge.unified.model import canonical_model_arch
@@ -270,7 +270,7 @@ class TestAquaForgeLosses(unittest.TestCase):
         p1 = review_ui_active_learning_priority({}, heading_labeled=False)
         self.assertGreaterEqual(p1, 0.45)
         p2 = review_ui_active_learning_priority(
-            {"pred_aquaforge_confidence": 0.5, "pred_aquaforge_length_m": 40.0},
+            {"aquaforge_confidence": 0.5, "aquaforge_length_m": 40.0},
             heading_labeled=True,
         )
         self.assertGreater(p2, p1)

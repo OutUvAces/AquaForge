@@ -4,13 +4,11 @@ AquaForge unified multi-task models — single training graph, no alternate dete
 Canonical ``meta["model_arch"]`` values:
 
 1. **cnn** — :class:`AquaForgeMultiTask` (in-repo encoder).
-2. **aquaforge_ultralytics** — :class:`AquaForgeUltralyticsBackbone`: vendor Ultralytics backbone+neck,
-   then AquaForge delta-neck + heads. Init path: ``ultralytics_init_path``.
+2. **aquaforge_vendor_fpn** — :class:`AquaForgeVendorFpnBackbone`: vendor FPN backbone+neck,
+   then AquaForge delta-neck + heads. Init path: ``vendor_fpn_init_path`` in checkpoint meta.
 
-Unknown ``model_arch`` strings are rejected at build/load time. Only ``ultralytics.YOLO`` and vendor
-``module.type`` literals (e.g. detect-head class names) reference third-party symbols.
-
-We do **not** reuse vendor detect/segment losses; only early features feed AquaForge.
+Unknown ``model_arch`` strings are rejected at build/load time. The vendor FPN branch loads a
+third-party ``.pt`` graph for features only; AquaForge heads and losses are ours end-to-end.
 """
 
 from __future__ import annotations
@@ -23,23 +21,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from aquaforge.unified.constants import (
-    DEFAULT_ULTRALYTICS_VENDOR_PT,
+    DEFAULT_VENDOR_FPN_WEIGHTS,
     NUM_LANDMARKS,
 )
 
 ARCH_CNN = "cnn"
-ARCH_AQUAFORGE_ULTRALYTICS = "aquaforge_ultralytics"
+ARCH_AQUAFORGE_VENDOR_FPN = "aquaforge_vendor_fpn"
 
 
 def canonical_model_arch(name: str) -> str:
-    """Return ``cnn`` or ``aquaforge_ultralytics``; reject anything else (no alternate arch tags)."""
+    """Return ``cnn`` or ``aquaforge_vendor_fpn``; reject anything else (no alternate arch tags)."""
     a = str(name).strip().lower()
     if a == ARCH_CNN:
         return ARCH_CNN
-    if a == ARCH_AQUAFORGE_ULTRALYTICS:
-        return ARCH_AQUAFORGE_ULTRALYTICS
+    if a == ARCH_AQUAFORGE_VENDOR_FPN:
+        return ARCH_AQUAFORGE_VENDOR_FPN
     raise ValueError(
-        f"Unknown model_arch {name!r}; use {ARCH_CNN!r} or {ARCH_AQUAFORGE_ULTRALYTICS!r} in checkpoint meta."
+        f"Unknown model_arch {name!r}; use {ARCH_CNN!r} or {ARCH_AQUAFORGE_VENDOR_FPN!r} in checkpoint meta."
     )
 
 
@@ -57,15 +55,14 @@ _ULTRALYTICS_VENDOR_HEAD_TYPES: frozenset[str] = frozenset(
 )
 
 
-def forward_ultralytics_inner_to_feature_list(
+def _vendor_graph_inner_to_feature_list(
     inner: Any,
     x: torch.Tensor,
 ) -> list[torch.Tensor]:
     """
-    Run the embedded Ultralytics graph (``inner.model``) up to — but not including — vendor heads.
+    Run the embedded vendor FPN graph (``inner.model``) up to — but not including — vendor heads.
 
     Returns feature tensors that would feed Detect/Segment/etc. (typically 3 scales).
-    Mirrors Ultralytics ``BaseModel._predict_once`` routing (``m.f``, ``save``, ``m.i``).
     """
     layer_cache: list[Any] = []
     save = getattr(inner, "save", [])
@@ -95,7 +92,7 @@ def _take_last_three_scales(feats: Sequence[torch.Tensor]) -> list[torch.Tensor]
         return [fs[0], fs[1], fs[1]]
     if len(fs) == 1:
         return [fs[0], fs[0], fs[0]]
-    raise RuntimeError("AquaForge Ultralytics backbone produced no 4D feature maps")
+    raise RuntimeError("AquaForge vendor FPN backbone produced no 4D feature maps")
 
 
 # --- AquaForge **delta-neck** (Ultralytics neck tensors → AquaForge mixer) ---
@@ -216,12 +213,12 @@ class _DeltaNeckMixer(nn.Module):
         return self.seq(x)
 
 
-class AquaForgeUltralyticsBackbone(nn.Module):
+class AquaForgeVendorFpnBackbone(nn.Module):
     """
-    Ultralytics backbone + neck → AquaForge delta-neck → seg, KP heatmaps, global KP/heading/wake.
+    Vendor FPN backbone + neck → AquaForge delta-neck → seg, KP heatmaps, global KP/heading/wake.
 
-    ``ultralytics_checkpoint`` is a vendor ``.pt`` path; see ``DEFAULT_ULTRALYTICS_VENDOR_PT`` for the
-    usual hub filename when unspecified at load.
+    ``vendor_fpn_pt`` is a vendor ``.pt`` path; see ``DEFAULT_VENDOR_FPN_WEIGHTS`` for the usual hub
+    filename when unspecified at load.
     """
 
     def __init__(
@@ -229,7 +226,7 @@ class AquaForgeUltralyticsBackbone(nn.Module):
         imgsz: int = 640,
         n_landmarks: int = NUM_LANDMARKS,
         *,
-        ultralytics_checkpoint: str | Path,
+        vendor_fpn_pt: str | Path,
         hidden: int = 256,
     ) -> None:
         super().__init__()
@@ -237,22 +234,24 @@ class AquaForgeUltralyticsBackbone(nn.Module):
             from ultralytics import YOLO
         except ImportError as e:
             raise ImportError(
-                "AquaForgeUltralyticsBackbone requires ultralytics (pip install -r requirements-ml.txt)"
+                "AquaForgeVendorFpnBackbone requires vendor FPN deps (pip install -r requirements-ml.txt)"
             ) from e
 
-        self.model_arch = ARCH_AQUAFORGE_ULTRALYTICS
+        self.model_arch = ARCH_AQUAFORGE_VENDOR_FPN
         self.imgsz = int(imgsz)
         self.n_landmarks = int(n_landmarks)
         self.hidden = int(hidden)
-        self.ultralytics_init_path = str(ultralytics_checkpoint)
+        self.vendor_fpn_init_path = str(vendor_fpn_pt)
 
-        vendor = YOLO(str(ultralytics_checkpoint))
-        self.ultra = vendor.model
-        self.ultra.eval()
+        vendor = YOLO(str(vendor_fpn_pt))
+        self.vendor_graph = vendor.model
+        self.vendor_graph.eval()
 
         with torch.no_grad():
             dummy = torch.zeros(1, 3, self.imgsz, self.imgsz)
-            feats = _take_last_three_scales(forward_ultralytics_inner_to_feature_list(self.ultra, dummy))
+            feats = _take_last_three_scales(
+                _vendor_graph_inner_to_feature_list(self.vendor_graph, dummy)
+            )
             dims = [int(f.shape[1]) for f in feats]
 
         self.neck_proj = nn.ModuleList(
@@ -278,7 +277,7 @@ class AquaForgeUltralyticsBackbone(nn.Module):
         self.wake_head = nn.Linear(self.hidden, 2)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        feats = _take_last_three_scales(forward_ultralytics_inner_to_feature_list(self.ultra, x))
+        feats = _take_last_three_scales(_vendor_graph_inner_to_feature_list(self.vendor_graph, x))
         p3, p4, p5 = [self.neck_proj[i](feats[i]) for i in range(3)]
         target_hw = p3.shape[2:]
         up4 = F.interpolate(p4, size=target_hw, mode="nearest")
@@ -306,16 +305,16 @@ def build_model(
     n_landmarks: int = NUM_LANDMARKS,
     *,
     model_arch: str = "cnn",
-    ultralytics_checkpoint: str | Path | None = None,
+    vendor_fpn_pt: str | Path | None = None,
 ) -> nn.Module:
     arch = canonical_model_arch(model_arch)
-    if arch == ARCH_AQUAFORGE_ULTRALYTICS:
-        if not ultralytics_checkpoint:
+    if arch == ARCH_AQUAFORGE_VENDOR_FPN:
+        if not vendor_fpn_pt:
             raise ValueError(
-                f"model_arch {ARCH_AQUAFORGE_ULTRALYTICS!r} requires ultralytics_checkpoint= path to a vendor .pt file"
+                f"model_arch {ARCH_AQUAFORGE_VENDOR_FPN!r} requires vendor_fpn_pt= path to a vendor .pt file"
             )
-        return AquaForgeUltralyticsBackbone(
-            imgsz=imgsz, n_landmarks=n_landmarks, ultralytics_checkpoint=ultralytics_checkpoint
+        return AquaForgeVendorFpnBackbone(
+            imgsz=imgsz, n_landmarks=n_landmarks, vendor_fpn_pt=vendor_fpn_pt
         )
     return AquaForgeMultiTask(imgsz=imgsz, n_landmarks=n_landmarks)
 
@@ -337,35 +336,35 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
     arch = canonical_model_arch(str(meta.get("model_arch", ARCH_CNN)))
     meta["model_arch"] = arch
-    upath = meta.get("ultralytics_init_path")
-    if arch == ARCH_AQUAFORGE_ULTRALYTICS:
+    upath = meta.get("vendor_fpn_init_path")
+    if arch == ARCH_AQUAFORGE_VENDOR_FPN:
         if not upath:
-            upath = DEFAULT_ULTRALYTICS_VENDOR_PT
-        m = AquaForgeUltralyticsBackbone(
-            imgsz=imgsz, n_landmarks=nl, ultralytics_checkpoint=str(upath)
+            upath = DEFAULT_VENDOR_FPN_WEIGHTS
+        m = AquaForgeVendorFpnBackbone(
+            imgsz=imgsz, n_landmarks=nl, vendor_fpn_pt=str(upath)
         )
     else:
         m = AquaForgeMultiTask(imgsz=imgsz, n_landmarks=nl)
     fv = int(meta.get("format_version", 1))
     # format_version < 3: delta-neck layout; state_dict keys differ — load non-strict.
-    if arch == ARCH_AQUAFORGE_ULTRALYTICS and fv < 3:
+    if arch == ARCH_AQUAFORGE_VENDOR_FPN and fv < 3:
         m.load_state_dict(ckpt["state_dict"], strict=False)
     else:
         m.load_state_dict(ckpt["state_dict"], strict=(fv >= 2))
     return m, meta
 
 
-def seed_cnn_encoder_from_ultralytics(model: AquaForgeMultiTask, ultralytics_pt: Any) -> int:
+def seed_cnn_encoder_from_vendor_fpn(model: AquaForgeMultiTask, vendor_fpn_pt: Any) -> int:
     """
-    Best-effort: copy weights from early Ultralytics conv/BN layers into the **CNN** encoder only.
+    Best-effort: copy weights from early vendor FPN conv/BN layers into the **CNN** encoder only.
 
-    For full ``aquaforge_ultralytics`` training use :class:`AquaForgeUltralyticsBackbone` instead.
+    For full ``aquaforge_vendor_fpn`` training use :class:`AquaForgeVendorFpnBackbone` instead.
     """
     try:
         from ultralytics import YOLO
     except ImportError:
         return 0
-    vendor = YOLO(str(ultralytics_pt))
+    vendor = YOLO(str(vendor_fpn_pt))
     src_seq = getattr(getattr(vendor, "model", None), "model", None)
     if src_seq is None:
         return 0
@@ -382,7 +381,7 @@ def seed_cnn_encoder_from_ultralytics(model: AquaForgeMultiTask, ultralytics_pt:
     return n
 
 
-def set_ultra_requires_grad(ultra: Any, requires: bool) -> None:
-    """Freeze or unfreeze the embedded Ultralytics submodule (backbone+neck+unused head params)."""
-    for p in ultra.parameters():
+def set_vendor_graph_requires_grad(vendor_graph: Any, requires: bool) -> None:
+    """Freeze or unfreeze the embedded vendor FPN submodule (backbone+neck+unused head params)."""
+    for p in vendor_graph.parameters():
         p.requires_grad = requires

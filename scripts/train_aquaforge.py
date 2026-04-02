@@ -15,14 +15,14 @@ teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation.
 ``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
 want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).
 
-Ultralytics backbone: ``--architecture aquaforge_ultralytics`` (vendor graph for backbone+neck only), ``--freeze-backbone-epochs``.
+Vendor FPN backbone: ``--architecture aquaforge_vendor_fpn`` (vendor graph for backbone+neck only), ``--freeze-backbone-epochs``.
 
-Requires: pip install -r requirements-ml.txt (``ultralytics`` for ``aquaforge_ultralytics``).
+Requires: pip install -r requirements-ml.txt (vendor FPN package for ``aquaforge_vendor_fpn``).
 
 Examples:
   py -3 scripts/train_aquaforge.py --project-root . --epochs 12 --batch-size 4
-  py -3 scripts/train_aquaforge.py --architecture aquaforge_ultralytics \\
-      --ultralytics-weights path/to/vendor.pt --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
+  py -3 scripts/train_aquaforge.py --architecture aquaforge_vendor_fpn \\
+      --vendor-fpn-weights path/to/vendor.pt --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
   py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
       --no-dynamic-balance
   py -3 scripts/train_aquaforge.py --pseudo-jsonl data/labels/pseudo_pool.jsonl \\
@@ -45,7 +45,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from aquaforge.unified.constants import DEFAULT_ULTRALYTICS_VENDOR_PT
+from aquaforge.unified.constants import DEFAULT_VENDOR_FPN_WEIGHTS
 
 
 def main() -> None:
@@ -64,7 +64,7 @@ def main() -> None:
         "--lr-backbone",
         type=float,
         default=None,
-        help="LR for embedded Ultralytics graph when using aquaforge_ultralytics (default: lr/4).",
+        help="LR for embedded vendor FPN graph when using aquaforge_vendor_fpn (default: lr/4).",
     )
     ap.add_argument("--imgsz", type=int, default=512)
     ap.add_argument("--chip-half", type=int, default=320)
@@ -72,23 +72,23 @@ def main() -> None:
         "--architecture",
         type=str,
         default="cnn",
-        choices=("cnn", "aquaforge_ultralytics"),
-        help="cnn = in-repo encoder; aquaforge_ultralytics = Ultralytics backbone+neck + AquaForge heads.",
+        choices=("cnn", "aquaforge_vendor_fpn"),
+        help="cnn = in-repo encoder; aquaforge_vendor_fpn = vendor FPN backbone+neck + AquaForge heads.",
     )
     ap.add_argument(
-        "--ultralytics-weights",
+        "--vendor-fpn-weights",
         type=str,
-        default=DEFAULT_ULTRALYTICS_VENDOR_PT,
+        default=DEFAULT_VENDOR_FPN_WEIGHTS,
         help=(
-            "Ultralytics .pt for the embedded backbone+neck when using aquaforge_ultralytics "
-            f"(default {DEFAULT_ULTRALYTICS_VENDOR_PT!r} from aquaforge.unified.constants)."
+            "Vendor .pt for the embedded backbone+neck when using aquaforge_vendor_fpn "
+            f"(default {DEFAULT_VENDOR_FPN_WEIGHTS!r} from aquaforge.unified.constants)."
         ),
     )
     ap.add_argument(
         "--freeze-backbone-epochs",
         type=int,
         default=0,
-        help="For aquaforge_ultralytics: freeze embedded Ultralytics graph for this many epochs; then train e2e.",
+        help="For aquaforge_vendor_fpn: freeze embedded vendor graph for this many epochs; then train e2e.",
     )
     ap.add_argument(
         "--output",
@@ -97,10 +97,10 @@ def main() -> None:
         help="Checkpoint path (default: data/models/aquaforge/aquaforge.pt)",
     )
     ap.add_argument(
-        "--ultralytics-seed-encoder",
+        "--vendor-fpn-seed-encoder",
         type=Path,
         default=None,
-        help="cnn only: optional Ultralytics .pt to seed early conv weights into the CNN trunk.",
+        help="cnn only: optional vendor FPN .pt to seed early conv weights into the CNN trunk.",
     )
     ap.add_argument(
         "--no-dynamic-balance",
@@ -201,8 +201,8 @@ def main() -> None:
     from aquaforge.unified.model import (
         AquaForgeMultiTask,
         build_model,
-        seed_cnn_encoder_from_ultralytics,
-        set_ultra_requires_grad,
+        seed_cnn_encoder_from_vendor_fpn,
+        set_vendor_graph_requires_grad,
     )
     from aquaforge.labels import default_labels_path
 
@@ -291,34 +291,34 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     arch = str(args.architecture).strip().lower()
-    ultra_ckpt = Path(args.ultralytics_weights)
-    if arch == "aquaforge_ultralytics":
+    vendor_ckpt = Path(args.vendor_fpn_weights)
+    if arch == "aquaforge_vendor_fpn":
         model = build_model(
             imgsz=int(args.imgsz),
             n_landmarks=NUM_LANDMARKS,
-            model_arch="aquaforge_ultralytics",
-            ultralytics_checkpoint=ultra_ckpt if ultra_ckpt.is_file() else args.ultralytics_weights,
+            model_arch="aquaforge_vendor_fpn",
+            vendor_fpn_pt=vendor_ckpt if vendor_ckpt.is_file() else args.vendor_fpn_weights,
         ).to(device)
     else:
         model = AquaForgeMultiTask(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS).to(device)
-        if args.ultralytics_seed_encoder and Path(args.ultralytics_seed_encoder).is_file():
-            n = seed_cnn_encoder_from_ultralytics(model, Path(args.ultralytics_seed_encoder))
-            print(f"Ultralytics→CNN encoder seed: {n} tensor(s) matched", flush=True)
+        if args.vendor_fpn_seed_encoder and Path(args.vendor_fpn_seed_encoder).is_file():
+            n = seed_cnn_encoder_from_vendor_fpn(model, Path(args.vendor_fpn_seed_encoder))
+            print(f"Vendor FPN→CNN encoder seed: {n} tensor(s) matched", flush=True)
 
     lr_head = float(args.lr)
     lr_bb = float(args.lr_backbone) if args.lr_backbone is not None else lr_head * 0.25
-    if arch == "aquaforge_ultralytics":
+    if arch == "aquaforge_vendor_fpn":
         head_params: list[torch.nn.Parameter] = []
-        ultra_params: list[torch.nn.Parameter] = []
+        vendor_params: list[torch.nn.Parameter] = []
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-            if name.startswith("ultra."):
-                ultra_params.append(p)
+            if name.startswith("vendor_graph."):
+                vendor_params.append(p)
             else:
                 head_params.append(p)
         opt = torch.optim.AdamW(
-            [{"params": head_params, "lr": lr_head}, {"params": ultra_params, "lr": lr_bb}],
+            [{"params": head_params, "lr": lr_head}, {"params": vendor_params, "lr": lr_bb}],
         )
     else:
         opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
@@ -332,9 +332,9 @@ def main() -> None:
 
     for epoch in range(int(args.epochs)):
         model.train()
-        if arch == "aquaforge_ultralytics":
+        if arch == "aquaforge_vendor_fpn":
             frozen = epoch < freeze_n
-            set_ultra_requires_grad(model.ultra, not frozen)
+            set_vendor_graph_requires_grad(model.vendor_graph, not frozen)
             if frozen:
                 for g in opt.param_groups:
                     if g is opt.param_groups[1]:
@@ -431,7 +431,7 @@ def main() -> None:
                 )
 
         avg = total_loss / max(n_batches, 1)
-        fr = "frozen" if arch == "aquaforge_ultralytics" and epoch < freeze_n else "e2e"
+        fr = "frozen" if arch == "aquaforge_vendor_fpn" and epoch < freeze_n else "e2e"
         ru_m = ru_epoch / max(n_batches, 1)
         # ASCII-only: Windows cp1252 consoles cannot print U+2248 (approx) or fancy punctuation.
         print(
@@ -459,9 +459,9 @@ def main() -> None:
             "auto_export_onnx": not bool(args.no_export_onnx),
         },
     }
-    if arch == "aquaforge_ultralytics":
-        upath = ultra_ckpt.resolve() if ultra_ckpt.is_file() else str(args.ultralytics_weights)
-        meta["ultralytics_init_path"] = str(upath)
+    if arch == "aquaforge_vendor_fpn":
+        upath = vendor_ckpt.resolve() if vendor_ckpt.is_file() else str(args.vendor_fpn_weights)
+        meta["vendor_fpn_init_path"] = str(upath)
 
     # Write via a Python file object: PyTorchFileWriter(path) in C++ often fails on Windows with
     # error 123 (ERROR_INVALID_NAME) for paths under OneDrive, spaces, or mixed separators; the

@@ -24,5 +24,5 @@ NUM_LANDMARKS: int = len(LANDMARK_NAMES)
 # Model / ONNX I/O version for safe loads (bump when outputs or meta keys change).
 AQUAFORGE_FORMAT_VERSION: int = 3
 
-# When ``ultralytics_init_path`` is missing at load, use this vendor hub filename (Ultralytics naming).
-DEFAULT_ULTRALYTICS_VENDOR_PT = "yolo11n.pt"
+# When ``vendor_fpn_init_path`` is missing at load, default hub filename for vendor FPN weights.
+DEFAULT_VENDOR_FPN_WEIGHTS = "yolo11n.pt"

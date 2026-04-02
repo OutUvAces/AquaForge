@@ -1,4 +1,4 @@
-"""AquaForge vs binary labels; labeled row collection."""
+"""AquaForge vs binary labels; labeled row collection (pure AquaForge evaluation path)."""
 
 from __future__ import annotations
 
@@ -10,13 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from aquaforge.unified.label_agreement import (
-    _aggregate_metrics,
-    evaluate_aquaforge_vs_binary_labels,
-)
-from aquaforge.unified.labeled_rows import (
+from aquaforge.evaluation import (
+    _agreement_aggregate_metrics,
     collect_review_labeled_points,
     collect_review_labeled_rows,
+    evaluate_aquaforge_vs_binary_labels,
 )
 
 
@@ -24,7 +22,7 @@ class TestAggregateMetrics(unittest.TestCase):
     def test_perfect(self) -> None:
         y_t = np.array([1, 0, 1], dtype=np.int64)
         y_p = np.array([1, 0, 1], dtype=np.int64)
-        m = _aggregate_metrics(y_t, y_p)
+        m = _agreement_aggregate_metrics(y_t, y_p)
         self.assertEqual(m["n_scored"], 3)
         self.assertEqual(m["n_correct"], 3)
         self.assertAlmostEqual(m["accuracy"], 1.0)
@@ -32,13 +30,15 @@ class TestAggregateMetrics(unittest.TestCase):
         self.assertEqual(m["n_negative"], 1)
 
     def test_empty(self) -> None:
-        m = _aggregate_metrics(np.array([], dtype=np.int64), np.array([], dtype=np.int64))
+        m = _agreement_aggregate_metrics(
+            np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        )
         self.assertEqual(m["n_scored"], 0)
 
 
 class TestCollectPoints(unittest.TestCase):
-    @patch("aquaforge.unified.labeled_rows.read_chip_square_rgb")
-    @patch("aquaforge.unified.labeled_rows.extract_crop_features")
+    @patch("aquaforge.evaluation.read_chip_square_rgb")
+    @patch("aquaforge.evaluation.extract_crop_features")
     def test_two_rows(self, mock_ex: object, mock_rgb: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         mock_rgb.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
@@ -73,8 +73,8 @@ class TestCollectPoints(unittest.TestCase):
             self.assertEqual(pts[0].y, 1)
             self.assertEqual(pts[1].y, 0)
 
-    @patch("aquaforge.unified.labeled_rows.read_chip_square_rgb")
-    @patch("aquaforge.unified.labeled_rows.extract_crop_features")
+    @patch("aquaforge.evaluation.read_chip_square_rgb")
+    @patch("aquaforge.evaluation.extract_crop_features")
     def test_rows_keep_extra(self, mock_ex: object, mock_rgb: object) -> None:
         mock_ex.return_value = np.ones(6, dtype=np.float64)
         mock_rgb.return_value = np.zeros((48, 48, 3), dtype=np.uint8)
@@ -102,10 +102,10 @@ class TestCollectPoints(unittest.TestCase):
 
 
 class TestEvaluateInSample(unittest.TestCase):
-    @patch("aquaforge.unified.label_agreement.aquaforge_chip_vessel_confidence")
-    @patch("aquaforge.unified.label_agreement.get_cached_aquaforge_predictor")
-    @patch("aquaforge.unified.labeled_rows.read_chip_square_rgb")
-    @patch("aquaforge.unified.labeled_rows.extract_crop_features")
+    @patch("aquaforge.evaluation.aquaforge_chip_vessel_confidence")
+    @patch("aquaforge.evaluation.get_cached_aquaforge_predictor")
+    @patch("aquaforge.evaluation.read_chip_square_rgb")
+    @patch("aquaforge.evaluation.extract_crop_features")
     def test_high_proba_matches_vessel(
         self,
         mock_ex: object,

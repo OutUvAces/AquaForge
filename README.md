@@ -6,7 +6,7 @@
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
 - **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
 
-Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** is a thin public module: **only** **`run_aquaforge_tiled_scene_triples`** and **`run_aquaforge_spot_decode`** are exported (`__all__`). Implementation lives in **`unified/_inference_impl.py`** (predictor build, NMS, tiling) — not a second detector, no alternate candidate path. **`unified/settings.py`** loads `data/config/detection.yaml`. Supporting modules: `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `unified/spot_landmarks.py`, and packaged YAML under `aquaforge/config/`. There is **no** `detection_backend`, hybrid routing, or legacy probability fields (`pred_lr_proba`, `pred_mlp_proba`, etc.). Saved **`extra`** audit keys are **`pred_aquaforge_*`** (and `aquaforge_detector_snapshot`); in-memory spots use **`aquaforge_*`**.
+Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** holds the full tiled + spot-decode stack; **only** **`run_aquaforge_tiled_scene_triples`** and **`run_aquaforge_spot_decode`** are exported (`__all__`). **`unified/settings.py`** loads `data/config/detection.yaml`. Supporting modules: `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `unified/spot_landmarks.py`, and packaged YAML under `aquaforge/config/`. Saved review **`extra`** detector audit keys use the **`aquaforge_*`** prefix (e.g. `aquaforge_confidence`, `aquaforge_detector_snapshot`).
 
 ---
 
@@ -41,13 +41,9 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder (**`--architecture cnn`**, default), or **`--architecture aquaforge_ultralytics`** with **`--ultralytics-weights`** (defaults to **`DEFAULT_ULTRALYTICS_VENDOR_PT`** in `aquaforge/unified/constants.py`). Checkpoints must store **`meta["model_arch"]`** as **`cnn`** or **`aquaforge_ultralytics`** only; unknown values raise at load. Set **`meta["ultralytics_init_path"]`** for the Ultralytics backbone `.pt` when using the ultralytics branch. Export with `scripts/export_aquaforge_onnx.py`. Inference uses AquaForge tiled scene + per-spot decode only.
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder (**`--architecture cnn`**, default), or **`--architecture aquaforge_vendor_fpn`** with **`--vendor-fpn-weights`** (defaults to **`DEFAULT_VENDOR_FPN_WEIGHTS`** in `aquaforge/unified/constants.py`). Checkpoints store **`meta["model_arch"]`** as **`cnn`** or **`aquaforge_vendor_fpn`**; set **`meta["vendor_fpn_init_path"]`** for the vendor `.pt` when using the vendor-FPN branch. Export with `scripts/export_aquaforge_onnx.py`. Inference uses AquaForge tiled scene + per-spot decode only.
 
----
-
-## External pose ONNX (optional dev tooling)
-
-For validating a **third-party** pose ONNX on chips (**not** used for scene detection or the review queue), see [`tooling/pose_onnx.py`](tooling/pose_onnx.py) and `scripts/export_shipstructure_to_onnx.py` / `scripts/validate_quantization.py`.
+Optional **third-party pose ONNX** for keypoint hints is configured only via **`detection.yaml`** (`keypoints.*`); see [`scripts/export_shipstructure_to_onnx.py`](scripts/export_shipstructure_to_onnx.py) for export notes.
 
 ---
 
@@ -86,7 +82,7 @@ Default image command runs a short [`scripts/train_aquaforge.py`](scripts/train_
 
 ## License / upstream
 
-Third-party weights (e.g. Ultralytics `.pt` checkpoints used as backbone seeds) follow their licenses. This application code is provided as-is for research and operational labeling.
+Third-party vendor FPN `.pt` checkpoints used as optional backbone seeds follow their licenses. This application code is provided as-is for research and operational labeling.
 
 ---
 

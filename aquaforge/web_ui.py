@@ -126,7 +126,7 @@ from aquaforge.scene_overview_100 import (
     shade_overview_grid_cells,
 )
 from aquaforge.s2_masks import find_scl_for_tci
-from aquaforge.unified.label_agreement import evaluate_aquaforge_vs_binary_labels
+from aquaforge.evaluation import evaluate_aquaforge_vs_binary_labels
 from aquaforge.s2_download import (
     cdse_download_ready,
     download_item_tci_scl,

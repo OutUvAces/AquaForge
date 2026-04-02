@@ -21,7 +21,7 @@ import numpy as np
 
 from aquaforge.review_schema import (
     EXTRA_AF_TRAINING_PRIORITY,
-    EXTRA_PRED_AQUAFORGE_CONFIDENCE,
+    EXTRA_AQUAFORGE_CONFIDENCE,
 )
 
 
@@ -35,11 +35,11 @@ def coastal_scene_hint(extra: dict[str, Any] | None) -> float:
 
 def small_vessel_length_hint(extra: dict[str, Any] | None) -> float:
     """
-    0–1 from ``pred_aquaforge_length_m`` when present (smaller hull proxy → higher).
+    0–1 from ``aquaforge_length_m`` in ``extra`` when present (smaller hull proxy → higher).
     Used alongside :func:`review_ui_active_learning_priority` for the training sampler.
     """
     ex = extra or {}
-    ln = ex.get("pred_aquaforge_length_m")
+    ln = ex.get("aquaforge_length_m")
     try:
         if ln is None:
             return 0.0
@@ -59,7 +59,7 @@ def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
     """
     ex = extra or {}
     u = 0.0
-    comb = ex.get(EXTRA_PRED_AQUAFORGE_CONFIDENCE)
+    comb = ex.get(EXTRA_AQUAFORGE_CONFIDENCE)
     try:
         if comb is not None:
             c = float(comb)
@@ -71,13 +71,13 @@ def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
         u += 0.2
     if ex.get("manual_locator") is True:
         u += 0.12
-    tr = ex.get("pred_aquaforge_landmark_heading_trust")
+    tr = ex.get("aquaforge_landmark_heading_trust")
     try:
         if tr is not None and float(tr) < 0.38:
             u += 0.16
     except (TypeError, ValueError):
         pass
-    ln = ex.get("pred_aquaforge_length_m")
+    ln = ex.get("aquaforge_length_m")
     try:
         if ln is not None and float(ln) < 62.0:
             u += 0.14
@@ -185,7 +185,7 @@ def review_ui_active_learning_priority(
     except (TypeError, ValueError):
         pass
 
-    comb = ex.get(EXTRA_PRED_AQUAFORGE_CONFIDENCE)
+    comb = ex.get(EXTRA_AQUAFORGE_CONFIDENCE)
     try:
         if comb is not None:
             c = float(comb)
@@ -194,7 +194,7 @@ def review_ui_active_learning_priority(
     except (TypeError, ValueError):
         pass
 
-    ln = ex.get("pred_aquaforge_length_m")
+    ln = ex.get("aquaforge_length_m")
     try:
         if ln is not None:
             lnv = float(ln)
@@ -207,7 +207,7 @@ def review_ui_active_learning_priority(
     except (TypeError, ValueError):
         pass
 
-    tr = ex.get("pred_aquaforge_landmark_heading_trust")
+    tr = ex.get("aquaforge_landmark_heading_trust")
     try:
         if tr is not None and float(tr) < 0.42:
             p += 0.55

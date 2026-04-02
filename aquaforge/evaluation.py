@@ -23,18 +23,231 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+import numpy as np
+
+from aquaforge.model_manager import (
+    aquaforge_chip_vessel_confidence,
+    get_cached_aquaforge_predictor,
+)
+from aquaforge.training_data import (
+    REVIEW_CHIP_MODEL_SIDE,
+    REVIEW_CHIP_SRC_HALF,
+    _binary_training_label,
+    extract_crop_features,
+    read_chip_square_rgb,
+)
 from aquaforge.unified.inference import (
     run_aquaforge_spot_decode,
     run_aquaforge_tiled_scene_triples,
 )
 from aquaforge.unified.settings import AquaForgeSettings, load_aquaforge_settings
 from aquaforge.labels import (
+    iter_reviews,
     iter_vessel_size_feedback,
     paths_same_underlying_file,
     resolve_stored_asset_path,
 )
-from aquaforge.unified.labeled_rows import collect_review_labeled_rows
 from aquaforge.review_overlay import read_locator_and_spot_rgb_matching_stretch
+
+
+# Labeled JSONL point rows for Pearson / tiled recall / UI agreement — inlined here (legacy
+# `unified/labeled_rows` and `label_agreement` removed; AquaForge-only evaluation path).
+DEFAULT_REVIEW_LABEL_MODEL_SIDE = REVIEW_CHIP_MODEL_SIDE
+DEFAULT_REVIEW_LABEL_SRC_HALF = REVIEW_CHIP_SRC_HALF
+
+
+@dataclass(frozen=True)
+class ReviewLabeledPoint:
+    """One supervised point used for training / evaluation."""
+
+    tci_path: Path
+    cx: float
+    cy: float
+    y: int  # 1 = vessel, 0 = negative
+
+
+@dataclass
+class ReviewLabeledRow:
+    """Point label plus ``extra`` from JSONL."""
+
+    tci_path: Path
+    cx: float
+    cy: float
+    y: int
+    extra: dict[str, Any]
+
+    def as_point(self) -> ReviewLabeledPoint:
+        return ReviewLabeledPoint(
+            tci_path=self.tci_path,
+            cx=self.cx,
+            cy=self.cy,
+            y=int(self.y),
+        )
+
+
+def collect_review_labeled_rows(
+    jsonl_path: Path,
+    project_root: Path | None = None,
+    *,
+    model_side: int = DEFAULT_REVIEW_LABEL_MODEL_SIDE,
+    src_half: int = DEFAULT_REVIEW_LABEL_SRC_HALF,
+) -> tuple[list[ReviewLabeledRow], int]:
+    """Load labeled rows with ``extra`` preserved. Skips rows without TCI or unreadable crops."""
+    root = project_root or jsonl_path.resolve().parent.parent.parent
+    if not root.joinpath("aquaforge").is_dir():
+        root = jsonl_path.resolve().parents[2]
+
+    out: list[ReviewLabeledRow] = []
+    n_skip = 0
+    for rec in iter_reviews(jsonl_path):
+        y = _binary_training_label(rec)
+        if y is None:
+            continue
+        raw_tp = rec.get("tci_path")
+        if not raw_tp:
+            n_skip += 1
+            continue
+        path = resolve_stored_asset_path(str(raw_tp), root)
+        if path is None:
+            n_skip += 1
+            continue
+        cx = float(rec["cx_full"])
+        cy = float(rec["cy_full"])
+        try:
+            extract_crop_features(path, cx, cy)
+            read_chip_square_rgb(path, cx, cy, model_side=model_side, src_half=src_half)
+        except OSError:
+            n_skip += 1
+            continue
+        ex = rec.get("extra")
+        extra_copy = dict(ex) if isinstance(ex, dict) else {}
+        out.append(
+            ReviewLabeledRow(
+                tci_path=path,
+                cx=cx,
+                cy=cy,
+                y=int(y),
+                extra=extra_copy,
+            )
+        )
+    return out, n_skip
+
+
+def collect_review_labeled_points(
+    jsonl_path: Path,
+    project_root: Path | None = None,
+    *,
+    model_side: int = DEFAULT_REVIEW_LABEL_MODEL_SIDE,
+    src_half: int = DEFAULT_REVIEW_LABEL_SRC_HALF,
+) -> tuple[list[ReviewLabeledPoint], int]:
+    rows, n_skip = collect_review_labeled_rows(
+        jsonl_path,
+        project_root,
+        model_side=model_side,
+        src_half=src_half,
+    )
+    return [r.as_point() for r in rows], n_skip
+
+
+def _agreement_binary_pred_from_proba(p: float | None, *, threshold: float) -> int | None:
+    if p is None:
+        return None
+    return 1 if float(p) >= threshold else 0
+
+
+def _agreement_aggregate_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> dict[str, Any]:
+    from sklearn.metrics import accuracy_score, f1_score
+
+    n = int(y_true.shape[0])
+    if n == 0:
+        return {
+            "n_scored": 0,
+            "n_correct": 0,
+            "accuracy": None,
+            "f1": None,
+            "n_vessel": 0,
+            "n_negative": 0,
+        }
+    n_correct = int((y_true == y_pred).sum())
+    return {
+        "n_scored": n,
+        "n_correct": n_correct,
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "n_vessel": int((y_true == 1).sum()),
+        "n_negative": int((y_true == 0).sum()),
+    }
+
+
+def evaluate_aquaforge_vs_binary_labels(
+    jsonl_path: Path,
+    *,
+    project_root: Path | None = None,
+    threshold: float | None = None,
+    model_side: int = DEFAULT_REVIEW_LABEL_MODEL_SIDE,
+    src_half: int = DEFAULT_REVIEW_LABEL_SRC_HALF,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Score AquaForge P(vessel) at each labeled point vs binary label (Streamlit diagnostics)."""
+    _ = kwargs
+    root = project_root or jsonl_path.resolve().parent.parent.parent
+    if not root.joinpath("aquaforge").is_dir():
+        root = jsonl_path.resolve().parents[2]
+
+    points, n_skipped_collect = collect_review_labeled_points(
+        jsonl_path,
+        root,
+        model_side=model_side,
+        src_half=src_half,
+    )
+    settings = load_aquaforge_settings(root)
+    thr_af = float(threshold) if threshold is not None else float(settings.aquaforge.conf_threshold)
+
+    base: dict[str, Any] = {
+        "mode": "in_sample",
+        "n_labeled_points": len(points),
+        "n_skipped_collect": int(n_skipped_collect),
+        "threshold": thr_af,
+        "scorer": "aquaforge",
+    }
+
+    if not points:
+        base["error"] = "no_labeled_points"
+        base["metrics"] = _agreement_aggregate_metrics(
+            np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        )
+        return base
+
+    pred_af = get_cached_aquaforge_predictor(root, settings)
+    if pred_af is None:
+        base["error"] = "no_aquaforge_weights"
+        base["metrics"] = _agreement_aggregate_metrics(
+            np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        )
+        return base
+
+    scored_true: list[int] = []
+    scored_pred: list[int] = []
+    n_unscored = 0
+    for row in points:
+        py = aquaforge_chip_vessel_confidence(pred_af, row.tci_path, row.cx, row.cy)
+        pr = _agreement_binary_pred_from_proba(py, threshold=thr_af)
+        if pr is None:
+            n_unscored += 1
+            continue
+        scored_true.append(row.y)
+        scored_pred.append(pr)
+    metrics = _agreement_aggregate_metrics(
+        np.array(scored_true, dtype=np.int64),
+        np.array(scored_pred, dtype=np.int64),
+    )
+    metrics["n_unscored_fused"] = int(n_unscored)
+    base["metrics"] = metrics
+    base["cv_splits_used"] = None
+    return base
 
 
 _EVAL_CHIP_TARGET_SIDE_M = 1000.0

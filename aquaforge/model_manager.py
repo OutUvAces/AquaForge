@@ -36,7 +36,7 @@ def get_cached_aquaforge_predictor(project_root: Path, settings: Any) -> Any | N
     The same predictor powers single-chip review and
     :meth:`AquaForgePredictor.run_tiled_scene_candidates` for full-scene detection.
     """
-    from aquaforge.unified._inference_impl import build_aquaforge_predictor
+    from aquaforge.unified.inference import build_aquaforge_predictor
     from aquaforge.unified.settings import (
         resolve_aquaforge_checkpoint_path,
         resolve_aquaforge_onnx_path,

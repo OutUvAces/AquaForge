@@ -1,7 +1,8 @@
 """
 ShipStructure / pose ONNX options (standalone — not part of :class:`AquaForgeSettings`).
 
-Used by :mod:`tooling.pose_onnx` (optional pose ONNX scripts) and ``detection.yaml`` reference docs.
+Wired from ``detection.yaml`` when external keypoint ONNX is enabled; see export notes in
+``scripts/export_shipstructure_to_onnx.py``.
 """
 
 from __future__ import annotations
