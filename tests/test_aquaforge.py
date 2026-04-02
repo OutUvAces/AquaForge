@@ -132,13 +132,18 @@ class TestAquaForgeConstants(unittest.TestCase):
         self.assertEqual(NUM_LANDMARKS, 8)
 
 
-class TestTrainingArchNormalize(unittest.TestCase):
-    def test_normalize_yolo_unified_meta_alias(self) -> None:
-        from aquaforge.unified.model import ARCH_AQUAFORGE_ULTRALYTICS, normalize_training_arch
+class TestCanonicalModelArch(unittest.TestCase):
+    def test_accepts_cnn_and_ultralytics_branch(self) -> None:
+        from aquaforge.unified.model import ARCH_AQUAFORGE_ULTRALYTICS, ARCH_CNN, canonical_model_arch
 
-        self.assertEqual(normalize_training_arch("yolo_unified"), ARCH_AQUAFORGE_ULTRALYTICS)
-        self.assertEqual(normalize_training_arch("aquaforge_ultralytics"), ARCH_AQUAFORGE_ULTRALYTICS)
-        self.assertEqual(normalize_training_arch("cnn"), "cnn")
+        self.assertEqual(canonical_model_arch("cnn"), ARCH_CNN)
+        self.assertEqual(canonical_model_arch("aquaforge_ultralytics"), ARCH_AQUAFORGE_ULTRALYTICS)
+
+    def test_rejects_unknown_arch_strings(self) -> None:
+        from aquaforge.unified.model import canonical_model_arch
+
+        with self.assertRaises(ValueError):
+            canonical_model_arch("unknown_stack")
 
 
 class TestAquaForgeLosses(unittest.TestCase):

@@ -1,14 +1,14 @@
 """
-AquaForge unified multi-task models.
+AquaForge unified multi-task models — single training graph, no alternate detector stacks.
 
-Canonical training architectures (``meta["model_arch"]``):
+Canonical ``meta["model_arch"]`` values:
 
 1. **cnn** — :class:`AquaForgeMultiTask` (in-repo encoder).
-2. **aquaforge_ultralytics** — :class:`AquaForgeUltralyticsBackbone`: vendor Ultralytics **backbone+neck**
-   only, then AquaForge **delta-neck** + heads. Checkpoint init path: ``ultralytics_init_path``.
+2. **aquaforge_ultralytics** — :class:`AquaForgeUltralyticsBackbone`: vendor Ultralytics backbone+neck,
+   then AquaForge delta-neck + heads. Init path: ``ultralytics_init_path``.
 
-Checkpoint meta may still use the deprecated tag ``model_arch: "yolo_unified"``; :func:`normalize_training_arch` maps
-that to ``aquaforge_ultralytics`` on load. New training runs write ``aquaforge_ultralytics`` only.
+Unknown ``model_arch`` strings are rejected at build/load time. Only ``ultralytics.YOLO`` and vendor
+``module.type`` literals (e.g. detect-head class names) reference third-party symbols.
 
 We do **not** reuse vendor detect/segment losses; only early features feed AquaForge.
 """
@@ -22,19 +22,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from aquaforge.unified.constants import NUM_LANDMARKS
+from aquaforge.unified.constants import (
+    DEFAULT_ULTRALYTICS_VENDOR_PT,
+    NUM_LANDMARKS,
+)
 
 ARCH_CNN = "cnn"
 ARCH_AQUAFORGE_ULTRALYTICS = "aquaforge_ultralytics"
-# Deprecated checkpoint meta only; normalized in :func:`normalize_training_arch`.
-_ARCH_DEPRECATED_ULTRALYTICS_ALIASES = frozenset({"yolo_unified"})
 
 
-def normalize_training_arch(name: str) -> str:
+def canonical_model_arch(name: str) -> str:
+    """Return ``cnn`` or ``aquaforge_ultralytics``; reject anything else (no alternate arch tags)."""
     a = str(name).strip().lower()
-    if a in _ARCH_DEPRECATED_ULTRALYTICS_ALIASES:
+    if a == ARCH_CNN:
+        return ARCH_CNN
+    if a == ARCH_AQUAFORGE_ULTRALYTICS:
         return ARCH_AQUAFORGE_ULTRALYTICS
-    return a
+    raise ValueError(
+        f"Unknown model_arch {name!r}; use {ARCH_CNN!r} or {ARCH_AQUAFORGE_ULTRALYTICS!r} in checkpoint meta."
+    )
 
 
 # Ultralytics ``module.type`` strings for heads we stop before (vendor detect/segment/pose, etc.).
@@ -61,18 +67,22 @@ def forward_ultralytics_inner_to_feature_list(
     Returns feature tensors that would feed Detect/Segment/etc. (typically 3 scales).
     Mirrors Ultralytics ``BaseModel._predict_once`` routing (``m.f``, ``save``, ``m.i``).
     """
-    y: list[Any] = []
+    layer_cache: list[Any] = []
     save = getattr(inner, "save", [])
     for m in inner.model:
         if m.f != -1:
-            x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            x = (
+                layer_cache[m.f]
+                if isinstance(m.f, int)
+                else [x if j == -1 else layer_cache[j] for j in m.f]
+            )
         mt = getattr(m, "type", "") or type(m).__name__
         if mt in _ULTRALYTICS_VENDOR_HEAD_TYPES:
             if isinstance(m.f, int):
-                return [y[m.f]]
-            return [y[j] for j in m.f]
+                return [layer_cache[m.f]]
+            return [layer_cache[j] for j in m.f]
         x = m(x)
-        y.append(x if m.i in save else None)
+        layer_cache.append(x if m.i in save else None)
     return [x]
 
 
@@ -210,9 +220,8 @@ class AquaForgeUltralyticsBackbone(nn.Module):
     """
     Ultralytics backbone + neck → AquaForge delta-neck → seg, KP heatmaps, global KP/heading/wake.
 
-    ``ultralytics_checkpoint`` is any Ultralytics ``.pt`` (e.g. ``yolo11n.pt``) used to build
-    the inner ``nn.Module`` graph; AquaForge heads are trained jointly (or the inner graph is frozen
-    for a warmup epoch range).
+    ``ultralytics_checkpoint`` is a vendor ``.pt`` path; see ``DEFAULT_ULTRALYTICS_VENDOR_PT`` for the
+    usual hub filename when unspecified at load.
     """
 
     def __init__(
@@ -237,8 +246,8 @@ class AquaForgeUltralyticsBackbone(nn.Module):
         self.hidden = int(hidden)
         self.ultralytics_init_path = str(ultralytics_checkpoint)
 
-        y = YOLO(str(ultralytics_checkpoint))
-        self.ultra = y.model
+        vendor = YOLO(str(ultralytics_checkpoint))
+        self.ultra = vendor.model
         self.ultra.eval()
 
         with torch.no_grad():
@@ -299,7 +308,7 @@ def build_model(
     model_arch: str = "cnn",
     ultralytics_checkpoint: str | Path | None = None,
 ) -> nn.Module:
-    arch = normalize_training_arch(model_arch)
+    arch = canonical_model_arch(model_arch)
     if arch == ARCH_AQUAFORGE_ULTRALYTICS:
         if not ultralytics_checkpoint:
             raise ValueError(
@@ -326,12 +335,12 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     meta = dict(ckpt.get("meta") or {})
     imgsz = int(meta.get("imgsz", 512))
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
-    arch = normalize_training_arch(str(meta.get("model_arch", ARCH_CNN)))
+    arch = canonical_model_arch(str(meta.get("model_arch", ARCH_CNN)))
     meta["model_arch"] = arch
     upath = meta.get("ultralytics_init_path")
     if arch == ARCH_AQUAFORGE_ULTRALYTICS:
         if not upath:
-            upath = "yolo11n.pt"
+            upath = DEFAULT_ULTRALYTICS_VENDOR_PT
         m = AquaForgeUltralyticsBackbone(
             imgsz=imgsz, n_landmarks=nl, ultralytics_checkpoint=str(upath)
         )
@@ -356,8 +365,8 @@ def seed_cnn_encoder_from_ultralytics(model: AquaForgeMultiTask, ultralytics_pt:
         from ultralytics import YOLO
     except ImportError:
         return 0
-    y = YOLO(str(ultralytics_pt))
-    src_seq = getattr(getattr(y, "model", None), "model", None)
+    vendor = YOLO(str(ultralytics_pt))
+    src_seq = getattr(getattr(vendor, "model", None), "model", None)
     if src_seq is None:
         return 0
     dst_params = list(model.encoder.seq.parameters())

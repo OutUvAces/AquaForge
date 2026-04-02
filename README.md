@@ -41,7 +41,7 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder (**`--architecture cnn`**, default), or **`--architecture aquaforge_ultralytics`** with **`--ultralytics-weights`** (vendor `.pt` for backbone+neck only; AquaForge heads on top). Checkpoints store **`meta["model_arch"]`** (`cnn` or `aquaforge_ultralytics`) and **`meta["ultralytics_init_path"]`** when applicable. Very old checkpoints may still say `model_arch: yolo_unified`; loaders normalize that to `aquaforge_ultralytics`. Export with `scripts/export_aquaforge_onnx.py`. Inference always uses AquaForge tiled scene + per-spot decode.
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN encoder (**`--architecture cnn`**, default), or **`--architecture aquaforge_ultralytics`** with **`--ultralytics-weights`** (defaults to **`DEFAULT_ULTRALYTICS_VENDOR_PT`** in `aquaforge/unified/constants.py`). Checkpoints must store **`meta["model_arch"]`** as **`cnn`** or **`aquaforge_ultralytics`** only; unknown values raise at load. Set **`meta["ultralytics_init_path"]`** for the Ultralytics backbone `.pt` when using the ultralytics branch. Export with `scripts/export_aquaforge_onnx.py`. Inference uses AquaForge tiled scene + per-spot decode only.
 
 ---
 

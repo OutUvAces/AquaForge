@@ -21,8 +21,8 @@ Requires: pip install -r requirements-ml.txt (``ultralytics`` for ``aquaforge_ul
 
 Examples:
   py -3 scripts/train_aquaforge.py --project-root . --epochs 12 --batch-size 4
-  py -3 scripts/train_aquaforge.py --architecture aquaforge_ultralytics --ultralytics-weights yolo11n.pt \\
-      --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
+  py -3 scripts/train_aquaforge.py --architecture aquaforge_ultralytics \\
+      --ultralytics-weights path/to/vendor.pt --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
   py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
       --no-dynamic-balance
   py -3 scripts/train_aquaforge.py --pseudo-jsonl data/labels/pseudo_pool.jsonl \\
@@ -44,6 +44,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from aquaforge.unified.constants import DEFAULT_ULTRALYTICS_VENDOR_PT
 
 
 def main() -> None:
@@ -76,8 +78,11 @@ def main() -> None:
     ap.add_argument(
         "--ultralytics-weights",
         type=str,
-        default="yolo11n.pt",
-        help="Ultralytics .pt used to build the inner graph when model_arch is aquaforge_ultralytics.",
+        default=DEFAULT_ULTRALYTICS_VENDOR_PT,
+        help=(
+            "Ultralytics .pt for the embedded backbone+neck when using aquaforge_ultralytics "
+            f"(default {DEFAULT_ULTRALYTICS_VENDOR_PT!r} from aquaforge.unified.constants)."
+        ),
     )
     ap.add_argument(
         "--freeze-backbone-epochs",
