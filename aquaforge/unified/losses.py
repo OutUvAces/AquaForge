@@ -885,8 +885,20 @@ def aquaforge_joint_loss(
     * ``weights = dynamic_loss_weights(batch_context)`` with ``batch_context = {**float_summaries, \"mask_area\": tensor}``.
       ``total_core = Σ curriculum[k] * weights[k] * loss_k`` for the four branches.
 
-    Returns ``(total, logs)``; ``logs`` includes ``dw_*`` copies of ``weights`` (trainer / EMA need
-    ``loss_*`` keys; spec ``return total, weights`` is represented by ``weights`` embedded as ``dw_*``).
+    Returns ``(total, logs)``. The spec sketch ``return total, weights`` is mapped here as: the
+    dynamic multipliers are ``logs['dw_seg']`` … ``logs['dw_wake']`` (same numeric values as
+    ``weights['seg']`` … ``weights['wake']``), plus ``loss_*`` / ``loss_total`` for
+    :class:`DynamicLossBalancer` and the trainer.
+
+    **Spec pseudocode (reference — implemented below with ``out``/``batch``/``stage_weights`` wiring):** ::
+
+        # small_weight = 1.0 + 3.0 * exp(-batch_context['mask_area'] / 8000.0)
+        # seg_loss = mean((dice_loss(pred['seg'],gt['seg'])+soft_iou_loss(...)) * small_weight)  # per-chip
+        # kp_loss = adaptive_keypoint_heatmap_loss(pred['kp_hm'], gt['kp_hm'], gt['kp_vis'])
+        # heading_loss = circular_heading_loss(pred['heading_sin_cos'], gt['heading_sin_cos'], gt['kp_vis'])
+        # wake_loss = wake_direction_loss(pred['wake_dir'], gt['wake_dir'], pred['heading_sin_cos'])
+        # weights = dynamic_loss_weights(batch_context)
+        # total_core = weights['seg']*seg_loss + weights['kp']*kp_loss + weights['heading']*heading_loss + weights['wake']*wake_loss
     """
     logs: dict[str, float] = {}
     dev = out["cls_logit"].device
