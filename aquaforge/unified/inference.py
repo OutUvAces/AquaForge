@@ -745,6 +745,10 @@ def _aquaforge_spot_to_overlay_dict(
         "aquaforge_landmarks_xy_fullres": None,
         "aquaforge_wake_segment_fullres": None,
         "aquaforge_model_ready": False,
+        "aquaforge_chip_col_off": None,
+        "aquaforge_chip_row_off": None,
+        "aquaforge_chip_w": None,
+        "aquaforge_chip_h": None,
     }
 
     warnings: list[str] = []
@@ -768,6 +772,10 @@ def _aquaforge_spot_to_overlay_dict(
     ic0 = int(ar.chip_col_off)
     ir0 = int(ar.chip_row_off)
     _ = spot_col_off, spot_row_off
+    out["aquaforge_chip_col_off"] = ic0
+    out["aquaforge_chip_row_off"] = ir0
+    out["aquaforge_chip_w"] = int(ar.chip_w)
+    out["aquaforge_chip_h"] = int(ar.chip_h)
 
     poly_crop = polygon_fullres_to_crop(ar.polygon_fullres, ic0, ir0)
     if poly_crop:

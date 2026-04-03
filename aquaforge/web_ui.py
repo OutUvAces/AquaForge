@@ -64,7 +64,6 @@ def _resolve_af_brand_dir() -> Path | None:
         for name in (
             "AquaForge_small.jpg",
             "AquaForge_text.jpg",
-            "AquaForge_large.jpg",
         ):
             if (d / name).is_file():
                 return d
@@ -217,7 +216,7 @@ PREVIEW_THUMB_DIR = SAMPLES_DIR / ".preview_thumbnails"
 DEFAULT_BBOX = "103.6,1.05,104.2,1.45"
 DEFAULT_DATETIME = "2024-06-01T00:00:00Z/2024-06-15T23:59:59Z"
 MIN_OPEN_WATER_FRACTION = 0.01
-REVIEW_CHIP_TARGET_SIDE_M = 1000.0
+REVIEW_CHIP_TARGET_SIDE_M = 400.0
 REVIEW_LOCATOR_TARGET_SIDE_M = 10000.0
 # Close-up (main focus) — single large square in the calm review layout.
 CHIP_DISPLAY_MAIN = 820
@@ -229,6 +228,11 @@ DETECTION_POOL_MIN = 32
 DETECTION_POOL_MULT = 6
 DETECTION_POOL_CAP = 128
 LABEL_CONFIDENCE_EXTRA_KEY = "label_confidence"
+
+# Module-level JP2 chip read cache — avoids re-reading from disk on every Streamlit rerun
+# (e.g. when toggling overlays).  Keyed by (tci_path, cx, cy, spot_px, loc_px).
+# Safe for a single-user local server; bounded naturally by the number of active spots.
+_CHIP_READ_CACHE: dict[tuple, tuple] = {}
 
 
 def _detection_pool_size(max_k: int) -> int:
@@ -356,9 +360,19 @@ def _ui_styles() -> None:
   }
   p.vd-deck-foot, span.vd-deck-foot { font-size: 0.68rem !important; color: #64748b; line-height: 1.3; margin: 0.1rem 0 0 0 !important; }
   div[data-testid="column"] span.vd-metric { font-size: 0.72rem !important; color: #475569; font-weight: 600; }
-  /* Repo branding: hero + title row */
-  .af-brand-hero-wrap { text-align: center; margin: 0.15rem auto 0.85rem auto; max-width: 420px; }
-  .af-brand-hero-wrap img { max-width: 400px; width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 10px; box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12); }
+  /* Seamless banner: logo + background appear as one continuous object */
+  .af-seamless-banner {
+    background: #0c1220;
+    padding: 2rem 0 1.5rem 0;
+    margin: -1rem -3rem 1.5rem -3rem;
+    text-align: center;
+    width: 100%;
+  }
+  .af-seamless-banner img {
+    display: block;
+    margin: 0 auto;
+    box-shadow: none;
+  }
 </style>
         """,
         unsafe_allow_html=True,
@@ -1258,6 +1272,37 @@ def _sidebar_spot_finding_settings() -> None:
             key="webui_scl_path",
             placeholder="path to …SCL…jp2",
         )
+        # Detection threshold controls
+        st.markdown("**Detection sensitivity**")
+        _cur_conf = float(st.session_state.get("af_conf_threshold_override", 0.05))
+        _cur_prop = float(st.session_state.get("af_proposal_threshold_override", 0.02))
+        _thr_col1, _thr_col2 = st.columns(2)
+        with _thr_col1:
+            st.number_input(
+                "Confidence threshold",
+                min_value=0.01, max_value=1.0, step=0.01,
+                value=_cur_conf,
+                key="af_conf_threshold_override",
+                help="Lower = more detections. Default: 0.05",
+            )
+        with _thr_col2:
+            st.number_input(
+                "Proposal floor",
+                min_value=0.001, max_value=1.0, step=0.005,
+                value=_cur_prop,
+                key="af_proposal_threshold_override",
+                help="Lower = more candidates before NMS. Default: 0.02",
+            )
+        if st.button("🔍 Use lower thresholds (detect more)", key="btn_lower_thresholds"):
+            st.session_state["af_conf_threshold_override"] = 0.01
+            st.session_state["af_proposal_threshold_override"] = 0.005
+            st.session_state.last_scene_key = ""
+            st.rerun()
+        if st.button("↺ Reset thresholds to default", key="btn_reset_thresholds"):
+            st.session_state["af_conf_threshold_override"] = 0.05
+            st.session_state["af_proposal_threshold_override"] = 0.02
+            st.session_state.last_scene_key = ""
+            st.rerun()
         # AquaForge is the default; no backend picker. Optional YAML is for power users / ML tuning only.
         with st.expander("Optional: advanced config", expanded=False):
             ex_p = example_aquaforge_yaml_path()
@@ -1285,35 +1330,28 @@ def _sidebar_spot_finding_settings() -> None:
 
 
 def _render_af_branding_header(brand_dir: Path | None) -> None:
-    """Main column: text mark + title row, then responsive hero (``AquaForge_large.jpg``, max 400px)."""
+    """Single seamless banner using AquaForge_text.jpg at 50% size."""
     if brand_dir is None:
         st.markdown("# AquaForge")
         return
+
     p_text = brand_dir / "AquaForge_text.jpg"
-    p_large = brand_dir / "AquaForge_large.jpg"
-    if p_text.is_file() and p_large.is_file():
-        b64_hero = base64.b64encode(p_large.read_bytes()).decode("ascii")
-        c_logo, c_title = st.columns([1, 2], gap="small")
-        with c_logo:
-            try:
-                st.image(Image.open(p_text).convert("RGB"), use_container_width=True)
-            except OSError:
-                st.image(str(p_text), use_container_width=True)
-        with c_title:
-            st.markdown("# AquaForge")
-        st.markdown(
-            f'<div class="af-brand-hero-wrap"><img src="data:image/jpeg;base64,{b64_hero}" alt="AquaForge" /></div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("---")
+    if not p_text.is_file():
+        st.markdown("# AquaForge")
         return
-    st.markdown("# AquaForge")
-    if p_large.is_file():
-        try:
-            st.image(Image.open(p_large).convert("RGB"), width=400)
-        except OSError:
-            st.image(str(p_large), width=400)
-        st.markdown("---")
+
+    # Single seamless banner - no wrapper div, direct full-width background
+    st.markdown(
+        '<div style="background:#0c1220; padding:2rem 0; margin:0 -3rem 1.5rem -3rem; text-align:center; width:100%;">',
+        unsafe_allow_html=True,
+    )
+    try:
+        img = Image.open(p_text).convert("RGB")
+        st.image(img, width=int(img.width * 0.5))
+    except Exception:
+        st.image(str(p_text), width=400)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("---")
 
 
 def main() -> None:
@@ -1351,7 +1389,36 @@ def main() -> None:
     if _af_train_flash:
         st.success(str(_af_train_flash))
 
-    _render_af_branding_header(brand_dir)
+    # Banner: base64 image in single st.markdown call so logo+background are one object.
+    # Sample exact bg color from image corner pixel; pad=0 so banner height = image height.
+    p_text = brand_dir / "AquaForge_text.jpg" if brand_dir is not None else None
+    if p_text and p_text.is_file():
+        try:
+            import io
+            img = Image.open(p_text).convert("RGB")
+            # Sample background color from top-left corner of image
+            r, g, b = img.getpixel((4, 4))
+            bg_hex = f"#{r:02x}{g:02x}{b:02x}"
+            # Resize to 35%
+            img_small = img.resize((int(img.width * 0.35), int(img.height * 0.35)), Image.LANCZOS)
+            buf = io.BytesIO()
+            img_small.save(buf, format="JPEG", quality=92)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            st.markdown(
+                f'<div style="background:{bg_hex};'
+                f'width:100vw;position:relative;left:50%;'
+                f'transform:translateX(-50%);'
+                f'padding:0;margin-bottom:1.5rem;line-height:0;text-align:center;">'
+                f'<img src="data:image/jpeg;base64,{b64}" '
+                f'style="display:inline-block;height:auto;vertical-align:bottom;" />'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            st.markdown("# AquaForge")
+    else:
+        st.markdown("# AquaForge")
+    st.markdown("---")
 
     if st.session_state.get("vd_ui_mode") == "training_review":
         render_training_label_review_ui(
@@ -1442,6 +1509,18 @@ def main() -> None:
             ):
                 st.session_state["vd_ui_mode"] = "training_review"
                 st.rerun()
+
+            # Stop server button - allows clean termination and relaunch
+            if st.button(
+                "🛑 Stop Server (Exit AquaForge)",
+                type="secondary",
+                key="stop_server_btn",
+            ):
+                st.error("Server stopping...")
+                import os, time
+                time.sleep(0.5)
+                os._exit(0)
+
             if tci_loaded_sidebar:
                 with st.expander("Whole-scene map", expanded=False):
                     _render_hundred_cell_overview(
@@ -1513,6 +1592,13 @@ def main() -> None:
         else:
             try:
                 det_cfg = load_aquaforge_settings(ROOT)
+                # Apply session-state threshold overrides (from sidebar sliders / one-click button)
+                _conf_ov = st.session_state.get("af_conf_threshold_override")
+                _prop_ov = st.session_state.get("af_proposal_threshold_override")
+                if _conf_ov is not None:
+                    det_cfg.aquaforge.conf_threshold = float(_conf_ov)
+                if _prop_ov is not None:
+                    det_cfg.aquaforge.tiled_min_proposal_confidence = float(_prop_ov)
                 pool = _detector_fetch_pool_size(max_k)
                 with st.spinner(
                     "AquaForge full-scene tiled detection: overlapping windows, NMS merge, "
@@ -1561,9 +1647,9 @@ def main() -> None:
                             st.warning(f"AquaForge tiled detection: {_em}")
                         else:
                             st.warning(
-                                "No vessels detected above the current confidence threshold, or the scene is empty. "
-                                "Try lowering `aquaforge.conf_threshold` / `tiled_min_proposal_confidence` in `detection.yaml`, "
-                                "or verify weights."
+                                "No vessels detected above the current confidence threshold. "
+                                "Open **← Advanced → Detection sensitivity** and click "
+                                "**🔍 Use lower thresholds** then **Refresh spot list**, or verify weights."
                             )
                     else:
                         st.warning(
@@ -2105,9 +2191,15 @@ def _render_review_deck(
             st.toggle("Direction", key="vd_ov_dir")
             st.toggle("Keypoints", key="vd_ov_mark")
             st.toggle("Wake", key="vd_ov_wake")
-            st.caption(
-                "**Outline** = cyan hull/mask edge. **Direction** = **yellow arrow** — estimated "
-                "heading (bow direction vs. north), not the mask."
+            st.markdown(
+                "<div style='font-size:0.78em;line-height:2;margin-top:4px'>"
+                "<span style='color:#00ffdc;font-size:1.3em'>▬</span>&nbsp;<b>Outline</b> — cyan hull / mask boundary<br>"
+                "<span style='color:#ffe040;font-size:1.3em'>↑</span>&nbsp;<b>Direction</b> — yellow heading arrow (north = up)<br>"
+                "<span style='color:#ff00c8;font-size:1.3em'>●</span>&nbsp;<b>Keypoints</b> — purple structural landmarks<br>"
+                "<span style='color:#ff9b00;font-size:1.3em'>─</span>&nbsp;<b>Wake</b> — orange-yellow wake / motion line<br>"
+                "<span style='color:#78ff50;font-size:1.3em'>─</span>&nbsp;<b>Keel</b> — green bow-to-stern axis"
+                "</div>",
+                unsafe_allow_html=True,
             )
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2135,19 +2227,14 @@ def _render_review_deck(
     chip_px, locator_px, gdx, gdy, gavg = _cached_review_crop_metrics(
         str(tci_p.resolve()), mt
     )
-    # Review close-up uses REVIEW_CHIP_TARGET_SIDE_M (~1 km ground). Overlays reproject from
-    # full-res using this window (aquaforge_landmarks_xy_fullres, aquaforge_wake_segment_fullres, hull).
     spot_px_read = int(chip_px)
-    loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = (
-        read_locator_and_spot_rgb_matching_stretch(
-            tci_p, cx, cy, spot_px_read, locator_px
-        )
-    )
+
+    # --- Step 1: Run inference first (does not depend on the JP2 chip read) ---
     _mscl = (meta or {}).get("scl_path")
     _scl_for_spot = Path(str(_mscl)) if _mscl else None
     if _scl_for_spot is not None and not _scl_for_spot.is_file():
         _scl_for_spot = None
-    # Cache key: idx + fine coords so overlay inference never reuses another spot when windows round the same.
+    # Inference sig excludes sc0/sr0 because they are ignored inside run_aquaforge_spot_decode.
     af_spot_sig = (
         _detection_yaml_mtime(ROOT),
         mt,
@@ -2155,11 +2242,7 @@ def _render_review_deck(
         round(cx, 7),
         round(cy, 7),
         "aquaforge",
-        "spot_ov7",
-        int(sc0),
-        int(sr0),
-        int(scw),
-        int(sch),
+        "spot_ov8",
     ) + ((_af_overlay_allow,) if det_settings.ui_require_checkbox_for_aquaforge_overlays else ())
     af_spot_state_k = f"vd_aquaforge_spot_{spot_k}"
     if det_settings.ui_require_checkbox_for_aquaforge_overlays and not _af_overlay_allow:
@@ -2172,12 +2255,42 @@ def _render_review_deck(
             cx,
             cy,
             det_settings,
-            spot_col_off=int(sc0),
-            spot_row_off=int(sr0),
+            spot_col_off=0,
+            spot_row_off=0,
             scl_path=_scl_for_spot,
         )
         st.session_state[af_spot_state_k + "_sig"] = af_spot_sig
     af_spot = st.session_state.get(af_spot_state_k, {}) or {}
+
+    # --- Step 2: Determine display center — hull polygon centroid when available ---
+    display_cx, display_cy = float(cx), float(cy)
+    _hull_full = af_spot.get("aquaforge_hull_polygon_fullres")
+    if isinstance(_hull_full, list) and len(_hull_full) >= 3:
+        try:
+            _hxs = [float(p[0]) for p in _hull_full if isinstance(p, (list, tuple)) and len(p) >= 2]
+            _hys = [float(p[1]) for p in _hull_full if isinstance(p, (list, tuple)) and len(p) >= 2]
+            if _hxs and _hys:
+                _hcx = sum(_hxs) / len(_hxs)
+                _hcy = sum(_hys) / len(_hys)
+                # Only use hull centroid if it is within 2× the chip radius of the detection center
+                # (guards against fully-off-center masks from an immature model).
+                _max_drift = spot_px_read * 2.0
+                if abs(_hcx - cx) <= _max_drift and abs(_hcy - cy) <= _max_drift:
+                    display_cx, display_cy = _hcx, _hcy
+        except Exception:
+            pass
+
+    # --- Step 3: Read JP2 chip — use module-level cache to avoid re-reading on every toggle ---
+    _chip_cache_key = (str(tci_p.resolve()), round(display_cx, 2), round(display_cy, 2), spot_px_read, locator_px, mt)
+    if _chip_cache_key not in _CHIP_READ_CACHE:
+        _CHIP_READ_CACHE[_chip_cache_key] = read_locator_and_spot_rgb_matching_stretch(
+            tci_p, display_cx, display_cy, spot_px_read, locator_px
+        )
+        # Evict old entries if cache grows too large (keep last 64 chips ≈ ~50 MB at 400m/10m GSD).
+        if len(_CHIP_READ_CACHE) > 64:
+            _oldest = next(iter(_CHIP_READ_CACHE))
+            del _CHIP_READ_CACHE[_oldest]
+    loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = _CHIP_READ_CACHE[_chip_cache_key]
 
     pool = st.session_state.get("detector_unlabeled_pool_all") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
