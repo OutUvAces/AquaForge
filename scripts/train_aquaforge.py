@@ -12,8 +12,10 @@ scores, small-ship cues, clouds, manual map picks, optional ``af_training_priori
 :class:`torch.utils.data.WeightedRandomSampler` (unless ``--no-priority-sampling``) oversamples those
 chips. Each epoch, ``hydrate_teacher_signals`` walks the same priority queue and runs an **AquaForge**
 teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation. **Self-training**:
-``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
-want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).
+``--pseudo-jsonl`` + ``--pseudo-per-epoch`` + ``--pseudo-mix-weight`` — after each epoch’s supervised
+steps, score up to ``--pseudo-scan-max`` curated unlabeled chips, take the top-``pseudo-per-epoch`` by
+trust, run :func:`aquaforge.unified.losses.aquaforge_self_training_loss`, and backprop
+``pseudo_mix_weight * loss_st``. Balancer uses batch context (small hulls, heading ambiguity, AL).
 
 Requires: pip install -r requirements-ml.txt (PyTorch, ONNX runtime, etc.).
 

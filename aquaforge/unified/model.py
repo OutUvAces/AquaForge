@@ -89,15 +89,14 @@ class AquaForgeDeltaFuse(nn.Module):
     """
     **Original AquaForge Delta-Fuse** (this codebase — not a published neck).
 
-    We take **p3, p4, p5**, apply **learned 1×1 + sigmoid gates per native resolution**, upsample
-    gated p4/p5 to p3, **project to a common channel width**, **concatenate** with **residual deltas**
-    ``(p4−p3)`` and ``(p5−p3)`` in that shared space, then run a single **3×3 depthwise** followed by
-    **1×1 pointwise** mixing. A **small learnable scalar residual** per scale is added back so the
-    block can preserve fine hull detail without a hand-tuned residual weight.
+    **Design (exact):** features **p3, p4, p5** → **learned 1×1 conv + sigmoid gate** per scale →
+    upsample gated **p4, p5** to **p3** resolution and **project to p3 channel width** → **concatenate**
+    gated p3-aligned tensors with **residual differences** ``(p4→p3) − p3`` and ``(p5→p3) − p3`` →
+    **depthwise 3×3** then **pointwise 1×1** → **learned per-scale residuals** via 1×1 skips multiplied
+    by **tanh(α)** so contribution stays bounded (our stabiliser vs raw unbounded scalar adds).
 
-    Compared with additive FPN fusion, the explicit **delta** terms let the network allocate
-    capacity to *what changed* between scales (e.g. wake smear at coarse vs tight hull at fine),
-    which we found more stable for small–medium vessels than plain top-down summation.
+    Compared with additive FPN fusion, explicit **deltas** allocate capacity to cross-scale *change*
+    (wake smear vs tight hull), which we tune for Sentinel-2 small/medium vessels.
     """
 
     def __init__(self, c3: int, c4: int, c5: int, out_ch: int) -> None:
@@ -137,9 +136,9 @@ class AquaForgeDeltaFuse(nn.Module):
         y = self.act(self.bn(self.pw(self.dw(cat))))
         y = (
             y
-            + self.alpha3 * self.skip3(p3)
-            + self.alpha4 * self.skip4(a4)
-            + self.alpha5 * self.skip5(a5)
+            + torch.tanh(self.alpha3) * self.skip3(p3)
+            + torch.tanh(self.alpha4) * self.skip4(a4)
+            + torch.tanh(self.alpha5) * self.skip5(a5)
         )
         return y
 

@@ -9,6 +9,11 @@ into AquaForge's own heading head.
 vessel proxies, low heading trust, cloud flags, optional manual training boost). The trainer
 oversamples high-priority rows; :func:`hydrate_teacher_signals` fills teacher heading targets on the
 same priority queue each epoch.
+
+**Uncertainty** (for pseudo-label gating / merge): :func:`aquaforge_uncertainty_from_outputs` uses
+**only** AquaForge tensors — vessel logit margin, heading confidence-channel entropy, keypoint heatmap
+entropy — plus **boosted** sampling for **<45 m** length, **coastal** flags, and **Unsure**
+(``review_category == ambiguous``) per our heuristics below.
 """
 
 from __future__ import annotations

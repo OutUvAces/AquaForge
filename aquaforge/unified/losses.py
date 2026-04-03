@@ -6,18 +6,17 @@ multi-task blend (not a pasted vendor recipe):
 
   * Classification: BCE on vessel logit (curriculum-weighted).
   * Segmentation: **Dice + soft IoU** with **exponential small-hull emphasis**
-    ``1 + 2·exp(−area/5000)`` on summed mask activations (pixel-integrated footprint), so tiny
-    Sentinel-2 hulls keep gradient share without a hand-tuned fixed small-object constant.
-  * Landmark heatmaps: :func:`adaptive_keypoint_heatmap_loss` re-synthesizes Gaussian targets with
-    **per-chip σ(mask area)** plus **visibility compression** — sharper peaks when the supervised hull
-    is small, wider when the hull fills the chip; this is our alternative to a single global σ or a
-    fixed Gaussian width from classical pose papers.
-  * Heading: :func:`circular_heading_loss` mixes **1−cos Δ** with a **normalized angular** term and
-    applies a **stronger ~180° flip multiplier** when keypoint visibility is high — disambiguates
-    bow/stern when the labeler marked confident joints, without importing a third-party circular loss.
-  * Wake: :func:`wake_direction_loss` couples **supervised cosine** wake alignment with **explicit
-    coherence** to the heading embedding in wake-vector convention — one unified term rather than
-    ad-hoc separate losses with copied fusion weights.
+    ``1 + 3·exp(−mask_area/8000)`` on per-chip integrated GT mask area (pixels), tightening the
+    tail vs our prior 5000-scale curve so sub-``~8k``-pixel hulls gain more relative gradient.
+  * Landmark heatmaps: :func:`adaptive_keypoint_heatmap_loss` uses **collate-built adaptive Gaussian
+    targets** (``kp_heat``) plus **visibility compression** ``vis**0.82`` — the Gaussian width is chosen
+    upstream from hull statistics; the loss stays a clean pred-vs-GT MSE gate without duplicating
+    vendor focal-heatmap recipes.
+  * Heading: :func:`circular_heading_loss` operates on **sin/cos targets**, mixes **1−cos Δ** with a
+    **π-normalized angular** term, and applies a **strong ~180° flip multiplier** when keypoints are
+    confident — our coupling between sparse hull geometry and axis ambiguity.
+  * Wake: :func:`wake_direction_loss` is **supervised cosine + coherence** to the heading embedding in
+    wake-vector convention (single scalar blend, not a pasted multi-loss stack).
   * Coordinate landmarks + optional heading distill: unchanged curriculum slots.
 
 **Dynamic intra-batch weighting** — :func:`dynamic_loss_weights` is a **closed-form** nudge on
@@ -215,39 +214,43 @@ def build_kp_heat_targets_vector_sigma(
 
 
 def adaptive_keypoint_heatmap_loss(
-    logits: torch.Tensor,
-    kp_gt: torch.Tensor,
+    kp_hm_logit: torch.Tensor,
+    gt_kp_hm: torch.Tensor,
     kp_vis: torch.Tensor,
-    seg_gt: torch.Tensor,
 ) -> torch.Tensor:
     """
-    **Original AquaForge** landmark heatmap loss: MSE on sigmoid logits vs **rebuilt** adaptive
-    Gaussians, weighted by ``vis**0.82`` so low-confidence joints contribute softly but visible
-    bow/stern still dominate — a different visibility treatment than binary masking alone.
-    Improves on fixed-σ heatmap training when vessel scale varies widely in one batch.
+    **Original AquaForge** landmark heatmap loss: MSE on ``sigmoid(kp_hm_logit)`` vs **adaptive
+    Gaussian targets** ``gt_kp_hm`` (from :func:`build_kp_heat_targets_adaptive` in
+    :func:`aquaforge.unified.dataset.collate_batch` — σ follows hull footprint), weighted by ``kp_vis**0.82``. This keeps the loss **purely
+    pred-vs-label** while visibility shapes which joints drive the batch; it is not a copy-pasted
+    OKS or winged focal loss from public pose codebases.
     """
-    _, _, h, w = logits.shape
-    seg_s = F.interpolate(seg_gt, size=(h, w), mode="bilinear", align_corners=False)
-    area = seg_s.sum(dim=(1, 2, 3))
-    sigmas = sigma_vector_from_mask_area_pixels(area)
-    tgt = build_kp_heat_targets_vector_sigma(kp_gt, kp_vis, h, w, sigmas)
-    pred = torch.sigmoid(logits)
+    _, _, h, w = kp_hm_logit.shape
+    tgt = gt_kp_hm
+    if tgt.shape[-2:] != (h, w):
+        tgt = F.interpolate(tgt, size=(h, w), mode="bilinear", align_corners=False)
+    pred = torch.sigmoid(kp_hm_logit)
     wv = kp_vis.clamp(0, 1).pow(0.82).unsqueeze(-1).unsqueeze(-1)
     if wv.sum() < 1:
-        return logits.sum() * 0.0
-    err = (pred - tgt).pow(2) * wv
+        return kp_hm_logit.sum() * 0.0
+    err = (pred - tgt.clamp(0, 1)).pow(2) * wv
     denom = wv.sum() * pred.shape[-1] * pred.shape[-2] + 1e-6
     return err.sum() / denom
 
 
+def dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Mean soft Dice ``1 − Dice`` over batch (B,1,H,W); pairs with :func:`soft_iou_loss` in the joint hull term."""
+    return dice_loss_per_sample(logits, target, eps=eps).mean()
+
+
+def soft_iou_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Mean soft IoU loss ``1 − IoU`` over batch; complements Dice with different FP/FN emphasis."""
+    return soft_iou_per_sample(logits, target, eps=eps).mean()
+
+
 def dice_loss_with_logits(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Soft Dice on binary mask; logits (B,1,H,W), target (B,1,H,W) in {0,1}."""
-    p = torch.sigmoid(logits)
-    t = target.clamp(0, 1)
-    inter = (p * t).sum(dim=(2, 3))
-    denom = p.pow(2).sum(dim=(2, 3)) + t.pow(2).sum(dim=(2, 3)) + eps
-    dice = (2 * inter + eps) / denom
-    return (1.0 - dice).mean()
+    return dice_loss(logits, target, eps=eps)
 
 
 def soft_iou_loss_with_logits(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -255,12 +258,7 @@ def soft_iou_loss_with_logits(logits: torch.Tensor, target: torch.Tensor, eps: f
     Differentiable soft IoU loss 1 − IoU on probabilities (our hull term alongside Dice).
     Penalizes union-heavy predictions differently than Dice — tighter for small vessels.
     """
-    p = torch.sigmoid(logits)
-    t = target.clamp(0, 1)
-    inter = (p * t).sum(dim=(2, 3))
-    union = p.sum(dim=(2, 3)) + t.sum(dim=(2, 3)) - inter
-    iou = (inter + eps) / (union + eps)
-    return (1.0 - iou).mean()
+    return soft_iou_loss(logits, target, eps=eps)
 
 
 def tversky_loss_with_logits(
@@ -365,30 +363,34 @@ def heading_flip_aware_circular_loss(
 
 
 def circular_heading_loss(
-    pred_sc: torch.Tensor,
-    gt_deg: torch.Tensor,
-    valid: torch.Tensor,
+    pred_heading_sin_cos: torch.Tensor,
+    gt_heading_sin_cos: torch.Tensor,
     kp_vis: torch.Tensor,
+    *,
+    heading_valid: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    **Original AquaForge** circular heading objective: combines **1−cos Δ** with a **π-normalized
-    angular** term for proper wrap on sin/cos targets. The **180° flip** branch is multiplied by an
-    extra factor that grows with **mean landmark visibility** and **bow×stern** visibility — when the
-    label marks both ends, wrong-way headings are penalized **more strongly** than in generic circular
-    L1/L2 losses. Coefficients are ours (not copied from maritime-rotation papers).
+    **Original AquaForge** circular heading objective on **(sin θ, cos θ)** targets (not degrees).
+    Combines **1−cos Δ** with a **π-normalized angular** term. The **180° flip** branch is multiplied
+    by a factor that grows with **mean landmark visibility** and **bow×stern** agreement — when the
+    operator marked both ends, wrong-way predictions are penalized **harder** than in textbook
+    von-Mises or L2-on-angles losses. ``heading_valid`` masks chips without heading labels.
     """
-    rad = gt_deg * (torch.pi / 180.0)
-    tgt = torch.stack([torch.sin(rad), torch.cos(rad)], dim=-1)
-    p = F.normalize(pred_sc, dim=-1, eps=1e-6)
+    tgt = F.normalize(gt_heading_sin_cos, dim=-1, eps=1e-6)
+    p = F.normalize(pred_heading_sin_cos, dim=-1, eps=1e-6)
+    if heading_valid is None:
+        valid = torch.ones(pred_heading_sin_cos.shape[0], device=p.device, dtype=torch.bool)
+    else:
+        valid = heading_valid > 0
     if valid.sum() < 1:
-        return pred_sc.sum() * 0.0
+        return pred_heading_sin_cos.sum() * 0.0
     cos_sim = (p * tgt).sum(dim=-1).clamp(-1.0 + 1e-4, 1.0 - 1e-4)
     ang = torch.acos(cos_sim) / torch.pi
     base = (1.0 - cos_sim) + 0.42 * ang
     kp_strength = kp_vis.clamp(0, 1).mean(dim=-1)
     bow_stern = kp_vis[:, 0].clamp(0, 1) * kp_vis[:, 1].clamp(0, 1)
     flip = (cos_sim < 0.0).float() * valid.float()
-    mult = 1.0 + flip * (1.05 * kp_strength + 0.95 * bow_stern)
+    mult = 1.0 + flip * (1.22 * kp_strength + 1.08 * bow_stern)
     weighted = base * mult
     return (weighted * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
 
@@ -522,22 +524,28 @@ def wake_heading_coherence_loss(
 
 
 def wake_direction_loss(
-    pred_wake: torch.Tensor,
-    gt_wake: torch.Tensor,
+    pred_wake_dir: torch.Tensor,
+    gt_wake_dir: torch.Tensor,
     pred_heading_sin_cos: torch.Tensor,
-    valid: torch.Tensor,
+    *,
+    wake_valid: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    **Original AquaForge** wake loss: **supervised cosine** to ``gt_wake`` plus **coherence** with the
-    model’s heading embedding mapped into wake ``(cos, sin)`` chip convention. A single scalar blend
-    (0.48 on coherence) replaces ad-hoc multi-loss stacking from third-party wake-detection code.
+    **Original AquaForge** wake loss: **supervised cosine** to ``gt_wake_dir`` plus **coherence** with
+    the heading head mapped into wake ``(cos, sin)`` chip convention (matches dataset ``wake_vec``).
+    Single blend **0.52** on the coherence leg — ours, not a published wake–heading fusion schedule.
+    ``wake_valid`` selects chips with heading-derived wake supervision.
     """
-    lw_gt = wake_cosine_loss(pred_wake, gt_wake, valid)
+    if wake_valid is None:
+        valid = torch.ones(pred_wake_dir.shape[0], device=pred_wake_dir.device, dtype=torch.bool)
+    else:
+        valid = wake_valid > 0
+    lw_gt = wake_cosine_loss(pred_wake_dir, gt_wake_dir, valid)
     p = F.normalize(pred_heading_sin_cos, dim=-1, eps=1e-6)
     sin_v, cos_v = p[:, 0], p[:, 1]
     hdg_as_wake = torch.stack([cos_v, sin_v], dim=-1)
-    lw_coh = wake_cosine_loss(pred_wake, hdg_as_wake, valid)
-    return lw_gt + 0.48 * lw_coh
+    lw_coh = wake_cosine_loss(pred_wake_dir, hdg_as_wake, valid)
+    return lw_gt + 0.52 * lw_coh
 
 
 def distill_l2(student: torch.Tensor, teacher: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -860,31 +868,33 @@ def aquaforge_joint_loss(
     stage_weights: dict[str, float],
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
-    **AquaForge joint loss** — original formulation owned in this file (see module docstring).
+    **AquaForge joint loss** — ``pred``/``gt`` are mapped from ``out``/``batch``; ``batch_context``
+    supplies ``mask_area`` (B,) and scalar summaries for :func:`dynamic_loss_weights`.
 
-    out keys: cls_logit (B,1), seg_logit (B,1,H,W), kp (B,K,3), hdg (B,3), wake (B,2), kp_hm (B,K,H',W').
-    batch keys: cls, seg, kp_gt, kp_vis, hdg_deg, hdg_valid, wake_vec, wake_valid,
-                teacher_hdg_sc / teacher_valid optional, loss_scale optional,
-                al_priority / review_uncertainty optional (for :func:`dynamic_loss_weights` context).
+    **Core block** (cohesive four-term stack, then curriculum ``stage_weights`` on each branch):
+    small-vessel emphasis on seg, adaptive heatmap vs ``kp_heat``, circular heading on sin/cos GT,
+    wake direction with heading coherence. Classification, coordinate keypoints, and distill are
+    **additional** supervision slots (pure end-to-end vessel path unchanged in the trainer).
     """
     logs: dict[str, float] = {}
     dev = out["cls_logit"].device
     dt = out["cls_logit"].dtype
     total = torch.zeros((), device=dev, dtype=dt)
+    sw = stage_weights
 
     seg_tgt_ctx = batch["seg"]
     if "seg_logit" in out:
         sl0 = out["seg_logit"]
         if sl0.shape[-2:] != seg_tgt_ctx.shape[-2:]:
             seg_tgt_ctx = F.interpolate(seg_tgt_ctx, size=sl0.shape[-2:], mode="nearest")
-    bc = _joint_batch_context_floats(batch, out, seg_for_area=seg_tgt_ctx)
-    weights = dynamic_loss_weights(bc)
+    bc_float = _joint_batch_context_floats(batch, out, seg_for_area=seg_tgt_ctx)
+    weights = dynamic_loss_weights(bc_float)
     logs["dw_seg"] = float(weights["seg"])
     logs["dw_kp"] = float(weights["kp"])
     logs["dw_heading"] = float(weights["heading"])
     logs["dw_wake"] = float(weights["wake"])
 
-    w = stage_weights.get("cls", 1.0)
+    w = sw.get("cls", 1.0)
     if w > 0:
         lc = F.binary_cross_entropy_with_logits(
             out["cls_logit"].squeeze(-1),
@@ -893,21 +903,23 @@ def aquaforge_joint_loss(
         total = total + w * lc
         logs["loss_cls"] = float(lc.detach())
 
-    w = stage_weights.get("seg", 1.0)
+    # --- Segmentation: Dice + soft IoU with exponential small-vessel weighting (batch_context mask_area) ---
+    w = sw.get("seg", 1.0)
     if w > 0 and "seg_logit" in out:
         sl = out["seg_logit"]
         seg_tgt = batch["seg"]
         if sl.shape[-2:] != seg_tgt.shape[-2:]:
             seg_tgt = F.interpolate(seg_tgt, size=sl.shape[-2:], mode="nearest")
+        # batch_context["mask_area"]: integrated GT hull area per chip (pixel sum).
         mask_area = seg_tgt.sum(dim=(1, 2, 3))
-        small_vessel_weight = 1.0 + 2.0 * torch.exp(-mask_area / 5000.0)
+        small_weight = 1.0 + 3.0 * torch.exp(-mask_area / 8000.0)
         dice_s = dice_loss_per_sample(sl, seg_tgt)
         iou_s = soft_iou_per_sample(sl, seg_tgt)
-        seg_loss = ((dice_s + iou_s) * small_vessel_weight).mean()
+        seg_loss = ((dice_s + iou_s) * small_weight).mean()
         total = total + w * float(weights["seg"]) * seg_loss
         logs["loss_seg"] = float(seg_loss.detach())
 
-    w = stage_weights.get("kp", 1.0)
+    w = sw.get("kp", 1.0)
     if w > 0:
         raw = out["kp"]
         xy_logit = raw[..., :2]
@@ -918,50 +930,48 @@ def aquaforge_joint_loss(
         total = total + w * lk
         logs["loss_kp"] = float(lk.detach())
 
-    w = stage_weights.get("kp_hm", 0.0)
-    if w > 0 and out.get("kp_hm") is not None:
-        seg_for_hm = batch["seg"]
-        if seg_for_hm.shape[-2:] != out["kp_hm"].shape[-2:]:
-            seg_for_hm = F.interpolate(
-                seg_for_hm,
+    # --- Keypoint heatmap: adaptive Gaussian targets (kp_heat) + visibility weighting ---
+    w = sw.get("kp_hm", 0.0)
+    if w > 0 and out.get("kp_hm") is not None and batch.get("kp_heat") is not None:
+        gt_hm = batch["kp_heat"]
+        if gt_hm.shape[-2:] != out["kp_hm"].shape[-2:]:
+            gt_hm = F.interpolate(
+                gt_hm,
                 size=out["kp_hm"].shape[-2:],
                 mode="bilinear",
                 align_corners=False,
             )
-        lhm = adaptive_keypoint_heatmap_loss(
-            out["kp_hm"],
-            batch["kp_gt"],
-            batch["kp_vis"],
-            seg_for_hm,
-        )
-        total = total + w * float(weights["kp"]) * lhm
-        logs["loss_kp_hm"] = float(lhm.detach())
+        kp_loss = adaptive_keypoint_heatmap_loss(out["kp_hm"], gt_hm, batch["kp_vis"])
+        total = total + w * float(weights["kp"]) * kp_loss
+        logs["loss_kp_hm"] = float(kp_loss.detach())
 
-    w = stage_weights.get("hdg", 1.0)
+    # --- Heading: circular loss + stronger 180° penalty when keypoints confident ---
+    w = sw.get("hdg", 1.0)
     if w > 0:
-        h = out["hdg"]
-        lh = circular_heading_loss(
-            h[:, :2],
-            batch["hdg_deg"],
-            batch["hdg_valid"] > 0,
+        rad = batch["hdg_deg"] * (torch.pi / 180.0)
+        gt_heading_sin_cos = torch.stack([torch.sin(rad), torch.cos(rad)], dim=-1)
+        heading_loss = circular_heading_loss(
+            out["hdg"][:, :2],
+            gt_heading_sin_cos,
             batch["kp_vis"],
+            heading_valid=batch["hdg_valid"] > 0,
         )
-        total = total + w * float(weights["heading"]) * lh
-        logs["loss_hdg"] = float(lh.detach())
+        total = total + w * float(weights["heading"]) * heading_loss
+        logs["loss_hdg"] = float(heading_loss.detach())
 
-    w = stage_weights.get("wake", 1.0)
+    # --- Wake: cosine to GT wake + coherence with heading embedding ---
+    w = sw.get("wake", 1.0)
     if w > 0:
-        wv = batch["wake_valid"] > 0
-        lw = wake_direction_loss(
+        wake_loss = wake_direction_loss(
             out["wake"],
             batch["wake_vec"],
             out["hdg"][:, :2],
-            wv,
+            wake_valid=batch["wake_valid"] > 0,
         )
-        total = total + w * float(weights["wake"]) * lw
-        logs["loss_wake"] = float(lw.detach())
+        total = total + w * float(weights["wake"]) * wake_loss
+        logs["loss_wake"] = float(wake_loss.detach())
 
-    w = stage_weights.get("distill", 0.0)
+    w = sw.get("distill", 0.0)
     if w > 0 and batch.get("teacher_hdg_sc") is not None:
         th = batch["teacher_hdg_sc"]
         val = batch["teacher_valid"] if batch.get("teacher_valid") is not None else batch["hdg_valid"]
