@@ -207,13 +207,12 @@ class TestAquaForgeLosses(unittest.TestCase):
         total, logs = aquaforge_joint_loss(out, batch, sw)
         self.assertTrue(torch.isfinite(total))
         self.assertIn("loss_kp_hm", logs)
-        self.assertIn("geom_cohesion_mult", logs)
-        self.assertIn("heading_amb_mult", logs)
-        self.assertIn("scene_calib_mult", logs)
-        self.assertIn("landmark_vis_boost", logs)
-        self.assertIn("scene_geo_full_mult", logs)
-        self.assertIn("loss_scene_centroid", logs)
-        self.assertIn("loss_scene_exterior", logs)
+        self.assertIn("loss_seg", logs)
+        self.assertIn("dw_seg", logs)
+        self.assertIn("dw_kp", logs)
+        self.assertIn("dw_heading", logs)
+        self.assertIn("dw_wake", logs)
+        self.assertIn("loss_total", logs)
 
     def test_cnn_forward_six_outputs(self) -> None:
         try:

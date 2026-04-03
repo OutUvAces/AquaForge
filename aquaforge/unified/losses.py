@@ -1,29 +1,33 @@
 """
 Joint AquaForge losses (task-specific design for this codebase).
 
-We combine **task-specific** terms with an explicitly documented blend (not a pasted vendor recipe):
+**AquaForge joint objective (current)** — :func:`aquaforge_joint_loss` implements our **original**
+multi-task blend (not a pasted vendor recipe):
 
-  * Classification: BCE on vessel logit.
-  * Segmentation: **per-chip small-vessel weights** (vs batch median mask area) on Dice + IoU + Tversky
-    + masked BCE, plus a light **centroid cohesion** term (pred mass vs GT hull centroid) — favours
-    tight hulls on Sentinel-2 without a pasted vendor recipe.
-  * Landmarks: L1 + visibility BCE + **adaptive-width** Gaussian heatmaps (tighter when GT mask
-    footprint is small — our resolution heuristic, not a fixed Gaussian from a paper).
-  * Heading: **flip-aware** circular loss — same cosine + geodesic mix, but ~180° errors are
-    up-weighted when landmark visibility is high (confident bow/stern → harsher wrong-way penalty).
-  * Wake: cosine to supervised wake vector plus **coherence** with the model’s own heading
-    (same convention as training wake targets).
-  * Optional ensemble distillation on heading (sin, cos).
+  * Classification: BCE on vessel logit (curriculum-weighted).
+  * Segmentation: **Dice + soft IoU** with **exponential small-hull emphasis**
+    ``1 + 2·exp(−area/5000)`` on summed mask activations (pixel-integrated footprint), so tiny
+    Sentinel-2 hulls keep gradient share without a hand-tuned fixed small-object constant.
+  * Landmark heatmaps: :func:`adaptive_keypoint_heatmap_loss` re-synthesizes Gaussian targets with
+    **per-chip σ(mask area)** plus **visibility compression** — sharper peaks when the supervised hull
+    is small, wider when the hull fills the chip; this is our alternative to a single global σ or a
+    fixed Gaussian width from classical pose papers.
+  * Heading: :func:`circular_heading_loss` mixes **1−cos Δ** with a **normalized angular** term and
+    applies a **stronger ~180° flip multiplier** when keypoint visibility is high — disambiguates
+    bow/stern when the labeler marked confident joints, without importing a third-party circular loss.
+  * Wake: :func:`wake_direction_loss` couples **supervised cosine** wake alignment with **explicit
+    coherence** to the heading embedding in wake-vector convention — one unified term rather than
+    ad-hoc separate losses with copied fusion weights.
+  * Coordinate landmarks + optional heading distill: unchanged curriculum slots.
 
-**Curriculum** — :class:`CurriculumSchedule` + interpolation between **named stage targets**;
-**DynamicLossBalancer** rescales with optional **batch context** (mask footprint, fraction of
-chips that are small-hull, heading ambiguity, sampler priority, review uncertainty) — our
-stabiliser, not GradNorm/DWA source dumps.
+**Dynamic intra-batch weighting** — :func:`dynamic_loss_weights` is a **closed-form** nudge on
+``seg`` / ``kp`` (heatmap) / ``heading`` / ``wake`` from vessel-size proxies, heading-confidence
+entropy, review uncertainty, and AL priority. It complements (does not duplicate) **EMA**
+:class:`DynamicLossBalancer` in the trainer.
 
-**Hull–exterior coherence** — suppresses segmentation mass **outside a dilated GT hull**, a
-proxy for “open water” on centred S2 chips when no SCL band is in the batch.
+**Curriculum** — :class:`CurriculumSchedule` + :func:`curriculum_base_weights` provide epoch ramps.
 
-**Encoder** — :mod:`aquaforge.unified.model` uses one in-repo CNN trunk; task heads consume shared features.
+**Encoder** — :mod:`aquaforge.unified.model` Delta-Fuse trunk feeds task heads.
 """
 
 from __future__ import annotations
@@ -165,6 +169,77 @@ def keypoint_heatmap_loss(
     return err.sum() / denom
 
 
+def sigma_vector_from_mask_area_pixels(area: torch.Tensor) -> torch.Tensor:
+    """
+    **Original AquaForge** σ schedule for heatmap Gaussians: σ grows monotonically with integrated
+    GT hull area (pixels). Very small chips get tight peaks (better sub-pixel landmark pressure);
+    large hulls get wider targets (reduces over-peaking when the vessel spans many heatmap cells).
+    This is a rational map ``σ = f(area)``, not a CVPR Gaussian kernel table.
+    """
+    a = area.clamp_min(1.0)
+    ref = 5000.0
+    ratio = a / (a + ref)
+    sigma = 0.95 + 1.75 * ratio
+    return sigma.clamp(0.95, 2.75)
+
+
+def build_kp_heat_targets_vector_sigma(
+    kp_gt: torch.Tensor,
+    kp_vis: torch.Tensor,
+    h: int,
+    w: int,
+    sigmas_b: torch.Tensor,
+) -> torch.Tensor:
+    """Gaussian heatmaps (B, K, H, W) with **per-batch-row** ``sigmas_b`` of shape (B,)."""
+    b, k, _ = kp_gt.shape
+    device, dtype = kp_gt.device, kp_gt.dtype
+    out = torch.zeros(b, k, h, w, device=device, dtype=dtype)
+    if h < 1 or w < 1:
+        return out
+    yy, xx = torch.meshgrid(
+        torch.arange(h, device=device, dtype=dtype),
+        torch.arange(w, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    xx = xx.view(1, 1, h, w)
+    yy = yy.view(1, 1, h, w)
+    cx = kp_gt[..., 0].clamp(0, 1) * float(max(w - 1, 0))
+    cy = kp_gt[..., 1].clamp(0, 1) * float(max(h - 1, 0))
+    cx = cx.unsqueeze(-1).unsqueeze(-1)
+    cy = cy.unsqueeze(-1).unsqueeze(-1)
+    sig2 = 2.0 * (sigmas_b.view(b, 1, 1, 1) ** 2).clamp_min(1e-8)
+    dist = (xx - cx) ** 2 + (yy - cy) ** 2
+    heat = torch.exp(-dist / sig2)
+    vis = kp_vis.clamp(0, 1).unsqueeze(-1).unsqueeze(-1)
+    return (heat * vis).clamp(0, 1)
+
+
+def adaptive_keypoint_heatmap_loss(
+    logits: torch.Tensor,
+    kp_gt: torch.Tensor,
+    kp_vis: torch.Tensor,
+    seg_gt: torch.Tensor,
+) -> torch.Tensor:
+    """
+    **Original AquaForge** landmark heatmap loss: MSE on sigmoid logits vs **rebuilt** adaptive
+    Gaussians, weighted by ``vis**0.82`` so low-confidence joints contribute softly but visible
+    bow/stern still dominate — a different visibility treatment than binary masking alone.
+    Improves on fixed-σ heatmap training when vessel scale varies widely in one batch.
+    """
+    _, _, h, w = logits.shape
+    seg_s = F.interpolate(seg_gt, size=(h, w), mode="bilinear", align_corners=False)
+    area = seg_s.sum(dim=(1, 2, 3))
+    sigmas = sigma_vector_from_mask_area_pixels(area)
+    tgt = build_kp_heat_targets_vector_sigma(kp_gt, kp_vis, h, w, sigmas)
+    pred = torch.sigmoid(logits)
+    wv = kp_vis.clamp(0, 1).pow(0.82).unsqueeze(-1).unsqueeze(-1)
+    if wv.sum() < 1:
+        return logits.sum() * 0.0
+    err = (pred - tgt).pow(2) * wv
+    denom = wv.sum() * pred.shape[-1] * pred.shape[-2] + 1e-6
+    return err.sum() / denom
+
+
 def dice_loss_with_logits(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Soft Dice on binary mask; logits (B,1,H,W), target (B,1,H,W) in {0,1}."""
     p = torch.sigmoid(logits)
@@ -285,6 +360,35 @@ def heading_flip_aware_circular_loss(
     bow_stern = kp_vis[:, 0].clamp(0, 1) * kp_vis[:, 1].clamp(0, 1)
     flip = (cos_sim < 0.0).float() * valid.float()
     mult = 1.0 + flip * (0.68 * kp_strength + 0.62 * bow_stern)
+    weighted = base * mult
+    return (weighted * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
+
+
+def circular_heading_loss(
+    pred_sc: torch.Tensor,
+    gt_deg: torch.Tensor,
+    valid: torch.Tensor,
+    kp_vis: torch.Tensor,
+) -> torch.Tensor:
+    """
+    **Original AquaForge** circular heading objective: combines **1−cos Δ** with a **π-normalized
+    angular** term for proper wrap on sin/cos targets. The **180° flip** branch is multiplied by an
+    extra factor that grows with **mean landmark visibility** and **bow×stern** visibility — when the
+    label marks both ends, wrong-way headings are penalized **more strongly** than in generic circular
+    L1/L2 losses. Coefficients are ours (not copied from maritime-rotation papers).
+    """
+    rad = gt_deg * (torch.pi / 180.0)
+    tgt = torch.stack([torch.sin(rad), torch.cos(rad)], dim=-1)
+    p = F.normalize(pred_sc, dim=-1, eps=1e-6)
+    if valid.sum() < 1:
+        return pred_sc.sum() * 0.0
+    cos_sim = (p * tgt).sum(dim=-1).clamp(-1.0 + 1e-4, 1.0 - 1e-4)
+    ang = torch.acos(cos_sim) / torch.pi
+    base = (1.0 - cos_sim) + 0.42 * ang
+    kp_strength = kp_vis.clamp(0, 1).mean(dim=-1)
+    bow_stern = kp_vis[:, 0].clamp(0, 1) * kp_vis[:, 1].clamp(0, 1)
+    flip = (cos_sim < 0.0).float() * valid.float()
+    mult = 1.0 + flip * (1.05 * kp_strength + 0.95 * bow_stern)
     weighted = base * mult
     return (weighted * valid.float()).sum() / valid.float().sum().clamp_min(1.0)
 
@@ -415,6 +519,25 @@ def wake_heading_coherence_loss(
     sin_v, cos_v = p[:, 0], p[:, 1]
     hdg_as_wake = torch.stack([cos_v, sin_v], dim=-1)
     return wake_cosine_loss(wake_raw, hdg_as_wake, valid)
+
+
+def wake_direction_loss(
+    pred_wake: torch.Tensor,
+    gt_wake: torch.Tensor,
+    pred_heading_sin_cos: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """
+    **Original AquaForge** wake loss: **supervised cosine** to ``gt_wake`` plus **coherence** with the
+    model’s heading embedding mapped into wake ``(cos, sin)`` chip convention. A single scalar blend
+    (0.48 on coherence) replaces ad-hoc multi-loss stacking from third-party wake-detection code.
+    """
+    lw_gt = wake_cosine_loss(pred_wake, gt_wake, valid)
+    p = F.normalize(pred_heading_sin_cos, dim=-1, eps=1e-6)
+    sin_v, cos_v = p[:, 0], p[:, 1]
+    hdg_as_wake = torch.stack([cos_v, sin_v], dim=-1)
+    lw_coh = wake_cosine_loss(pred_wake, hdg_as_wake, valid)
+    return lw_gt + 0.48 * lw_coh
 
 
 def distill_l2(student: torch.Tensor, teacher: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -662,24 +785,104 @@ class DynamicLossBalancer:
         return out
 
 
+def dynamic_loss_weights(batch_context: dict[str, float]) -> dict[str, float]:
+    """
+    **Original AquaForge** closed-form multi-task nudges (not GradNorm / DWA / uncertainty weighting
+    from a specific 2024 paper). Inputs are **scalar batch summaries** only: mean hull area (pixels),
+    fraction of very small-hull chips, mean heading-confidence ambiguity (Bernoulli entropy of the
+    confidence logit), mean review-export uncertainty, and mean AL priority. Outputs multiply the
+    corresponding joint-loss branches inside :func:`aquaforge_joint_loss` before curriculum scalars.
+
+    This improves on fixed static loss ratios when the batch is dominated by tiny vessels, ambiguous
+    headings, or high-priority review exports — without backprop-through-learned weight networks.
+    """
+    w_seg = 1.0
+    w_kp = 1.0
+    w_hdg = 1.0
+    w_wake = 1.0
+    ma = batch_context.get("mask_area_mean")
+    if ma is not None and ma < 4200.0:
+        w_seg *= 1.14
+        w_kp *= 1.1
+    ssf = batch_context.get("seg_small_vessel_frac")
+    if ssf is not None and ssf > 0.34:
+        w_seg *= 1.08
+        w_kp *= 1.06
+    ha = batch_context.get("heading_ambiguity_mean")
+    if ha is not None and ha > 0.34:
+        w_hdg *= 1.16
+        w_wake *= 1.05
+    ru = batch_context.get("review_uncertainty_mean")
+    if ru is not None and ru > 0.36:
+        w_seg *= 1.07
+        w_hdg *= 1.08
+        w_kp *= 1.05
+        w_wake *= 1.04
+    pr = batch_context.get("al_priority_mean")
+    if pr is not None and pr > 1.52:
+        w_seg *= 1.05
+        w_kp *= 1.04
+    return {"seg": w_seg, "kp": w_kp, "heading": w_hdg, "wake": w_wake}
+
+
+def _joint_batch_context_floats(
+    batch: dict[str, torch.Tensor],
+    out: dict[str, torch.Tensor],
+    *,
+    seg_for_area: torch.Tensor,
+) -> dict[str, float]:
+    """Detached scalars for :func:`dynamic_loss_weights` (trainer EMA uses the same cues)."""
+    mask_area_mean = float(seg_for_area.sum(dim=(1, 2, 3)).mean().item())
+    per_cov = seg_for_area.mean(dim=(1, 2, 3))
+    ssf = float((per_cov < 0.035).float().mean().item())
+    hdg = out.get("hdg")
+    if hdg is not None and hdg.dim() == 2 and hdg.shape[-1] >= 3:
+        c = torch.sigmoid(hdg[:, 2:3])
+        ha = float((4.0 * c * (1.0 - c)).mean().item())
+    else:
+        ha = 0.0
+    ru = batch.get("review_uncertainty")
+    ru_m = float(ru.float().mean().item()) if ru is not None else 0.0
+    al = batch.get("al_priority")
+    pr = float(al.float().mean().item()) if al is not None else 1.0
+    return {
+        "mask_area_mean": mask_area_mean,
+        "seg_small_vessel_frac": ssf,
+        "heading_ambiguity_mean": ha,
+        "review_uncertainty_mean": ru_m,
+        "al_priority_mean": pr,
+    }
+
+
 def aquaforge_joint_loss(
     out: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
     stage_weights: dict[str, float],
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
-    out keys: cls_logit (B,1), seg_logit (B,1,H,W), kp (B,K,3) raw (xy logits, vis logit),
-              hdg (B,3) sin/cos raw + conf logit, wake (B,2), kp_hm (B,K,H',W') landmark heatmap logits.
-    batch keys: cls, seg, kp_gt (B,K,2), kp_vis (B,K), kp_heat (B,K,H',W') optional (stride~8),
-                hdg_deg, hdg_valid, wake_vec (B,2), wake_valid,
-                teacher_hdg_sc (B,2), teacher_valid (B,) optional for ensemble distill,
-                loss_scale optional scalar broadcast (self-training trust).
+    **AquaForge joint loss** — original formulation owned in this file (see module docstring).
+
+    out keys: cls_logit (B,1), seg_logit (B,1,H,W), kp (B,K,3), hdg (B,3), wake (B,2), kp_hm (B,K,H',W').
+    batch keys: cls, seg, kp_gt, kp_vis, hdg_deg, hdg_valid, wake_vec, wake_valid,
+                teacher_hdg_sc / teacher_valid optional, loss_scale optional,
+                al_priority / review_uncertainty optional (for :func:`dynamic_loss_weights` context).
     """
     logs: dict[str, float] = {}
     dev = out["cls_logit"].device
     dt = out["cls_logit"].dtype
-    total_cls = torch.zeros((), device=dev, dtype=dt)
-    total_geo = torch.zeros((), device=dev, dtype=dt)
+    total = torch.zeros((), device=dev, dtype=dt)
+
+    seg_tgt_ctx = batch["seg"]
+    if "seg_logit" in out:
+        sl0 = out["seg_logit"]
+        if sl0.shape[-2:] != seg_tgt_ctx.shape[-2:]:
+            seg_tgt_ctx = F.interpolate(seg_tgt_ctx, size=sl0.shape[-2:], mode="nearest")
+    bc = _joint_batch_context_floats(batch, out, seg_for_area=seg_tgt_ctx)
+    weights = dynamic_loss_weights(bc)
+    logs["dw_seg"] = float(weights["seg"])
+    logs["dw_kp"] = float(weights["kp"])
+    logs["dw_heading"] = float(weights["heading"])
+    logs["dw_wake"] = float(weights["wake"])
 
     w = stage_weights.get("cls", 1.0)
     if w > 0:
@@ -687,7 +890,7 @@ def aquaforge_joint_loss(
             out["cls_logit"].squeeze(-1),
             batch["cls"].float(),
         )
-        total_cls = total_cls + w * lc
+        total = total + w * lc
         logs["loss_cls"] = float(lc.detach())
 
     w = stage_weights.get("seg", 1.0)
@@ -696,27 +899,13 @@ def aquaforge_joint_loss(
         seg_tgt = batch["seg"]
         if sl.shape[-2:] != seg_tgt.shape[-2:]:
             seg_tgt = F.interpolate(seg_tgt, size=sl.shape[-2:], mode="nearest")
-        w_sv = small_vessel_sample_weights(seg_tgt)
-        d_dice = (dice_loss_per_sample(sl, seg_tgt) * w_sv).mean()
-        d_iou = (soft_iou_per_sample(sl, seg_tgt) * w_sv).mean()
-        d_tversk = (tversky_loss_per_sample(sl, seg_tgt) * w_sv).mean()
-        d_bce = (
-            bce_logits_masked_per_sample(sl, seg_tgt, torch.ones_like(seg_tgt)) * w_sv
-        ).mean()
-        d_cent = mask_centroid_cohesion_loss(sl, seg_tgt)
-        d_ctx = hull_exterior_context_loss(sl, seg_tgt)
-        seg_loss = (
-            d_dice
-            + 0.38 * d_iou
-            + 0.22 * d_tversk
-            + 0.42 * d_bce
-            + 0.075 * d_cent
-            + 0.11 * d_ctx
-        )
-        total_geo = total_geo + w * seg_loss
+        mask_area = seg_tgt.sum(dim=(1, 2, 3))
+        small_vessel_weight = 1.0 + 2.0 * torch.exp(-mask_area / 5000.0)
+        dice_s = dice_loss_per_sample(sl, seg_tgt)
+        iou_s = soft_iou_per_sample(sl, seg_tgt)
+        seg_loss = ((dice_s + iou_s) * small_vessel_weight).mean()
+        total = total + w * float(weights["seg"]) * seg_loss
         logs["loss_seg"] = float(seg_loss.detach())
-        logs["loss_scene_centroid"] = float(d_cent.detach())
-        logs["loss_scene_exterior"] = float(d_ctx.detach())
 
     w = stage_weights.get("kp", 1.0)
     if w > 0:
@@ -726,43 +915,50 @@ def aquaforge_joint_loss(
         xy = torch.sigmoid(xy_logit)
         c, vb = keypoint_loss(xy, batch["kp_gt"], batch["kp_vis"], vis_logits=vis_logit)
         lk = c + 0.25 * vb
-        total_geo = total_geo + w * lk
+        total = total + w * lk
         logs["loss_kp"] = float(lk.detach())
 
     w = stage_weights.get("kp_hm", 0.0)
-    if w > 0 and out.get("kp_hm") is not None and batch.get("kp_heat") is not None:
-        lhm = keypoint_heatmap_loss(
+    if w > 0 and out.get("kp_hm") is not None:
+        seg_for_hm = batch["seg"]
+        if seg_for_hm.shape[-2:] != out["kp_hm"].shape[-2:]:
+            seg_for_hm = F.interpolate(
+                seg_for_hm,
+                size=out["kp_hm"].shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        lhm = adaptive_keypoint_heatmap_loss(
             out["kp_hm"],
-            batch["kp_heat"],
+            batch["kp_gt"],
             batch["kp_vis"],
+            seg_for_hm,
         )
-        total_geo = total_geo + w * lhm
+        total = total + w * float(weights["kp"]) * lhm
         logs["loss_kp_hm"] = float(lhm.detach())
 
     w = stage_weights.get("hdg", 1.0)
     if w > 0:
         h = out["hdg"]
-        lh = heading_flip_aware_circular_loss(
+        lh = circular_heading_loss(
             h[:, :2],
             batch["hdg_deg"],
             batch["hdg_valid"] > 0,
             batch["kp_vis"],
         )
-        total_geo = total_geo + w * lh
+        total = total + w * float(weights["heading"]) * lh
         logs["loss_hdg"] = float(lh.detach())
 
     w = stage_weights.get("wake", 1.0)
     if w > 0:
         wv = batch["wake_valid"] > 0
-        hdg_ok = batch["hdg_valid"] > 0
-        coh_mask = wv & hdg_ok
-        lw_gt = wake_cosine_loss(out["wake"], batch["wake_vec"], wv)
-        if coh_mask.sum() >= 1:
-            lw_coh = wake_heading_coherence_loss(out["wake"], out["hdg"], coh_mask)
-            lw = lw_gt + 0.34 * lw_coh
-        else:
-            lw = lw_gt
-        total_geo = total_geo + w * lw
+        lw = wake_direction_loss(
+            out["wake"],
+            batch["wake_vec"],
+            out["hdg"][:, :2],
+            wv,
+        )
+        total = total + w * float(weights["wake"]) * lw
         logs["loss_wake"] = float(lw.detach())
 
     w = stage_weights.get("distill", 0.0)
@@ -770,16 +966,8 @@ def aquaforge_joint_loss(
         th = batch["teacher_hdg_sc"]
         val = batch["teacher_valid"] if batch.get("teacher_valid") is not None else batch["hdg_valid"]
         ld = distill_l2(F.normalize(out["hdg"][:, :2], dim=-1), th, val > 0)
-        total_geo = total_geo + w * ld
+        total = total + w * ld
         logs["loss_distill"] = float(ld.detach())
-
-    calib, calib_logs = scene_geometry_calibration(batch["seg"], out.get("hdg"))
-    lv_boost = landmark_visibility_scene_boost(batch["kp_vis"])
-    full_calib = float(calib) * lv_boost
-    logs.update(calib_logs)
-    logs["landmark_vis_boost"] = float(lv_boost)
-    logs["scene_geo_full_mult"] = float(full_calib)
-    total = total_cls + full_calib * total_geo
 
     ls = batch.get("loss_scale")
     if ls is not None:

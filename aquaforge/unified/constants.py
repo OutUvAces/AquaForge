@@ -22,4 +22,4 @@ LANDMARK_NAMES: tuple[str, ...] = (
 NUM_LANDMARKS: int = len(LANDMARK_NAMES)
 
 # Model / ONNX I/O version for safe loads (bump when outputs or meta keys change).
-AQUAFORGE_FORMAT_VERSION: int = 3
+AQUAFORGE_FORMAT_VERSION: int = 4

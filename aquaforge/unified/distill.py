@@ -36,7 +36,8 @@ def coastal_scene_hint(extra: dict[str, Any] | None) -> float:
 def small_vessel_length_hint(extra: dict[str, Any] | None) -> float:
     """
     0–1 from ``aquaforge_length_m`` in ``extra`` when present (smaller hull proxy → higher).
-    Used alongside :func:`review_ui_active_learning_priority` for the training sampler.
+    **Sub-45 m** vessels get the maximum hint so the trainer sampler matches the joint-loss small-hull
+    emphasis — our length gate, not a generic ``1/length`` curve from public detection benchmarks.
     """
     ex = extra or {}
     ln = ex.get("aquaforge_length_m")
@@ -46,6 +47,8 @@ def small_vessel_length_hint(extra: dict[str, Any] | None) -> float:
         v = float(ln)
         if v >= 90.0:
             return 0.0
+        if v < 45.0:
+            return 1.0
         return float(min(1.0, max(0.0, (90.0 - v) / 90.0)))
     except (TypeError, ValueError):
         return 0.0
@@ -111,27 +114,17 @@ def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     """
     One **uncertainty** number from AquaForge’s own outputs (0 ≈ confident, 1 ≈ doubtful).
 
-    We mix: (1) how close the ship / not-ship score is to a coin-flip (**margin**),
-    (2) how strong the heading vector is vs empty, (3) hull-mask **entropy**,
-    (4) landmark heatmap entropy when present, (5) heading **confidence** channel entropy.
-    Used to filter self-training chips and to complement review-export sampling — not MC dropout.
+    **Original AquaForge (2025–26) cue stack**: we use **only** (1) vessel logit **margin**
+    (proximity of sigmoid to 0.5), (2) heading **confidence-channel** Bernoulli entropy, and
+    (3) landmark **heatmap** Bernoulli entropy when ``kp_hm`` exists. Segmentation-map entropy and
+    raw heading-vector norms are **omitted** so this score does not duplicate hull fuzz signals
+    already optimized in the joint segmentation branch — cleaner gating for pseudo-labels and AL merge.
     """
     import torch
-    import torch.nn.functional as F
 
     cls = out["cls_logit"].reshape(-1)
     p = torch.sigmoid(cls[0])
-    # Margin: 0 at 0/1, 1 at 0.5
     u_cls = float((1.0 - (2.0 * p - 1.0).abs()).item())
-
-    h = out["hdg"][:, :2]
-    hn = F.normalize(h, dim=-1, eps=1e-6)
-    u_h = float((1.0 - hn.abs().sum(dim=-1).clamp(0, 1).mean()).item())
-
-    seg = out["seg_logit"]
-    ps = torch.sigmoid(seg).clamp(1e-5, 1 - 1e-5)
-    ent = float((-(ps * ps.log() + (1 - ps) * (1 - ps).log()).mean()).item())
-    ent_n = ent / 0.69314718056
 
     u_kp = 0.0
     kph = out.get("kp_hm")
@@ -143,17 +136,10 @@ def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     c_conf = torch.sigmoid(out["hdg"][:, 2:3])
     u_conf = float((4.0 * c_conf * (1.0 - c_conf)).mean().item())
 
-    # Weight heatmap / margin terms slightly higher for small-structure ambiguity (S2 hulls).
     if kph is not None:
-        u = (
-            0.26 * u_cls
-            + 0.18 * u_h
-            + 0.18 * ent_n
-            + 0.22 * u_kp
-            + 0.16 * u_conf
-        )
+        u = 0.34 * u_cls + 0.33 * u_conf + 0.33 * u_kp
     else:
-        u = 0.36 * u_cls + 0.26 * u_h + 0.22 * ent_n + 0.16 * u_conf
+        u = 0.52 * u_cls + 0.48 * u_conf
     return max(0.0, min(1.0, u))
 
 
@@ -198,6 +184,8 @@ def review_ui_active_learning_priority(
     try:
         if ln is not None:
             lnv = float(ln)
+            if lnv < 45.0:
+                p += 1.25
             if lnv < 85.0:
                 p += 0.95
             if lnv < 55.0:
@@ -223,14 +211,14 @@ def review_ui_active_learning_priority(
 
     # Coastal / land-adjacent queue (optional UI flag — not a third-party dataset label).
     if ex.get("coastal_or_land_adjacent") is True or ex.get("near_coast_proxy") is True:
-        p += 0.72
+        p += 0.92
 
     if review_category == "land":
         p += 0.35
 
     # Human chose “Unsure” in the review UI — prioritize if this row is ever used for mining / aux.
     if review_category == "ambiguous":
-        p += 1.55
+        p += 1.85
 
     if heading_labeled:
         p += 0.15
