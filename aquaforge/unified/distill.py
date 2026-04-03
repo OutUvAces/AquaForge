@@ -14,6 +14,10 @@ same priority queue each epoch.
 **only** AquaForge tensors — vessel logit margin, heading confidence-channel entropy, keypoint heatmap
 entropy — plus **boosted** sampling for **<45 m** length, **coastal** flags, and **Unsure**
 (``review_category == ambiguous``) per our heuristics below.
+
+**Self-training** (see ``prepare_pseudo_self_training_batch`` + ``train_aquaforge``): pseudo chips
+need **high vessel confidence** (default min prob **0.7**), low model uncertainty, and human-curated
+JSONL; the student loss is scaled by ``--pseudo-mix-weight`` alongside supervised batches.
 """
 
 from __future__ import annotations

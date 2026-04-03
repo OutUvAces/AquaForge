@@ -456,16 +456,16 @@ def prepare_pseudo_self_training_batch(
     chip_half: int,
     imgsz: int,
     *,
-    min_vessel_conf: float = 0.58,
+    min_vessel_conf: float = 0.7,
     max_uncertainty: float = 0.62,
     max_scan: int = 192,
     take_top: int | None = None,
 ) -> tuple[Any, dict[str, Any], Any] | None:
     """
     Teacher pass (no grad): AquaForge scores up to ``max_scan`` shuffled candidates, keeps those
-    passing confidence + uncertainty gates, then selects the **highest-trust** ``take_top`` (or all
-    if ``take_top`` is None) for the student step — avoids filling the pseudo batch with mediocre
-    chips from file order alone.
+    passing **high-confidence** vessel prob (default ``min_vessel_conf=0.7``) + uncertainty gates,
+    then selects the **highest-trust** ``take_top`` for the student step (mixed with human labels via
+    ``--pseudo-mix-weight`` in the trainer).
     """
     import random
 

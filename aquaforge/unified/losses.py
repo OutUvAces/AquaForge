@@ -19,10 +19,11 @@ multi-task blend (not a pasted vendor recipe):
     wake-vector convention (single scalar blend, not a pasted multi-loss stack).
   * Coordinate landmarks + optional heading distill: unchanged curriculum slots.
 
-**Dynamic intra-batch weighting** — :func:`dynamic_loss_weights` is a **closed-form** nudge on
-``seg`` / ``kp`` (heatmap) / ``heading`` / ``wake`` from vessel-size proxies, heading-confidence
-entropy, review uncertainty, and AL priority. It complements (does not duplicate) **EMA**
-:class:`DynamicLossBalancer` in the trainer.
+**Dynamic intra-batch weighting** — :func:`dynamic_loss_weights` starts from **curriculum bases**
+for the four geometry heads, multiplies by our **small-vessel**, **heading-ambiguity**, and
+**review-uncertainty** factors, then **normalizes** so the four weights sum to 1 (per-batch
+rebalancing, not GradNorm). :class:`DynamicLossBalancer` still adjusts the full curriculum vector
+``sw_eff``; those values feed back in as ``base_stage`` on the next step.
 
 **Curriculum** — :class:`CurriculumSchedule` + :func:`curriculum_base_weights` provide epoch ramps.
 
@@ -794,45 +795,53 @@ class DynamicLossBalancer:
         return out
 
 
-def dynamic_loss_weights(batch_context: dict[str, Any]) -> dict[str, float]:
+def dynamic_loss_weights(
+    batch_context: dict[str, Any],
+    *,
+    base_stage: dict[str, float],
+) -> dict[str, float]:
     """
-    **Original AquaForge** closed-form multi-task nudges (not GradNorm / DWA / uncertainty weighting
-    from a specific 2024 paper).
+    **Original AquaForge** per-batch task mix (not pasted MTWL / uncertainty-weighting papers).
 
-    ``batch_context`` may include a tensor ``mask_area`` (B,) for the joint small-vessel term; this
-    function **reads only float/stat keys** (``mask_area_mean``, ``seg_small_vessel_frac``, …) and
-    ignores :class:`torch.Tensor` entries so you can pass one merged dict from
-    :func:`aquaforge_joint_loss` as in the spec: ``weights = dynamic_loss_weights(batch_context)``.
+    1. **Base** — ``base_stage`` carries curriculum ``seg`` / ``kp_hm`` / ``hdg`` / ``wake`` scalars
+       (already EMA-adjusted in the trainer as ``sw_eff``).
+    2. **Small-vessel** — ``1 + 2.5·exp(−mask_area_mean / 6000)`` lifts all branches when the batch
+       mean hull footprint is small (Sentinel-2 small/medium vessels).
+    3. **Heading ambiguity** — ``1 + 1.8·(1 − heading_conf_mean)`` using mean sigmoid of the heading
+       confidence logit; low confidence ⇒ stronger geometry emphasis across the normalized mix.
+    4. **Review uncertainty** — ``1 + 1.2·review_uncertainty_mean`` (0–1 UI export signal).
+    5. **Normalize** — product of factors times each base, then divide by the sum so
+       ``weights['seg']+weights['kp']+weights['heading']+weights['wake'] == 1``.
 
-    Outputs multiply the four core branches before curriculum scalars.
+    Tensor entries in ``batch_context`` (e.g. ``mask_area`` per chip) are ignored here; use
+    ``mask_area_mean`` from :func:`_joint_batch_context_floats`.
     """
-    w_seg = 1.0
-    w_kp = 1.0
-    w_hdg = 1.0
-    w_wake = 1.0
-    ma = batch_context.get("mask_area_mean")
-    if ma is not None and ma < 4200.0:
-        w_seg *= 1.14
-        w_kp *= 1.1
-    ssf = batch_context.get("seg_small_vessel_frac")
-    if ssf is not None and ssf > 0.34:
-        w_seg *= 1.08
-        w_kp *= 1.06
-    ha = batch_context.get("heading_ambiguity_mean")
-    if ha is not None and ha > 0.34:
-        w_hdg *= 1.16
-        w_wake *= 1.05
-    ru = batch_context.get("review_uncertainty_mean")
-    if ru is not None and ru > 0.36:
-        w_seg *= 1.07
-        w_hdg *= 1.08
-        w_kp *= 1.05
-        w_wake *= 1.04
-    pr = batch_context.get("al_priority_mean")
-    if pr is not None and pr > 1.52:
-        w_seg *= 1.05
-        w_kp *= 1.04
-    return {"seg": w_seg, "kp": w_kp, "heading": w_hdg, "wake": w_wake}
+    mask_area_mean = float(batch_context.get("mask_area_mean", 0.0))
+    mask_area_mean = max(0.0, mask_area_mean)
+    f_sv = 1.0 + 2.5 * math.exp(-mask_area_mean / 6000.0)
+
+    heading_conf = batch_context.get("heading_conf_mean")
+    if heading_conf is None:
+        heading_conf = 0.5
+    heading_conf = max(0.0, min(1.0, float(heading_conf)))
+    f_h = 1.0 + 1.8 * (1.0 - heading_conf)
+
+    ru = batch_context.get("review_uncertainty_mean", 0.0)
+    ru = max(0.0, min(1.0, float(ru)))
+    f_r = 1.0 + 1.2 * ru
+
+    f_prod = f_sv * f_h * f_r
+
+    raw = {
+        "seg": float(base_stage.get("seg", 1.0)) * f_prod,
+        "kp": float(base_stage.get("kp", 0.0)) * f_prod,
+        "heading": float(base_stage.get("heading", 1.0)) * f_prod,
+        "wake": float(base_stage.get("wake", 1.0)) * f_prod,
+    }
+    s = sum(raw.values())
+    if s < 1e-12:
+        return {"seg": 0.25, "kp": 0.25, "heading": 0.25, "wake": 0.25}
+    return {k: v / s for k, v in raw.items()}
 
 
 def _joint_batch_context_floats(
@@ -849,8 +858,10 @@ def _joint_batch_context_floats(
     if hdg is not None and hdg.dim() == 2 and hdg.shape[-1] >= 3:
         c = torch.sigmoid(hdg[:, 2:3])
         ha = float((4.0 * c * (1.0 - c)).mean().item())
+        heading_conf_mean = float(c.mean().item())
     else:
         ha = 0.0
+        heading_conf_mean = 0.5
     ru = batch.get("review_uncertainty")
     ru_m = float(ru.float().mean().item()) if ru is not None else 0.0
     al = batch.get("al_priority")
@@ -859,6 +870,7 @@ def _joint_batch_context_floats(
         "mask_area_mean": mask_area_mean,
         "seg_small_vessel_frac": ssf,
         "heading_ambiguity_mean": ha,
+        "heading_conf_mean": heading_conf_mean,
         "review_uncertainty_mean": ru_m,
         "al_priority_mean": pr,
     }
@@ -882,23 +894,14 @@ def aquaforge_joint_loss(
     * ``heading_loss = circular_heading_loss(pred['heading_sin_cos'], gt['heading_sin_cos'], kp_vis)``
       (``heading_valid`` / ``wake_valid`` are applied inside via keyword args from this function).
     * ``wake_loss = wake_direction_loss(pred['wake_dir'], gt['wake_dir'], pred['heading_sin_cos'])``.
-    * ``weights = dynamic_loss_weights(batch_context)`` with ``batch_context = {**float_summaries, \"mask_area\": tensor}``.
-      ``total_core = Σ curriculum[k] * weights[k] * loss_k`` for the four branches.
+    * ``weights = dynamic_loss_weights(batch_context, base_stage=…)`` — curriculum bases for the four
+      heads, three multiplicative cues, **normalized** so the four weights sum to 1.
+    * ``total_core = Σ weights[k] * loss_k`` (curriculum is **inside** ``weights`` via ``base_stage``).
 
-    Returns ``(total, logs)``. The spec sketch ``return total, weights`` is mapped here as: the
-    dynamic multipliers are ``logs['dw_seg']`` … ``logs['dw_wake']`` (same numeric values as
-    ``weights['seg']`` … ``weights['wake']``), plus ``loss_*`` / ``loss_total`` for
-    :class:`DynamicLossBalancer` and the trainer.
+    Returns ``(total, logs)``; ``dw_*`` mirror ``weights`` (sum to 1) for logging / inspection.
 
-    **Spec pseudocode (reference — implemented below with ``out``/``batch``/``stage_weights`` wiring):** ::
-
-        # small_weight = 1.0 + 3.0 * exp(-batch_context['mask_area'] / 8000.0)
-        # seg_loss = mean((dice_loss(pred['seg'],gt['seg'])+soft_iou_loss(...)) * small_weight)  # per-chip
-        # kp_loss = adaptive_keypoint_heatmap_loss(pred['kp_hm'], gt['kp_hm'], gt['kp_vis'])
-        # heading_loss = circular_heading_loss(pred['heading_sin_cos'], gt['heading_sin_cos'], gt['kp_vis'])
-        # wake_loss = wake_direction_loss(pred['wake_dir'], gt['wake_dir'], pred['heading_sin_cos'])
-        # weights = dynamic_loss_weights(batch_context)
-        # total_core = weights['seg']*seg_loss + weights['kp']*kp_loss + weights['heading']*heading_loss + weights['wake']*wake_loss
+    **Geometry core reference:** small-vessel mask weighting on seg; adaptive heatmap; circular heading;
+    wake direction; see implementation below.
     """
     logs: dict[str, float] = {}
     dev = out["cls_logit"].device
@@ -939,9 +942,15 @@ def aquaforge_joint_loss(
         "wake_dir": batch.get("wake_vec"),
     }
     mask_area = seg_tgt.sum(dim=(1, 2, 3))
-    # Single batch_context (spec): tensor ``mask_area`` + float summaries for :func:`dynamic_loss_weights`.
+    # Merged context: per-chip ``mask_area`` for seg small-weight; floats include ``mask_area_mean``, ``heading_conf_mean``, …
     batch_context: dict[str, Any] = {**bc_float, "mask_area": mask_area}
-    weights = dynamic_loss_weights(batch_context)
+    base_stage = {
+        "seg": float(sw.get("seg", 1.0)),
+        "kp": float(sw.get("kp_hm", 0.0)),
+        "heading": float(sw.get("hdg", 1.0)),
+        "wake": float(sw.get("wake", 1.0)),
+    }
+    weights = dynamic_loss_weights(batch_context, base_stage=base_stage)
     logs["dw_seg"] = float(weights["seg"])
     logs["dw_kp"] = float(weights["kp"])
     logs["dw_heading"] = float(weights["heading"])
@@ -1003,11 +1012,11 @@ def aquaforge_joint_loss(
         )
     logs["loss_wake"] = float(wake_loss.detach())
 
-    # total = weights['seg']*seg_loss + ... (curriculum scales each branch; zero loss = no graph when off)
-    total = total + w_seg * float(weights["seg"]) * seg_loss
-    total = total + w_kph * float(weights["kp"]) * kp_loss
-    total = total + w_hdg * float(weights["heading"]) * heading_loss
-    total = total + w_wake * float(weights["wake"]) * wake_loss
+    # Normalized weights (sum=1) already embed curriculum via base_stage; multiply losses only.
+    total = total + float(weights["seg"]) * seg_loss
+    total = total + float(weights["kp"]) * kp_loss
+    total = total + float(weights["heading"]) * heading_loss
+    total = total + float(weights["wake"]) * wake_loss
 
     w = sw.get("kp", 1.0)
     if w > 0:

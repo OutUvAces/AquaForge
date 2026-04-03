@@ -15,7 +15,8 @@ teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation.
 ``--pseudo-jsonl`` + ``--pseudo-per-epoch`` + ``--pseudo-mix-weight`` — after each epoch’s supervised
 steps, score up to ``--pseudo-scan-max`` curated unlabeled chips, take the top-``pseudo-per-epoch`` by
 trust, run :func:`aquaforge.unified.losses.aquaforge_self_training_loss`, and backprop
-``pseudo_mix_weight * loss_st``. Balancer uses batch context (small hulls, heading ambiguity, AL).
+``pseudo_mix_weight * loss_st``. Pseudo chips default to **vessel prob ≥ 0.7** (``--pseudo-min-conf``).
+Balancer uses batch context (small hulls, heading ambiguity, AL).
 
 Requires: pip install -r requirements-ml.txt (PyTorch, ONNX runtime, etc.).
 
@@ -106,7 +107,12 @@ def main() -> None:
         default=0.28,
         help="Multiplier on self-training loss (AquaForge teacher pass → student pass on same weights).",
     )
-    ap.add_argument("--pseudo-min-conf", type=float, default=0.58, help="Min vessel prob to accept pseudo chip.")
+    ap.add_argument(
+        "--pseudo-min-conf",
+        type=float,
+        default=0.7,
+        help="Min vessel probability to accept pseudo chip for self-training (high-confidence unlabeled only).",
+    )
     ap.add_argument("--pseudo-max-u", type=float, default=0.62, help="Max AquaForge uncertainty to accept pseudo chip.")
     ap.add_argument(
         "--pseudo-scan-max",

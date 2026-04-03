@@ -287,6 +287,21 @@ class TestAquaForgeLosses(unittest.TestCase):
         self.assertGreaterEqual(u, 0.0)
         self.assertLessEqual(u, 1.0)
 
+    def test_dynamic_loss_weights_sum_one(self) -> None:
+        from aquaforge.unified.losses import dynamic_loss_weights
+
+        bc = {
+            "mask_area_mean": 3000.0,
+            "heading_conf_mean": 0.6,
+            "review_uncertainty_mean": 0.2,
+        }
+        base = {"seg": 1.0, "kp": 0.5, "heading": 0.8, "wake": 0.3}
+        w = dynamic_loss_weights(bc, base_stage=base)
+        s = sum(w.values())
+        self.assertAlmostEqual(s, 1.0, places=6)
+        self.assertIn("seg", w)
+        self.assertIn("kp", w)
+
     def test_adaptive_heatmap_sigma(self) -> None:
         try:
             import torch

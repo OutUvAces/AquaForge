@@ -92,8 +92,11 @@ class AquaForgeDeltaFuse(nn.Module):
     **Design (exact):** features **p3, p4, p5** → **learned 1×1 conv + sigmoid gate** per scale →
     upsample gated **p4, p5** to **p3** resolution and **project to p3 channel width** → **concatenate**
     gated p3-aligned tensors with **residual differences** ``(p4→p3) − p3`` and ``(p5→p3) − p3`` →
-    **depthwise 3×3** then **pointwise 1×1** → **learned per-scale residuals** via 1×1 skips multiplied
-    by **tanh(α)** so contribution stays bounded (our stabiliser vs raw unbounded scalar adds).
+    **Cross-scale attention** — after concat, a **1×1 conv + sigmoid** gates the stacked features
+    (lightweight channel attention across p3/p4/p5+deltas) before the **depthwise 3×3** /
+    **pointwise 1×1** stack — our addition vs plain concat→DW (not a full transformer neck).
+
+    **Per-scale residuals** — 1×1 skips multiplied by **tanh(α)**.
 
     Compared with additive FPN fusion, explicit **deltas** allocate capacity to cross-scale *change*
     (wake smear vs tight hull), which we tune for Sentinel-2 small/medium vessels.
@@ -109,6 +112,7 @@ class AquaForgeDeltaFuse(nn.Module):
         self.proj4 = nn.Conv2d(c4, c3, 1, bias=True)
         self.proj5 = nn.Conv2d(c5, c3, 1, bias=True)
         fused_in = 5 * c3
+        self.cross_scale_attn = nn.Conv2d(fused_in, fused_in, 1, bias=True)
         self.dw = nn.Conv2d(fused_in, fused_in, 3, 1, 1, groups=fused_in, bias=True)
         self.pw = nn.Conv2d(fused_in, out_ch, 1, bias=True)
         self.bn = nn.BatchNorm2d(out_ch)
@@ -133,6 +137,8 @@ class AquaForgeDeltaFuse(nn.Module):
         d43 = a4 - p3
         d53 = a5 - p3
         cat = torch.cat([gp3, a4, a5, d43, d53], dim=1)
+        gate = torch.sigmoid(self.cross_scale_attn(cat))
+        cat = cat * gate
         y = self.act(self.bn(self.pw(self.dw(cat))))
         y = (
             y
@@ -226,7 +232,8 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     meta["model_arch"] = ARCH_CNN
     m = AquaForgeCnn(imgsz=imgsz, n_landmarks=nl)
     fv = int(meta.get("format_version", 1))
-    # format_version < 4: single-scale encoder checkpoints — load loosely into Delta-Fuse graph.
-    strict = fv >= 4
+    # Only format_version >= 6 expects an exact match (Delta-Fuse + cross-scale 1×1). Older checkpoints
+    # load loosely so new layers (e.g. ``cross_scale_attn``) initialize from scratch.
+    strict = fv >= 6
     m.load_state_dict(ckpt["state_dict"], strict=strict)
     return m, meta
