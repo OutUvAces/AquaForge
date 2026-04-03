@@ -25,7 +25,7 @@ Examples:
   py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
       --no-dynamic-balance
   py -3 scripts/train_aquaforge.py --pseudo-jsonl data/labels/pseudo_pool.jsonl \\
-      --pseudo-per-epoch 8 --pseudo-scan-max 256
+      --pseudo-per-epoch 8 --pseudo-mix-weight 0.28 --pseudo-scan-max 256
   py -3 scripts/train_aquaforge.py --epochs 4 --batch-size 2   # quick first model (UI **Train first**)
   py -3 scripts/export_aquaforge_onnx.py --checkpoint data/models/aquaforge/aquaforge.pt
 
@@ -326,6 +326,8 @@ def main() -> None:
             else:
                 sw_eff = dict(base_sw)
 
+        # Self-training: pseudo-labels from high-confidence unlabeled chips (see --pseudo-min-conf),
+        # mixed into training via --pseudo-mix-weight on the student loss (human labels unchanged).
         if pseudo_pool and pseudo_n > 0 and pseudo_w > 0:
             scan_cap = min(len(pseudo_pool), max(1, int(args.pseudo_scan_max)))
             prep = prepare_pseudo_self_training_batch(

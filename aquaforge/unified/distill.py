@@ -123,11 +123,12 @@ def aquaforge_uncertainty_from_outputs(out: dict[str, Any]) -> float:
     """
     One **uncertainty** number from AquaForge’s own outputs (0 ≈ confident, 1 ≈ doubtful).
 
-    **Original AquaForge (2025–26) cue stack**: we use **only** (1) vessel logit **margin**
-    (proximity of sigmoid to 0.5), (2) heading **confidence-channel** Bernoulli entropy, and
-    (3) landmark **heatmap** Bernoulli entropy when ``kp_hm`` exists. Segmentation-map entropy and
-    raw heading-vector norms are **omitted** so this score does not duplicate hull fuzz signals
-    already optimized in the joint segmentation branch — cleaner gating for pseudo-labels and AL merge.
+    **Original AquaForge (2025–26) — outputs only, no review JSON in this call**: (1) **vessel
+    probability margin** ``1 − |2p−1|`` on ``cls_logit``; (2) **heading confidence entropy**
+    ``4·σ(c)(1−σ(c))`` (Bernoulli entropy, max 1) averaged on the third heading channel; (3)
+    **keypoint heatmap entropy** (binary entropy on ``sigmoid(kp_hm)``) when heatmaps exist, else
+    the mix reweights to cls + heading only. **No** seg-map entropy or heading-vector norms — avoids
+    double-counting hull ambiguity already handled in the joint loss.
     """
     import torch
 
@@ -165,10 +166,13 @@ def review_ui_active_learning_priority(
     review_category: str | None = None,
 ) -> float:
     """
-    Score ≥ 1.0 for oversampling: uncertain vessel confidence, small saved length proxies, weak keypoint
-    trust, obscuration — tuned for **Sentinel-2 small/medium vessels** and ambiguous coastlines.
+    Score ≥ 1.0 for oversampling — **original AquaForge AL prior** (not a published sampler schedule).
 
-    This is a heuristic **sampling** prior, not a loss; it does not appear in published MT schedules.
+    **Explicit boosts** requested by product spec: **length < 45 m** (extra ``+1.25`` plus smaller-ship
+    tiers), **coastal / land-adjacent** exports (``+0.92``), and **Unsure** reviews
+    (``review_category == "ambiguous"``, ``+1.85`` — maps to the UI “Unsure” path). Other terms
+    (borderline confidence, clouds, manual locator, heading trust) keep the queue aligned with
+    operator-visible difficulty on Sentinel-2 chips.
     """
     ex = extra or {}
     p = 1.0

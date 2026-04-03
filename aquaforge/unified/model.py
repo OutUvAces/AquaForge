@@ -136,7 +136,9 @@ class AquaForgeDeltaFuse(nn.Module):
         a5 = self.proj5(up5)
         d43 = a4 - p3
         d53 = a5 - p3
+        # Gated multi-scale features + aligned residual deltas, then **our** cross-scale attention.
         cat = torch.cat([gp3, a4, a5, d43, d53], dim=1)
+        # Spec: 1×1 conv on concat → sigmoid → multiply back onto features → DW 3×3 + PW 1×1 (below).
         gate = torch.sigmoid(self.cross_scale_attn(cat))
         cat = cat * gate
         y = self.act(self.bn(self.pw(self.dw(cat))))
