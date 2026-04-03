@@ -10,6 +10,8 @@ then use the bookmark file ``AquaForge.url`` or http://127.0.0.1:8501
 
 **Main:** large close-up, **On image** toggles, **Back / Next** and save buttons. **Left:** scene + refresh; **Advanced** has retrain, downloads, exports, label fixer.
 
+**Branding:** JPEG logos live under ``aquaforge/static/images/`` (``AquaForge_small.jpg``, ``AquaForge_text.jpg``, ``AquaForge_large.jpg``) and are wired in ``aquaforge/web_ui.py`` (favicon, sidebar header, title row, hero).
+
 The app only answers at that URL while this computer is running the server.
 For a public URL with no local server, host the app (e.g. Streamlit Community Cloud).
 """

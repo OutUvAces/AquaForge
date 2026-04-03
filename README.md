@@ -18,6 +18,24 @@ Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** holds th
 
 Entry point: [`app.py`](app.py) → `aquaforge.web_ui.main`.
 
+---
+
+## Branding
+
+JPEG logos live in [`aquaforge/static/images/`](aquaforge/static/images/) and are wired in [`aquaforge/web_ui.py`](aquaforge/web_ui.py):
+
+| Asset | Use in the UI |
+|--------|----------------|
+| [`AquaForge_small.jpg`](aquaforge/static/images/AquaForge_small.jpg) | Browser favicon (`st.set_page_config`); sidebar header |
+| [`AquaForge_text.jpg`](aquaforge/static/images/AquaForge_text.jpg) | Header mark beside the **AquaForge** title |
+| [`AquaForge_large.jpg`](aquaforge/static/images/AquaForge_large.jpg) | Centered hero under the title row (responsive, max-width 400px) |
+
+![AquaForge small wordmark](aquaforge/static/images/AquaForge_small.jpg)
+
+![AquaForge text logo](aquaforge/static/images/AquaForge_text.jpg)
+
+![AquaForge large hero](aquaforge/static/images/AquaForge_large.jpg)
+
 ### Daily review
 
 1. Open the **left panel** — choose a **scene** and **Refresh spot list** (full-scene AquaForge pass).

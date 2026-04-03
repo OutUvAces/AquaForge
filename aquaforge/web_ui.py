@@ -11,6 +11,7 @@ after the image, then **Back / Next** and **Ship / Not a ship / Unsure**.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import math
@@ -24,6 +25,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+_AF_BRAND_DIR = Path(__file__).resolve().parent / "static" / "images"
+_AF_BRAND_SMALL = _AF_BRAND_DIR / "AquaForge_small.jpg"
+_AF_BRAND_TEXT = _AF_BRAND_DIR / "AquaForge_text.jpg"
+_AF_BRAND_LARGE = _AF_BRAND_DIR / "AquaForge_large.jpg"
 
 
 def _probability_to_percent_str(p: float | None) -> str:
@@ -311,6 +317,11 @@ def _ui_styles() -> None:
   }
   p.vd-deck-foot, span.vd-deck-foot { font-size: 0.68rem !important; color: #64748b; line-height: 1.3; margin: 0.1rem 0 0 0 !important; }
   div[data-testid="column"] span.vd-metric { font-size: 0.72rem !important; color: #475569; font-weight: 600; }
+  /* Repo branding: hero + title row */
+  .af-brand-hero-wrap { text-align: center; margin: 0.15rem auto 0.85rem auto; max-width: 420px; }
+  .af-brand-hero-wrap img { max-width: 400px; width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 10px; box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12); }
+  .af-sidebar-brand { text-align: center; padding: 0.15rem 0 0.5rem 0; margin-bottom: 0.35rem; border-bottom: 1px solid rgba(148, 163, 184, 0.35); }
+  .af-sidebar-brand [data-testid="stImage"] { display: flex; justify-content: center; }
 </style>
         """,
         unsafe_allow_html=True,
@@ -1236,12 +1247,34 @@ def _sidebar_spot_finding_settings() -> None:
         )
 
 
+def _render_af_branding_header() -> None:
+    """Main column: text mark + title row, then responsive hero (``AquaForge_large.jpg``, max 400px)."""
+    if _AF_BRAND_TEXT.is_file() and _AF_BRAND_LARGE.is_file():
+        b64_hero = base64.b64encode(_AF_BRAND_LARGE.read_bytes()).decode("ascii")
+        c_logo, c_title = st.columns([1, 2], gap="small")
+        with c_logo:
+            st.image(str(_AF_BRAND_TEXT), use_container_width=True)
+        with c_title:
+            st.markdown("# AquaForge")
+        st.markdown(
+            f'<div class="af-brand-hero-wrap"><img src="data:image/jpeg;base64,{b64_hero}" alt="AquaForge" /></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("---")
+        return
+    st.markdown("# AquaForge")
+    if _AF_BRAND_LARGE.is_file():
+        st.image(str(_AF_BRAND_LARGE), width=400)
+        st.markdown("---")
+
+
 def main() -> None:
+    _page_icon: str = str(_AF_BRAND_SMALL) if _AF_BRAND_SMALL.is_file() else "🛰️"
     st.set_page_config(
         page_title="AquaForge",
         layout="wide",
         initial_sidebar_state="collapsed",
-        page_icon="🛰️",
+        page_icon=_page_icon,
     )
     _ui_styles()
     load_env(ROOT)
@@ -1253,6 +1286,8 @@ def main() -> None:
     _af_train_flash = st.session_state.pop("_vd_af_train_flash", None)
     if _af_train_flash:
         st.success(str(_af_train_flash))
+
+    _render_af_branding_header()
 
     if st.session_state.get("vd_ui_mode") == "training_review":
         render_training_label_review_ui(
@@ -1286,6 +1321,10 @@ def main() -> None:
     # Sidebar: only scene + refresh on first glance; everything else under **Advanced**.
     tci_loaded_sidebar = str(st.session_state.get("tci_loaded") or "").strip()
     with st.sidebar:
+        if _AF_BRAND_SMALL.is_file():
+            st.markdown('<div class="af-sidebar-brand">', unsafe_allow_html=True)
+            st.image(str(_AF_BRAND_SMALL), width=56)
+            st.markdown("</div>", unsafe_allow_html=True)
         if not tci_list:
             st.caption("Add an image to start.")
         else:
