@@ -43,7 +43,7 @@ def marker_role_bits_from_extra(extra: dict[str, Any] | None) -> np.ndarray:
     ``extra["dimension_markers"]``. **port** / **starboard** points set the **side** bit.
 
     Use with :func:`extract_crop_features` for future supervision (e.g. hull / length regression).
-    The baseline ship classifier uses radiometry only; this stays available for multi-task training.
+    The baseline ship classifier uses radiometry only; this stays available for AquaForge training.
     """
     from aquaforge.vessel_markers import MARKER_ROLES
 

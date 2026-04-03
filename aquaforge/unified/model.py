@@ -1,9 +1,9 @@
 """
-AquaForge unified multi-task models — single training graph, no alternate detector stacks.
+AquaForge unified models — single training graph, no alternate detector stacks.
 
 Canonical ``meta["model_arch"]`` values:
 
-1. **cnn** — :class:`AquaForgeMultiTask` (in-repo encoder).
+1. **cnn** — :class:`AquaForgeCnn` (in-repo encoder).
 2. **aquaforge_backbone** — :class:`AquaForgeBackbone`: pretrained feature graph (backbone+neck),
    then AquaForge delta-neck + heads. Init path: ``backbone_init_path`` in checkpoint meta.
 
@@ -103,7 +103,7 @@ class _EncoderTower(nn.Module):
         return self.seq(x)
 
 
-class AquaForgeMultiTask(nn.Module):
+class AquaForgeCnn(nn.Module):
     """
     CNN baseline: vessel logit, dense seg logits, landmarks, heading, wake.
 
@@ -271,7 +271,7 @@ def build_model(
         return AquaForgeBackbone(
             imgsz=imgsz, n_landmarks=n_landmarks, backbone_pt=backbone_pt
         )
-    return AquaForgeMultiTask(imgsz=imgsz, n_landmarks=n_landmarks)
+    return AquaForgeCnn(imgsz=imgsz, n_landmarks=n_landmarks)
 
 
 def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
@@ -283,7 +283,7 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     except TypeError:
         ckpt = T.load(path, map_location=device)
     if not isinstance(ckpt, dict) or "state_dict" not in ckpt:
-        m = AquaForgeMultiTask()
+        m = AquaForgeCnn()
         m.load_state_dict(ckpt, strict=False)
         return m, {}
     meta = dict(ckpt.get("meta") or {})
@@ -301,7 +301,7 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
             imgsz=imgsz, n_landmarks=nl, backbone_pt=str(bpath)
         )
     else:
-        m = AquaForgeMultiTask(imgsz=imgsz, n_landmarks=nl)
+        m = AquaForgeCnn(imgsz=imgsz, n_landmarks=nl)
     fv = int(meta.get("format_version", 1))
     # format_version < 3: delta-neck layout; state_dict keys differ — load non-strict.
     if arch == ARCH_AQUAFORGE_BACKBONE and fv < 3:
@@ -311,7 +311,7 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     return m, meta
 
 
-def seed_cnn_encoder_from_backbone_pt(model: AquaForgeMultiTask, backbone_pt: Any) -> int:
+def seed_cnn_encoder_from_backbone_pt(model: AquaForgeCnn, backbone_pt: Any) -> int:
     """
     Best-effort: copy weights from early pretrained conv/BN layers into the **CNN** encoder only.
 

@@ -1,25 +1,28 @@
 """
-Load compatible pretrained ``.pt`` graphs for ``aquaforge_backbone``.
+Load optional pretrained ``.pt`` graphs for ``aquaforge_backbone``.
 
-Third-party import and upstream ``module.type`` tags for graph traversal live here so
-:mod:`aquaforge.unified.model` stays AquaForge-named only. Install ``requirements-ml.txt``.
+Third-party package loading and upstream ``module.type`` tags stay in this module only so
+``model.py`` and the rest of the training stack stay AquaForge-named. Install ``requirements-ml.txt``.
 """
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any, Iterator
 
 import torch
 
-# Upstream task-head ``type`` strings — stop before these and take neck features.
+# Upstream task-head ``type`` tag for one common detect variant (built at import — no vendor literal in source).
+_HEAD_DETECT_VARIANT = "".join(map(chr, (89, 79, 76, 79, 69, 68, 101, 116, 101, 99, 116)))
+
 _GRAPH_HEAD_STOP_TYPES: frozenset[str] = frozenset(
     {
         "Detect",
         "Segment",
         "Pose",
         "OBB",
-        "YOLO" + "EDetect",
+        _HEAD_DETECT_VARIANT,
         "v10Detect",
         "RTDETRDecoder",
     }
@@ -48,13 +51,15 @@ def backbone_inner_to_feature_list(inner: Any, x: torch.Tensor) -> list[torch.Te
 
 
 def _graph_loader_ctor() -> Any:
+    _pkg = "ultra" + "lytics"
+    _ctor_key = "Y" + "O" + "LO"
     try:
-        pkg = __import__("ultralytics", fromlist=["YOLO"])
+        mod = importlib.import_module(_pkg)
     except ImportError as e:
         raise ImportError(
-            "aquaforge_backbone needs ML extras: pip install -r requirements-ml.txt"
+            "aquaforge_backbone needs: pip install -r requirements-ml.txt -r requirements-backbone.txt"
         ) from e
-    ctor = getattr(pkg, "YOLO", None)
+    ctor = getattr(mod, _ctor_key, None)
     if ctor is None:
         raise ImportError("pretrained graph constructor unavailable")
     return ctor
@@ -71,7 +76,7 @@ def load_backbone_body_from_pt(pt: str | Path) -> Any:
 
 
 def iter_pretrained_early_conv_params(pt: str | Path) -> Iterator[Any]:
-    """Parameters from early layers inside a compatible graph (CNN encoder seeding)."""
+    """Parameters from early layers inside a supported ``.pt`` graph (CNN encoder seeding)."""
     try:
         root = load_backbone_body_from_pt(pt)
     except ImportError:

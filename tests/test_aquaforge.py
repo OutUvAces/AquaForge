@@ -222,9 +222,9 @@ class TestAquaForgeLosses(unittest.TestCase):
         except ImportError:
             self.skipTest("torch not installed")
         from aquaforge.unified.constants import NUM_LANDMARKS
-        from aquaforge.unified.model import AquaForgeMultiTask
+        from aquaforge.unified.model import AquaForgeCnn
 
-        m = AquaForgeMultiTask(imgsz=128, n_landmarks=NUM_LANDMARKS)
+        m = AquaForgeCnn(imgsz=128, n_landmarks=NUM_LANDMARKS)
         m.eval()
         x = torch.randn(1, 3, 128, 128)
         y = m(x)

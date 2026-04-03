@@ -1,5 +1,5 @@
 """
-Train AquaForge (unified multi-task vessel model) from review JSONL + TCIs.
+Train AquaForge (unified vessel model) from review JSONL + TCIs.
 
 **Curriculum** — :func:`aquaforge.unified.losses.curriculum_base_weights`: segmentation + vessel
 logit first, then landmarks + heatmaps, heading, wake (smooth ramps vs ``total_epochs``).
@@ -35,7 +35,8 @@ By default, after saving ``aquaforge.pt``, runs ONNX export (CPU) unless ``--no-
 
 from __future__ import annotations
 
-# Pure AquaForge trainer: model_arch is ``cnn`` or ``aquaforge_backbone`` only (no alternate detector tags).
+# Pure AquaForge trainer: ``cnn`` or ``aquaforge_backbone`` only; CLI uses ``--backbone-weights`` /
+# ``--backbone-seed-encoder`` (no alternate detector flags).
 
 import argparse
 import random
@@ -49,7 +50,7 @@ if str(ROOT) not in sys.path:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Train AquaForge multi-task model.")
+    ap = argparse.ArgumentParser(description="Train AquaForge vessel model.")
     ap.add_argument("--project-root", type=Path, default=ROOT)
     ap.add_argument(
         "--jsonl",
@@ -206,7 +207,7 @@ def main() -> None:
         curriculum_base_weights,
     )
     from aquaforge.unified.model import (
-        AquaForgeMultiTask,
+        AquaForgeCnn,
         build_model,
         seed_cnn_encoder_from_backbone_pt,
         set_backbone_body_requires_grad,
@@ -309,7 +310,7 @@ def main() -> None:
             backbone_pt=backbone_ckpt if backbone_ckpt and backbone_ckpt.is_file() else bw_arg,
         ).to(device)
     else:
-        model = AquaForgeMultiTask(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS).to(device)
+        model = AquaForgeCnn(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS).to(device)
         if args.backbone_seed_encoder and Path(args.backbone_seed_encoder).is_file():
             n = seed_cnn_encoder_from_backbone_pt(model, Path(args.backbone_seed_encoder))
             print(f"Pretrained backbone→CNN encoder seed: {n} tensor(s) matched", flush=True)

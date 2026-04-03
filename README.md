@@ -4,7 +4,7 @@
 
 - **Weights:** `data/models/aquaforge/aquaforge.pt` (and optional ONNX via YAML).
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
-- **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
+- **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`. For **`aquaforge_backbone`** training, also `pip install -r requirements-backbone.txt`.
 
 Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** holds the full tiled + spot-decode stack; **only** **`run_aquaforge_tiled_scene_triples`** and **`run_aquaforge_spot_decode`** are exported (`__all__`). **`unified/settings.py`** loads `data/config/detection.yaml`. Supporting modules: `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `unified/spot_landmarks.py`, and packaged YAML under `aquaforge/config/`. Saved review **`extra`** detector audit keys use the **`aquaforge_*`** prefix (e.g. `aquaforge_confidence`, `aquaforge_detector_snapshot`).
 
@@ -41,7 +41,7 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN (**`--architecture cnn`**, default), or **`--architecture aquaforge_backbone`** with **`--backbone-weights <path-to-pt>`** (required for that mode; no implicit default weight file). Checkpoints store **`meta["model_arch"]`** as **`cnn`** or **`aquaforge_backbone`** and **`meta["backbone_init_path"]`** when using the backbone branch. Export with `scripts/export_aquaforge_onnx.py`. Detection is only `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN (**`--architecture cnn`**, default), or **`--architecture aquaforge_backbone`** with **`--backbone-weights <path-to-pt>`** (requires **`requirements-backbone.txt`** installed). Checkpoints store **`meta["model_arch"]`** as **`cnn`** or **`aquaforge_backbone`** and **`meta["backbone_init_path"]`** when using the backbone branch. Export with `scripts/export_aquaforge_onnx.py`. Detection is only `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
 
 Optional **third-party pose ONNX** for keypoint hints is configured only via **`detection.yaml`** (`keypoints.*`); see [`scripts/export_shipstructure_to_onnx.py`](scripts/export_shipstructure_to_onnx.py) for export notes.
 
@@ -82,7 +82,7 @@ Default image command runs a short [`scripts/train_aquaforge.py`](scripts/train_
 
 ## License / upstream
 
-Third-party vendor FPN `.pt` checkpoints used as optional backbone seeds follow their licenses. This application code is provided as-is for research and operational labeling.
+Third-party optional pretrained `.pt` graphs used with **`aquaforge_backbone`** follow their licenses. This application code is provided as-is for research and operational labeling.
 
 ---
 

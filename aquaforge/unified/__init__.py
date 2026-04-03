@@ -1,4 +1,4 @@
-"""AquaForge: unified multi-task vessel model (detection, seg, landmarks, heading, wake hint)."""
+"""AquaForge: unified vessel model (detection, seg, landmarks, heading, wake hint)."""
 
 from __future__ import annotations
 
