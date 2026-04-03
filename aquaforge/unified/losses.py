@@ -868,13 +868,23 @@ def aquaforge_joint_loss(
     stage_weights: dict[str, float],
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
-    **AquaForge joint loss** — ``pred``/``gt`` are mapped from ``out``/``batch``; ``batch_context``
-    supplies ``mask_area`` (B,) and scalar summaries for :func:`dynamic_loss_weights`.
+    **AquaForge joint loss** — maps the canonical spec onto ``out`` / ``batch`` / ``stage_weights``.
 
-    **Core block** (cohesive four-term stack, then curriculum ``stage_weights`` on each branch):
-    small-vessel emphasis on seg, adaptive heatmap vs ``kp_heat``, circular heading on sin/cos GT,
-    wake direction with heading coherence. Classification, coordinate keypoints, and distill are
-    **additional** supervision slots (pure end-to-end vessel path unchanged in the trainer).
+    **Spec-shaped core** (our original four-term stack; each term is a scalar loss tensor, possibly
+    zero when a curriculum branch is off):
+
+    * ``batch_context['mask_area']`` — (B,) integrated GT hull area (pixels).
+    * ``small_weight = 1 + 3·exp(−mask_area/8000)``; ``seg_loss = mean((dice_s + iou_s) * small_weight)``
+      (equivalent to weighting each chip before mean; not ``mean(dice)*mean(weight)``).
+    * ``kp_loss = adaptive_keypoint_heatmap_loss(pred['kp_hm'], gt['kp_hm'], kp_vis)``.
+    * ``heading_loss = circular_heading_loss(pred['heading_sin_cos'], gt['heading_sin_cos'], kp_vis)``
+      (``heading_valid`` / ``wake_valid`` are applied inside via keyword args from this function).
+    * ``wake_loss = wake_direction_loss(pred['wake_dir'], gt['wake_dir'], pred['heading_sin_cos'])``.
+    * ``weights = dynamic_loss_weights(batch_context_floats)``;
+      ``total_core = Σ weights[k] * loss_k``; then multiply each branch by curriculum ``stage_weights``.
+
+    Returns ``(total, logs)`` so the trainer keeps :class:`DynamicLossBalancer` and ``loss_*`` scalars;
+    ``logs`` duplicates ``weights`` as ``dw_*`` (same information as spec ``return total, weights``).
     """
     logs: dict[str, float] = {}
     dev = out["cls_logit"].device
@@ -903,21 +913,87 @@ def aquaforge_joint_loss(
         total = total + w * lc
         logs["loss_cls"] = float(lc.detach())
 
-    # --- Segmentation: Dice + soft IoU with exponential small-vessel weighting (batch_context mask_area) ---
-    w = sw.get("seg", 1.0)
-    if w > 0 and "seg_logit" in out:
-        sl = out["seg_logit"]
-        seg_tgt = batch["seg"]
-        if sl.shape[-2:] != seg_tgt.shape[-2:]:
-            seg_tgt = F.interpolate(seg_tgt, size=sl.shape[-2:], mode="nearest")
-        # batch_context["mask_area"]: integrated GT hull area per chip (pixel sum).
-        mask_area = seg_tgt.sum(dim=(1, 2, 3))
-        small_weight = 1.0 + 3.0 * torch.exp(-mask_area / 8000.0)
-        dice_s = dice_loss_per_sample(sl, seg_tgt)
-        iou_s = soft_iou_per_sample(sl, seg_tgt)
+    # --- pred / gt / batch_context (spec names) for the four-term core ---
+    pred: dict[str, torch.Tensor | None] = {
+        "seg": out.get("seg_logit"),
+        "kp_hm": out.get("kp_hm"),
+        "heading_sin_cos": out["hdg"][:, :2],
+        "wake_dir": out.get("wake"),
+    }
+    seg_tgt = batch["seg"]
+    if pred["seg"] is not None and seg_tgt.shape[-2:] != pred["seg"].shape[-2:]:
+        seg_tgt = F.interpolate(seg_tgt, size=pred["seg"].shape[-2:], mode="nearest")
+    gt: dict[str, torch.Tensor | None] = {
+        "seg": seg_tgt,
+        "kp_hm": batch.get("kp_heat"),
+        "heading_sin_cos": None,
+        "wake_dir": batch.get("wake_vec"),
+    }
+    mask_area = seg_tgt.sum(dim=(1, 2, 3))
+    # Tensor batch_context (spec): ``mask_area`` (B,) for small-vessel emphasis; floats for :func:`dynamic_loss_weights` live in ``bc_float``.
+    batch_context: dict[str, torch.Tensor] = {"mask_area": mask_area}
+
+    w_seg = sw.get("seg", 1.0)
+    w_kph = sw.get("kp_hm", 0.0)
+    w_hdg = sw.get("hdg", 1.0)
+    w_wake = sw.get("wake", 1.0)
+
+    seg_loss = torch.zeros((), device=dev, dtype=dt)
+    if w_seg > 0 and pred["seg"] is not None and gt["seg"] is not None:
+        sl = pred["seg"]
+        seg_gt = gt["seg"]
+        # small_weight = 1.0 + 3.0 * torch.exp(-batch_context['mask_area'] / 8000.0)
+        small_weight = 1.0 + 3.0 * torch.exp(-batch_context["mask_area"] / 8000.0)
+        # seg_loss = (dice + soft IoU per chip) * small_weight, then mean — matches scalar dice+IoU * w per sample.
+        dice_s = dice_loss_per_sample(sl, seg_gt)
+        iou_s = soft_iou_per_sample(sl, seg_gt)
         seg_loss = ((dice_s + iou_s) * small_weight).mean()
-        total = total + w * float(weights["seg"]) * seg_loss
-        logs["loss_seg"] = float(seg_loss.detach())
+    logs["loss_seg"] = float(seg_loss.detach())
+
+    kp_loss = torch.zeros((), device=dev, dtype=dt)
+    if w_kph > 0 and pred["kp_hm"] is not None and gt["kp_hm"] is not None:
+        gt_hm = gt["kp_hm"]
+        if gt_hm.shape[-2:] != pred["kp_hm"].shape[-2:]:
+            gt_hm = F.interpolate(
+                gt_hm,
+                size=pred["kp_hm"].shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        kp_loss = adaptive_keypoint_heatmap_loss(pred["kp_hm"], gt_hm, batch["kp_vis"])
+    logs["loss_kp_hm"] = float(kp_loss.detach())
+
+    rad = batch["hdg_deg"] * (torch.pi / 180.0)
+    gt["heading_sin_cos"] = torch.stack([torch.sin(rad), torch.cos(rad)], dim=-1)
+    heading_loss = torch.zeros((), device=dev, dtype=dt)
+    if w_hdg > 0:
+        heading_loss = circular_heading_loss(
+            pred["heading_sin_cos"],
+            gt["heading_sin_cos"],
+            batch["kp_vis"],
+            heading_valid=batch["hdg_valid"] > 0,
+        )
+    logs["loss_hdg"] = float(heading_loss.detach())
+
+    wake_loss = torch.zeros((), device=dev, dtype=dt)
+    if (
+        w_wake > 0
+        and pred["wake_dir"] is not None
+        and gt["wake_dir"] is not None
+    ):
+        wake_loss = wake_direction_loss(
+            pred["wake_dir"],
+            gt["wake_dir"],
+            pred["heading_sin_cos"],
+            wake_valid=batch["wake_valid"] > 0,
+        )
+    logs["loss_wake"] = float(wake_loss.detach())
+
+    # total = weights['seg']*seg_loss + ... (curriculum scales each branch; zero loss = no graph when off)
+    total = total + w_seg * float(weights["seg"]) * seg_loss
+    total = total + w_kph * float(weights["kp"]) * kp_loss
+    total = total + w_hdg * float(weights["heading"]) * heading_loss
+    total = total + w_wake * float(weights["wake"]) * wake_loss
 
     w = sw.get("kp", 1.0)
     if w > 0:
@@ -929,47 +1005,6 @@ def aquaforge_joint_loss(
         lk = c + 0.25 * vb
         total = total + w * lk
         logs["loss_kp"] = float(lk.detach())
-
-    # --- Keypoint heatmap: adaptive Gaussian targets (kp_heat) + visibility weighting ---
-    w = sw.get("kp_hm", 0.0)
-    if w > 0 and out.get("kp_hm") is not None and batch.get("kp_heat") is not None:
-        gt_hm = batch["kp_heat"]
-        if gt_hm.shape[-2:] != out["kp_hm"].shape[-2:]:
-            gt_hm = F.interpolate(
-                gt_hm,
-                size=out["kp_hm"].shape[-2:],
-                mode="bilinear",
-                align_corners=False,
-            )
-        kp_loss = adaptive_keypoint_heatmap_loss(out["kp_hm"], gt_hm, batch["kp_vis"])
-        total = total + w * float(weights["kp"]) * kp_loss
-        logs["loss_kp_hm"] = float(kp_loss.detach())
-
-    # --- Heading: circular loss + stronger 180° penalty when keypoints confident ---
-    w = sw.get("hdg", 1.0)
-    if w > 0:
-        rad = batch["hdg_deg"] * (torch.pi / 180.0)
-        gt_heading_sin_cos = torch.stack([torch.sin(rad), torch.cos(rad)], dim=-1)
-        heading_loss = circular_heading_loss(
-            out["hdg"][:, :2],
-            gt_heading_sin_cos,
-            batch["kp_vis"],
-            heading_valid=batch["hdg_valid"] > 0,
-        )
-        total = total + w * float(weights["heading"]) * heading_loss
-        logs["loss_hdg"] = float(heading_loss.detach())
-
-    # --- Wake: cosine to GT wake + coherence with heading embedding ---
-    w = sw.get("wake", 1.0)
-    if w > 0:
-        wake_loss = wake_direction_loss(
-            out["wake"],
-            batch["wake_vec"],
-            out["hdg"][:, :2],
-            wake_valid=batch["wake_valid"] > 0,
-        )
-        total = total + w * float(weights["wake"]) * wake_loss
-        logs["loss_wake"] = float(wake_loss.detach())
 
     w = sw.get("distill", 0.0)
     if w > 0 and batch.get("teacher_hdg_sc") is not None:
