@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -793,16 +794,17 @@ class DynamicLossBalancer:
         return out
 
 
-def dynamic_loss_weights(batch_context: dict[str, float]) -> dict[str, float]:
+def dynamic_loss_weights(batch_context: dict[str, Any]) -> dict[str, float]:
     """
     **Original AquaForge** closed-form multi-task nudges (not GradNorm / DWA / uncertainty weighting
-    from a specific 2024 paper). Inputs are **scalar batch summaries** only: mean hull area (pixels),
-    fraction of very small-hull chips, mean heading-confidence ambiguity (Bernoulli entropy of the
-    confidence logit), mean review-export uncertainty, and mean AL priority. Outputs multiply the
-    corresponding joint-loss branches inside :func:`aquaforge_joint_loss` before curriculum scalars.
+    from a specific 2024 paper).
 
-    This improves on fixed static loss ratios when the batch is dominated by tiny vessels, ambiguous
-    headings, or high-priority review exports — without backprop-through-learned weight networks.
+    ``batch_context`` may include a tensor ``mask_area`` (B,) for the joint small-vessel term; this
+    function **reads only float/stat keys** (``mask_area_mean``, ``seg_small_vessel_frac``, …) and
+    ignores :class:`torch.Tensor` entries so you can pass one merged dict from
+    :func:`aquaforge_joint_loss` as in the spec: ``weights = dynamic_loss_weights(batch_context)``.
+
+    Outputs multiply the four core branches before curriculum scalars.
     """
     w_seg = 1.0
     w_kp = 1.0
@@ -880,11 +882,11 @@ def aquaforge_joint_loss(
     * ``heading_loss = circular_heading_loss(pred['heading_sin_cos'], gt['heading_sin_cos'], kp_vis)``
       (``heading_valid`` / ``wake_valid`` are applied inside via keyword args from this function).
     * ``wake_loss = wake_direction_loss(pred['wake_dir'], gt['wake_dir'], pred['heading_sin_cos'])``.
-    * ``weights = dynamic_loss_weights(batch_context_floats)``;
-      ``total_core = Σ weights[k] * loss_k``; then multiply each branch by curriculum ``stage_weights``.
+    * ``weights = dynamic_loss_weights(batch_context)`` with ``batch_context = {**float_summaries, \"mask_area\": tensor}``.
+      ``total_core = Σ curriculum[k] * weights[k] * loss_k`` for the four branches.
 
-    Returns ``(total, logs)`` so the trainer keeps :class:`DynamicLossBalancer` and ``loss_*`` scalars;
-    ``logs`` duplicates ``weights`` as ``dw_*`` (same information as spec ``return total, weights``).
+    Returns ``(total, logs)``; ``logs`` includes ``dw_*`` copies of ``weights`` (trainer / EMA need
+    ``loss_*`` keys; spec ``return total, weights`` is represented by ``weights`` embedded as ``dw_*``).
     """
     logs: dict[str, float] = {}
     dev = out["cls_logit"].device
@@ -898,11 +900,6 @@ def aquaforge_joint_loss(
         if sl0.shape[-2:] != seg_tgt_ctx.shape[-2:]:
             seg_tgt_ctx = F.interpolate(seg_tgt_ctx, size=sl0.shape[-2:], mode="nearest")
     bc_float = _joint_batch_context_floats(batch, out, seg_for_area=seg_tgt_ctx)
-    weights = dynamic_loss_weights(bc_float)
-    logs["dw_seg"] = float(weights["seg"])
-    logs["dw_kp"] = float(weights["kp"])
-    logs["dw_heading"] = float(weights["heading"])
-    logs["dw_wake"] = float(weights["wake"])
 
     w = sw.get("cls", 1.0)
     if w > 0:
@@ -930,8 +927,13 @@ def aquaforge_joint_loss(
         "wake_dir": batch.get("wake_vec"),
     }
     mask_area = seg_tgt.sum(dim=(1, 2, 3))
-    # Tensor batch_context (spec): ``mask_area`` (B,) for small-vessel emphasis; floats for :func:`dynamic_loss_weights` live in ``bc_float``.
-    batch_context: dict[str, torch.Tensor] = {"mask_area": mask_area}
+    # Single batch_context (spec): tensor ``mask_area`` + float summaries for :func:`dynamic_loss_weights`.
+    batch_context: dict[str, Any] = {**bc_float, "mask_area": mask_area}
+    weights = dynamic_loss_weights(batch_context)
+    logs["dw_seg"] = float(weights["seg"])
+    logs["dw_kp"] = float(weights["kp"])
+    logs["dw_heading"] = float(weights["heading"])
+    logs["dw_wake"] = float(weights["wake"])
 
     w_seg = sw.get("seg", 1.0)
     w_kph = sw.get("kp_hm", 0.0)
