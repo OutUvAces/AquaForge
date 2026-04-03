@@ -805,30 +805,30 @@ def dynamic_loss_weights(
 
     1. **Base** — ``base_stage`` carries curriculum ``seg`` / ``kp_hm`` / ``hdg`` / ``wake`` scalars
        (already EMA-adjusted in the trainer as ``sw_eff``).
-    2. **Small-vessel** — ``1 + 2.5·exp(−mask_area_mean / 6000)`` lifts all branches when the batch
-       mean hull footprint is small (Sentinel-2 small/medium vessels).
-    3. **Heading ambiguity** — ``1 + 1.8·(1 − heading_conf_mean)`` using mean sigmoid of the heading
-       confidence logit; low confidence ⇒ stronger geometry emphasis across the normalized mix.
-    4. **Review uncertainty** — ``1 + 1.2·review_uncertainty_mean`` (0–1 UI export signal).
+    2. **Small-vessel** — ``1 + 2.5·exp(−mask_area / 6000)`` (``mask_area`` = batch mean hull pixels).
+    3. **Heading ambiguity** — ``1 + 1.8·(1 − heading_conf)`` (mean sigmoid of heading conf logit).
+    4. **Review uncertainty** — ``1 + 1.2·review_uncertainty`` (0–1 UI export signal).
     5. **Normalize** — product of factors times each base, then divide by the sum so
        ``weights['seg']+weights['kp']+weights['heading']+weights['wake'] == 1``.
 
-    Tensor entries in ``batch_context`` (e.g. ``mask_area`` per chip) are ignored here; use
-    ``mask_area_mean`` from :func:`_joint_batch_context_floats`.
+    Batch scalars come from :func:`_joint_batch_context_floats` (``mask_area_mean`` ≡ spec **mask_area**
+    as mean integrated GT hull per batch; ``heading_conf_mean`` ≡ **heading_conf**; ``review_uncertainty_mean``
+    ≡ **review_uncertainty**).
     """
-    mask_area_mean = float(batch_context.get("mask_area_mean", 0.0))
-    mask_area_mean = max(0.0, mask_area_mean)
-    f_sv = 1.0 + 2.5 * math.exp(-mask_area_mean / 6000.0)
+    # Spec: small_vessel_factor = 1 + 2.5 * exp(-mask_area / 6000)
+    mask_area = max(0.0, float(batch_context.get("mask_area_mean", 0.0)))
+    f_sv = 1.0 + 2.5 * math.exp(-mask_area / 6000.0)
 
+    # Spec: heading_ambiguity_factor = 1 + 1.8 * (1 - heading_conf)
     heading_conf = batch_context.get("heading_conf_mean")
     if heading_conf is None:
         heading_conf = 0.5
     heading_conf = max(0.0, min(1.0, float(heading_conf)))
     f_h = 1.0 + 1.8 * (1.0 - heading_conf)
 
-    ru = batch_context.get("review_uncertainty_mean", 0.0)
-    ru = max(0.0, min(1.0, float(ru)))
-    f_r = 1.0 + 1.2 * ru
+    # Spec: review_uncertainty_factor = 1 + 1.2 * review_uncertainty
+    review_uncertainty = max(0.0, min(1.0, float(batch_context.get("review_uncertainty_mean", 0.0))))
+    f_r = 1.0 + 1.2 * review_uncertainty
 
     f_prod = f_sv * f_h * f_r
 
