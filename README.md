@@ -56,23 +56,26 @@ py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_re
 py -3 scripts/run_detection_eval.py --summary-markdown -o eval_github.md
 py -3 scripts/run_detection_eval.py --demo --max-spots 8
 py -3 scripts/run_detection_eval.py --tiled-recall --tiled-recall-radius 96
+py -3 scripts/run_detection_eval.py --performance-md
 py -3 scripts/run_detection_eval.py --performance-md --jsonl data/labels/ship_reviews.jsonl
 ```
 
-Use `--detection-config` or set `AF_DETECTION_CONFIG` / `VD_DETECTION_CONFIG`. **`--profile`** prints cProfile roll-ups. **`--performance-md`** writes [`eval_aquaforge.md`](eval_aquaforge.md) (same table shape as below).
+Use `--detection-config` or set `AF_DETECTION_CONFIG` / `VD_DETECTION_CONFIG`. **`--profile`** prints cProfile roll-ups. **`--performance-md`** runs `evaluate_aquaforge_performance` only: writes [`eval_aquaforge.md`](eval_aquaforge.md) under `--project-root`, prints `Wrote …` and a one-line summary. Large JSONLs: optional **`--performance-max-binary-points N`** (caps F1 scoring for speed; noted in `eval_aquaforge.md`).
 
 ### Current performance
 
-Regenerate numbers with `--performance-md` (optional `--performance-md-out <path>`). The table matches `evaluate_aquaforge_performance` in [`aquaforge/evaluation.py`](aquaforge/evaluation.py) (ablation / reporting).
+Copied from [`eval_aquaforge.md`](eval_aquaforge.md) after the last `--performance-md` run. Refresh with `py -3 scripts/run_detection_eval.py --performance-md` (same table shape).
 
-| Metric | Value (example — run eval to refresh) |
-| :--- | :--- |
-| Small-vessel detection rate (L < 45 m) | *from `eval_aquaforge.md`* |
-| Heading MAE (deg) | *from `eval_aquaforge.md`* |
-| Mean L/W relative error | *from `eval_aquaforge.md`* |
-| Binary F1 (labeled points) | *from `eval_aquaforge.md`* |
+| Metric | Value |
+| :--- | ---: |
+| Small-vessel detection rate (L < 45 m) | N/A |
+| Heading MAE (deg) | 74.41 |
+| Mean L/W relative error | N/A |
+| Binary F1 (labeled points) | 0.3405 |
 | mAP | N/A (point supervision; use binary F1) |
-| Pearson r (P(vessel) vs label) | *from `eval_aquaforge.md`* |
+| Pearson r (P(vessel) vs label) | 0.2903 |
+
+*Snapshot metadata (see `eval_aquaforge.md` header): 187 geometry spots; small-vessel rate and mean L/W error need matching length/quad GT on your dataset.*
 
 ---
 

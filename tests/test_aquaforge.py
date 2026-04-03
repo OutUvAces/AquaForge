@@ -232,6 +232,21 @@ class TestAquaForgeLosses(unittest.TestCase):
         y2 = m(torch.randn(2, 3, 128, 128), mask_area_pixels=ma)
         self.assertEqual(y2[0].shape, (2, 1))
 
+    def test_aquaforge_performance_one_line_summary(self) -> None:
+        from aquaforge.evaluation import aquaforge_performance_one_line_summary
+
+        s = aquaforge_performance_one_line_summary(
+            {
+                "small_vessel_rate": 0.625,
+                "heading_mae_deg": 8.5,
+                "mean_lw_rel_err": 0.12,
+            }
+        )
+        self.assertIn("62.5%", s)
+        self.assertIn("8.50 degrees", s)
+        self.assertIn("12.00%", s)
+        self.assertTrue(s.startswith("Small-vessel detection rate:"))
+
     def test_aquaforge_performance_markdown_table(self) -> None:
         from aquaforge.evaluation import aquaforge_performance_markdown_from_metrics
 

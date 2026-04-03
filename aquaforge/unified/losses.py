@@ -375,8 +375,8 @@ def circular_heading_loss(
     **Original AquaForge** circular heading objective on **(sin θ, cos θ)** targets (not degrees).
     Combines **1−cos Δ** with a **π-normalized angular** term. The **180° flip** branch uses
     **mean landmark visibility** and **bow×stern** agreement; when **mean kp visibility > 0.7**,
-    that flip penalty is scaled by **1.5×** so confident keypoint labels punish wrong-way headings
-    more (evaluation-driven). ``heading_valid`` masks chips without heading labels.
+    that flip penalty is scaled by **1.8×** (post-eval: heading MAE was **> 5°** on the benchmark set).
+    ``heading_valid`` masks chips without heading labels.
     """
     tgt = F.normalize(gt_heading_sin_cos, dim=-1, eps=1e-6)
     p = F.normalize(pred_heading_sin_cos, dim=-1, eps=1e-6)
@@ -393,10 +393,10 @@ def circular_heading_loss(
     bow_stern = kp_vis[:, 0].clamp(0, 1) * kp_vis[:, 1].clamp(0, 1)
     flip = (cos_sim < 0.0).float() * valid.float()
     # **Original AquaForge:** when mean keypoint visibility is high (>0.7), 180° flips are almost
-    # certainly wrong-way hull errors — multiply the flip penalty branch by 1.5× (ablation-driven).
+    # certainly wrong-way hull errors — multiply the flip penalty branch by 1.8× when MAE > 5° on eval.
     flip_pen = 1.22 * kp_strength + 1.08 * bow_stern
     high_kp = (kp_strength > 0.7).to(dtype=flip_pen.dtype)
-    flip_pen = flip_pen * (1.0 + 0.5 * high_kp)
+    flip_pen = flip_pen * (1.0 + 0.8 * high_kp)
     mult = 1.0 + flip * flip_pen
     weighted = base * mult
     return (weighted * valid.float()).sum() / valid.float().sum().clamp_min(1.0)

@@ -190,6 +190,7 @@ def evaluate_aquaforge_vs_binary_labels(
     threshold: float | None = None,
     model_side: int = DEFAULT_REVIEW_LABEL_MODEL_SIDE,
     src_half: int = DEFAULT_REVIEW_LABEL_SRC_HALF,
+    max_labeled_points: int | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Score AquaForge P(vessel) at each labeled point vs binary label (Streamlit diagnostics)."""
@@ -204,16 +205,23 @@ def evaluate_aquaforge_vs_binary_labels(
         model_side=model_side,
         src_half=src_half,
     )
+    n_points_full = len(points)
+    if max_labeled_points is not None and max_labeled_points > 0:
+        cap = int(max_labeled_points)
+        points = points[:cap]
     settings = load_aquaforge_settings(root)
     thr_af = float(threshold) if threshold is not None else float(settings.aquaforge.conf_threshold)
 
     base: dict[str, Any] = {
         "mode": "in_sample",
         "n_labeled_points": len(points),
+        "n_labeled_points_full_jsonl": int(n_points_full),
         "n_skipped_collect": int(n_skipped_collect),
         "threshold": thr_af,
         "scorer": "aquaforge",
     }
+    if max_labeled_points is not None and n_points_full > len(points):
+        base["binary_eval_capped"] = int(max_labeled_points)
 
     if not points:
         base["error"] = "no_labeled_points"
@@ -967,19 +975,49 @@ def aquaforge_performance_markdown_from_metrics(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def aquaforge_performance_one_line_summary(metrics: dict[str, Any]) -> str:
+    """
+    Single stdout line after ``--performance-md`` (and for logs): headline rates only.
+
+    Format: ``Small-vessel detection rate: X%, Heading MAE: Y degrees, L/W relative error: Z%``.
+    """
+    sr = metrics.get("small_vessel_rate")
+    if sr is not None and math.isfinite(float(sr)):
+        x = f"{100.0 * float(sr):.1f}%"
+    else:
+        x = "N/A"
+    h = metrics.get("heading_mae_deg")
+    if h is not None and math.isfinite(float(h)):
+        y = f"{float(h):.2f} degrees"
+    else:
+        y = "N/A"
+    lw = metrics.get("mean_lw_rel_err")
+    if lw is not None and math.isfinite(float(lw)):
+        z = f"{100.0 * float(lw):.2f}%"
+    else:
+        z = "N/A"
+    return (
+        f"Small-vessel detection rate: {x}, Heading MAE: {y}, L/W relative error: {z}"
+    )
+
+
 def evaluate_aquaforge_performance(
     jsonl_path: Path,
     *,
     project_root: Path | None = None,
     output_md: Path | None = None,
     max_spots: int | None = None,
+    max_labeled_points: int | None = None,
     threshold: float | None = None,
 ) -> dict[str, Any]:
     """
     **Original AquaForge** end-to-end benchmark on a labeled JSONL set: runs the same spot + binary
     paths as production, aggregates small-vessel detection (geometry rows with L < 45 m), heading
-    MAE, mean length/width relative error, and binary F1. Writes ``eval_aquaforge.md`` (default: under
-    ``project_root``) and returns a JSON-friendly dict for tooling.
+    MAE, mean length/width relative error, and binary F1. Writes ``eval_aquaforge.md`` (default:
+    ``<project_root>/eval_aquaforge.md``), prints ``Wrote …``, then a one-line headline summary.
+    If the JSONL path is missing, writes a stub table (metrics N/A). ``max_labeled_points`` caps how
+    many binary-labeled points are scored for F1 (faster on large JSONLs; see CLI
+    ``--performance-max-binary-points``). Returns a JSON-friendly dict.
     """
     root = project_root or jsonl_path.resolve().parent.parent.parent
     if not root.joinpath("aquaforge").is_dir():
@@ -990,10 +1028,41 @@ def evaluate_aquaforge_performance(
     thr = float(threshold) if threshold is not None else float(settings.aquaforge.conf_threshold)
     chip_half = int(settings.aquaforge.chip_half)
 
+    out_path = output_md if output_md is not None else (root / "eval_aquaforge.md")
+    out_path = Path(out_path).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not jp.is_file():
+        out_missing: dict[str, Any] = {
+            "jsonl": str(jp),
+            "chip_half": chip_half,
+            "n_geometry_spots": 0,
+            "small_vessel_rate": None,
+            "n_small_vessel": 0,
+            "n_small_vessel_detected": 0,
+            "heading_mae_deg": None,
+            "mean_lw_rel_err": None,
+            "binary_f1": None,
+            "pearson_r": None,
+            "map_note": "N/A (point supervision; use binary F1)",
+            "notes": [f"jsonl_not_found:{jp}"],
+        }
+        md0 = aquaforge_performance_markdown_from_metrics(out_missing)
+        out_path.write_text(md0, encoding="utf-8")
+        print(f"Wrote {out_path}", flush=True)
+        print(aquaforge_performance_one_line_summary(out_missing), flush=True)
+        return out_missing
+
     notes: list[str] = []
     bin_ev = evaluate_aquaforge_vs_binary_labels(
-        jp, project_root=root, threshold=thr
+        jp,
+        project_root=root,
+        threshold=thr,
+        max_labeled_points=max_labeled_points,
     )
+    cap_b = bin_ev.get("binary_eval_capped")
+    if cap_b is not None:
+        notes.append(f"binary_F1_evaluated_first_{cap_b}_labeled_points")
     pred_ok = bin_ev.get("error") != "no_aquaforge_weights"
     if not pred_ok:
         notes.append(str(bin_ev.get("error", "no_aquaforge_weights")))
@@ -1061,10 +1130,9 @@ def evaluate_aquaforge_performance(
     }
 
     md = aquaforge_performance_markdown_from_metrics(out)
-    out_path = output_md if output_md is not None else (root / "eval_aquaforge.md")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(md, encoding="utf-8")
-    print(md, flush=True)
+    print(f"Wrote {out_path}", flush=True)
+    print(aquaforge_performance_one_line_summary(out), flush=True)
     return out
 
 
@@ -1429,13 +1497,25 @@ def main_cli(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--performance-md",
         action="store_true",
-        help="Run evaluate_aquaforge_performance: print summary table and write eval_aquaforge.md",
+        help=(
+            "Run evaluate_aquaforge_performance only: write <project-root>/eval_aquaforge.md, "
+            "print one-line summary (no other report flags needed; uses default or --jsonl)"
+        ),
     )
     ap.add_argument(
         "--performance-md-out",
         type=Path,
         default=None,
         help="Output path for --performance-md (default: <project-root>/eval_aquaforge.md)",
+    )
+    ap.add_argument(
+        "--performance-max-binary-points",
+        type=int,
+        default=None,
+        help=(
+            "Optional cap on labeled points for F1 in --performance-md (default: all points). "
+            "Use on large JSONLs for faster runs; notes will state the cap."
+        ),
     )
     args = ap.parse_args(argv)
 
@@ -1458,26 +1538,21 @@ def main_cli(argv: list[str] | None = None) -> int:
         jsonl_paths = [Path(jp).resolve()]
 
     if args.performance_md:
-        if args.labels_dir is not None:
-            print(
-                "--performance-md expects a single JSONL via --jsonl (not --labels-dir).",
-                flush=True,
-            )
+        if not jsonl_paths:
+            print("No JSONL path for --performance-md.", flush=True)
             return 1
         jp_perf = jsonl_paths[0]
-        if not jp_perf.is_file():
-            print(f"Missing jsonl: {jp_perf}", flush=True)
-            return 1
         out_perf = (
             Path(args.performance_md_out).resolve()
             if args.performance_md_out is not None
-            else None
+            else (root / "eval_aquaforge.md")
         )
         evaluate_aquaforge_performance(
             jp_perf,
             project_root=root,
             output_md=out_perf,
             max_spots=args.max_spots,
+            max_labeled_points=args.performance_max_binary_points,
         )
         return 0
 

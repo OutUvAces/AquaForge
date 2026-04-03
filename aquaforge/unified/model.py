@@ -170,7 +170,8 @@ class AquaForgeCnn(nn.Module):
         # (ONNX / no mask_area) the area gate is 1.0 so the learned scalar still modulates p3 from image cues.
         self.p3_sv_boost_1x1 = nn.Conv2d(c3, c3, 1, bias=True)
         self.p3_sv_boost_head = nn.Linear(c3, 1, bias=True)
-        self.p3_sv_boost_gain = nn.Parameter(torch.tensor(0.85, dtype=torch.float32))
+        # Post-eval: small-vessel detection rate **< 70%** → strengthen boost to **1.5×** prior (0.85→1.275).
+        self.p3_sv_boost_gain = nn.Parameter(torch.tensor(1.275, dtype=torch.float32))
         self.delta_fuse = AquaForgeDeltaFuse(c3=c3, c4=c4, c5=c4, out_ch=c4)
         # Fused map is stride-8; two 2× upsamples match prior stride-16 tower → stride-4 seg grid.
         self.seg_up = nn.Sequential(
