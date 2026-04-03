@@ -7,6 +7,5 @@
 
 torch>=2.1.0
 torchvision>=0.16.0
-# For `aquaforge_backbone` training, also install: py -3 -m pip install -r requirements-backbone.txt
 huggingface_hub>=0.20.0
 onnxruntime>=1.16.0

@@ -133,11 +133,10 @@ class TestAquaForgeConstants(unittest.TestCase):
 
 
 class TestCanonicalModelArch(unittest.TestCase):
-    def test_accepts_cnn_and_backbone_branch(self) -> None:
-        from aquaforge.unified.model import ARCH_AQUAFORGE_BACKBONE, ARCH_CNN, canonical_model_arch
+    def test_accepts_cnn_only(self) -> None:
+        from aquaforge.unified.model import ARCH_CNN, canonical_model_arch
 
         self.assertEqual(canonical_model_arch("cnn"), ARCH_CNN)
-        self.assertEqual(canonical_model_arch("aquaforge_backbone"), ARCH_AQUAFORGE_BACKBONE)
 
     def test_rejects_unknown_arch_strings(self) -> None:
         from aquaforge.unified.model import canonical_model_arch

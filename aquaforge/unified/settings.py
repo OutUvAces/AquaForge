@@ -41,7 +41,7 @@ class OnnxRuntimeSection:
 @dataclass
 class AquaForgeSection:
     """
-    Multi-task vessel model: segmentation, landmarks, heading, wake auxiliary.
+    AquaForge vessel model: segmentation, landmarks, heading, wake auxiliary outputs.
 
     Full-scene **tiled** inference is the only way vessel candidates are proposed.
     """

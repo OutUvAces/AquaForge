@@ -1,5 +1,0 @@
-# Optional: only when training with --architecture aquaforge_backbone (loads common .pt feature graphs).
-# Install after requirements-ml.txt:
-#   py -3 -m pip install -r requirements-ml.txt -r requirements-backbone.txt
-
-ultralytics>=8.3.0

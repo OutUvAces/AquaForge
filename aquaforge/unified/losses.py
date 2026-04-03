@@ -23,8 +23,7 @@ stabiliser, not GradNorm/DWA source dumps.
 **Hull–exterior coherence** — suppresses segmentation mass **outside a dilated GT hull**, a
 proxy for “open water” on centred S2 chips when no SCL band is in the batch.
 
-**Delta-neck** (see :mod:`aquaforge.unified.model`) fuses multi-scale backbone features via **cross-scale
-difference maps**, not a softmax gate or classic FPN top-down add.
+**Encoder** — :mod:`aquaforge.unified.model` uses one in-repo CNN trunk; task heads consume shared features.
 """
 
 from __future__ import annotations
@@ -567,7 +566,7 @@ def curriculum_base_weights(
     schedule: CurriculumSchedule | None = None,
 ) -> dict[str, float]:
     """
-    Multi-task curriculum: interpolate :class:`CurriculumSchedule` nodes in ``t = epoch/(T-1)``,
+    Unified curriculum: interpolate :class:`CurriculumSchedule` nodes in ``t = epoch/(T-1)``,
     apply smoothstep for gentle stage transitions, then inject ``distill_cap`` on the distill slot.
     """
     sch = schedule or DEFAULT_CURRICULUM

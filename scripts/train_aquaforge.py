@@ -5,7 +5,7 @@ Train AquaForge (unified vessel model) from review JSONL + TCIs.
 logit first, then landmarks + heatmaps, heading, wake (smooth ramps vs ``total_epochs``).
 
 **Dynamic loss balancing** — :class:`aquaforge.unified.losses.DynamicLossBalancer`: EMA rescaling
-of curriculum weights from detached per-task losses (our stabiliser, not third-party MT code).
+of curriculum weights from detached per-task losses (our stabiliser, not third-party training recipes).
 
 **Review → train loop** — Save labels in Streamlit; exported JSONL rows carry ``al_priority`` (uncertain
 scores, small-ship cues, clouds, manual map picks, optional ``af_training_priority`` in ``extra``).
@@ -15,14 +15,10 @@ teacher forward on the top ``--teacher-per-epoch`` IDs for heading distillation.
 ``--pseudo-jsonl`` + ``--pseudo-per-epoch`` on a **human-curated** unlabeled pool (export chips you
 want to probe without full labels). Balancer uses batch context (small hulls, heading ambiguity, AL).
 
-Optional pretrained backbone: ``--architecture aquaforge_backbone`` (external ``.pt`` feature graph + AquaForge heads), ``--freeze-backbone-epochs``.
-
-Requires: pip install -r requirements-ml.txt (includes loader for common ``.pt`` feature graphs).
+Requires: pip install -r requirements-ml.txt (PyTorch, ONNX runtime, etc.).
 
 Examples:
   py -3 scripts/train_aquaforge.py --project-root . --epochs 12 --batch-size 4
-  py -3 scripts/train_aquaforge.py --architecture aquaforge_backbone \\
-      --backbone-weights path/to/pretrained.pt --imgsz 640 --freeze-backbone-epochs 4 --epochs 24
   py -3 scripts/train_aquaforge.py --teacher-per-epoch 24 --teacher-distill-weight 0.4 \\
       --no-dynamic-balance
   py -3 scripts/train_aquaforge.py --pseudo-jsonl data/labels/pseudo_pool.jsonl \\
@@ -35,8 +31,7 @@ By default, after saving ``aquaforge.pt``, runs ONNX export (CPU) unless ``--no-
 
 from __future__ import annotations
 
-# Pure AquaForge trainer: ``cnn`` or ``aquaforge_backbone`` only; CLI uses ``--backbone-weights`` /
-# ``--backbone-seed-encoder`` (no alternate detector flags).
+# Pure AquaForge trainer: in-repo CNN only (``model_arch`` is always ``cnn``).
 
 import argparse
 import random
@@ -61,44 +56,13 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument(
-        "--lr-backbone",
-        type=float,
-        default=None,
-        help="LR for embedded pretrained backbone when using aquaforge_backbone (default: lr/4).",
-    )
     ap.add_argument("--imgsz", type=int, default=512)
     ap.add_argument("--chip-half", type=int, default=320)
-    ap.add_argument(
-        "--architecture",
-        type=str,
-        default="cnn",
-        choices=("cnn", "aquaforge_backbone"),
-        help="cnn = in-repo encoder; aquaforge_backbone = pretrained feature graph + AquaForge heads.",
-    )
-    ap.add_argument(
-        "--backbone-weights",
-        type=str,
-        default=None,
-        help="Path to .pt for aquaforge_backbone (required when using that architecture).",
-    )
-    ap.add_argument(
-        "--freeze-backbone-epochs",
-        type=int,
-        default=0,
-        help="For aquaforge_backbone: freeze embedded pretrained graph for this many epochs; then train e2e.",
-    )
     ap.add_argument(
         "--output",
         type=Path,
         default=None,
         help="Checkpoint path (default: data/models/aquaforge/aquaforge.pt)",
-    )
-    ap.add_argument(
-        "--backbone-seed-encoder",
-        type=Path,
-        default=None,
-        help="cnn only: optional pretrained .pt to seed early conv weights into the CNN trunk.",
     )
     ap.add_argument(
         "--no-dynamic-balance",
@@ -155,16 +119,6 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    arch_chk = str(args.architecture).strip().lower()
-    if arch_chk == "aquaforge_backbone":
-        bw = (args.backbone_weights or "").strip()
-        if not bw:
-            print(
-                "aquaforge_backbone requires --backbone-weights <path-to-pt>",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-
     _py = Path(sys.executable).resolve()
     vi = sys.version_info
     print(
@@ -206,12 +160,7 @@ def main() -> None:
         aquaforge_self_training_loss,
         curriculum_base_weights,
     )
-    from aquaforge.unified.model import (
-        AquaForgeCnn,
-        build_model,
-        seed_cnn_encoder_from_backbone_pt,
-        set_backbone_body_requires_grad,
-    )
+    from aquaforge.unified.model import ARCH_CNN, build_model
     from aquaforge.labels import default_labels_path
 
     project_root = Path(args.project_root).resolve()
@@ -243,7 +192,7 @@ def main() -> None:
         "\n=== AquaForge training ===\n"
         f"  labels: {jp}  (supervised chips: {len(rows)})\n"
         f"  output: {ckpt_path}\n"
-        f"  architecture: {str(args.architecture).strip().lower()}  "
+        f"  model_arch: {ARCH_CNN}  "
         f"imgsz={int(args.imgsz)}  epochs={int(args.epochs)}  batch={int(args.batch_size)}\n",
         flush=True,
     )
@@ -298,42 +247,10 @@ def main() -> None:
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    arch = str(args.architecture).strip().lower()
-    backbone_ckpt = Path(args.backbone_weights) if args.backbone_weights else None
-    if arch == "aquaforge_backbone":
-        assert args.backbone_weights is not None
-        bw_arg = args.backbone_weights
-        model = build_model(
-            imgsz=int(args.imgsz),
-            n_landmarks=NUM_LANDMARKS,
-            model_arch="aquaforge_backbone",
-            backbone_pt=backbone_ckpt if backbone_ckpt and backbone_ckpt.is_file() else bw_arg,
-        ).to(device)
-    else:
-        model = AquaForgeCnn(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS).to(device)
-        if args.backbone_seed_encoder and Path(args.backbone_seed_encoder).is_file():
-            n = seed_cnn_encoder_from_backbone_pt(model, Path(args.backbone_seed_encoder))
-            print(f"Pretrained backbone→CNN encoder seed: {n} tensor(s) matched", flush=True)
+    model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS).to(device)
 
     lr_head = float(args.lr)
-    lr_bb = float(args.lr_backbone) if args.lr_backbone is not None else lr_head * 0.25
-    if arch == "aquaforge_backbone":
-        head_params: list[torch.nn.Parameter] = []
-        bb_params: list[torch.nn.Parameter] = []
-        for name, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            if name.startswith("backbone_body."):
-                bb_params.append(p)
-            else:
-                head_params.append(p)
-        opt = torch.optim.AdamW(
-            [{"params": head_params, "lr": lr_head}, {"params": bb_params, "lr": lr_bb}],
-        )
-    else:
-        opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
-
-    freeze_n = int(args.freeze_backbone_epochs)
+    opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
     teacher_budget = int(args.teacher_per_epoch)
     distill_w = float(args.teacher_distill_weight)
     use_balance = not bool(args.no_dynamic_balance)
@@ -342,16 +259,6 @@ def main() -> None:
 
     for epoch in range(int(args.epochs)):
         model.train()
-        if arch == "aquaforge_backbone":
-            frozen = epoch < freeze_n
-            set_backbone_body_requires_grad(model.backbone_body, not frozen)
-            if frozen:
-                for g in opt.param_groups:
-                    if g is opt.param_groups[1]:
-                        g["lr"] = 0.0
-            else:
-                opt.param_groups[0]["lr"] = lr_head
-                opt.param_groups[1]["lr"] = lr_bb
 
         clear_teacher_signals(rows)
         if teacher_budget > 0:
@@ -441,12 +348,11 @@ def main() -> None:
                 )
 
         avg = total_loss / max(n_batches, 1)
-        fr = "frozen" if arch == "aquaforge_backbone" and epoch < freeze_n else "e2e"
         ru_m = ru_epoch / max(n_batches, 1)
         # ASCII-only: Windows cp1252 consoles cannot print U+2248 (approx) or fancy punctuation.
         print(
             f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} review_ui_u~{ru_m:.3f} "
-            f"curriculum={base_sw} backbone={fr} balance={'on' if use_balance else 'off'}",
+            f"curriculum={base_sw} model_arch={ARCH_CNN} balance={'on' if use_balance else 'off'}",
             flush=True,
         )
 
@@ -456,7 +362,7 @@ def main() -> None:
         "n_landmarks": NUM_LANDMARKS,
         "chip_half": int(args.chip_half),
         "jsonl": str(jp),
-        "model_arch": arch,
+        "model_arch": ARCH_CNN,
         "train_aquaforge": {
             "dynamic_balance": use_balance,
             "priority_sampling": use_sampler,
@@ -469,15 +375,6 @@ def main() -> None:
             "auto_export_onnx": not bool(args.no_export_onnx),
         },
     }
-    if arch == "aquaforge_backbone":
-        assert args.backbone_weights is not None and backbone_ckpt is not None
-        upath = (
-            backbone_ckpt.resolve()
-            if backbone_ckpt.is_file()
-            else str(args.backbone_weights)
-        )
-        meta["backbone_init_path"] = str(upath)
-
     # Write via a Python file object: PyTorchFileWriter(path) in C++ often fails on Windows with
     # error 123 (ERROR_INVALID_NAME) for paths under OneDrive, spaces, or mixed separators; the
     # buffer code path (PyTorchFileWriter(stream)) avoids native open-by-string.
