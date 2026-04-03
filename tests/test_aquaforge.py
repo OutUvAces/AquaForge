@@ -228,6 +228,33 @@ class TestAquaForgeLosses(unittest.TestCase):
         y = m(x)
         self.assertEqual(len(y), 6)
         self.assertEqual(y[5].shape, (1, NUM_LANDMARKS, 16, 16))
+        ma = torch.tensor([120.0, 4000.0])
+        y2 = m(torch.randn(2, 3, 128, 128), mask_area_pixels=ma)
+        self.assertEqual(y2[0].shape, (2, 1))
+
+    def test_aquaforge_performance_markdown_table(self) -> None:
+        from aquaforge.evaluation import aquaforge_performance_markdown_from_metrics
+
+        md = aquaforge_performance_markdown_from_metrics(
+            {
+                "jsonl": "/data/labels/ship_reviews.jsonl",
+                "chip_half": 320,
+                "n_geometry_spots": 12,
+                "small_vessel_rate": 0.75,
+                "n_small_vessel": 8,
+                "n_small_vessel_detected": 6,
+                "heading_mae_deg": 14.25,
+                "mean_lw_rel_err": 0.18,
+                "binary_f1": 0.91,
+                "pearson_r": 0.62,
+                "map_note": "N/A (point supervision; use binary F1)",
+                "notes": [],
+            }
+        )
+        self.assertIn("Small-vessel detection rate", md)
+        self.assertIn("75.0%", md)
+        self.assertIn("6/8", md)
+        self.assertIn("Binary F1", md)
 
     def test_soft_iou_and_curriculum_and_balancer(self) -> None:
         try:

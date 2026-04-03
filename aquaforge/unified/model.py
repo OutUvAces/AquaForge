@@ -165,6 +165,12 @@ class AquaForgeCnn(nn.Module):
         self.n_landmarks = int(n_landmarks)
         self.encoder = _EncoderTriScale()
         c3, c4 = self.encoder.c3, self.encoder.c4
+        # **Original AquaForge:** fine-scale boost gated by small GT hull area (training). 1×1 on p3
+        # → GAP → scalar; multiply p3 when exp(−mask_area/6000) is large (small vessels). At inference
+        # (ONNX / no mask_area) the area gate is 1.0 so the learned scalar still modulates p3 from image cues.
+        self.p3_sv_boost_1x1 = nn.Conv2d(c3, c3, 1, bias=True)
+        self.p3_sv_boost_head = nn.Linear(c3, 1, bias=True)
+        self.p3_sv_boost_gain = nn.Parameter(torch.tensor(0.85, dtype=torch.float32))
         self.delta_fuse = AquaForgeDeltaFuse(c3=c3, c4=c4, c5=c4, out_ch=c4)
         # Fused map is stride-8; two 2× upsamples match prior stride-16 tower → stride-4 seg grid.
         self.seg_up = nn.Sequential(
@@ -183,8 +189,22 @@ class AquaForgeCnn(nn.Module):
         self.hdg_head = nn.Linear(c4, 3)
         self.wake_head = nn.Linear(c4, 2)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        mask_area_pixels: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         p3, p4, p5 = self.encoder(x)
+        z = F.relu(self.p3_sv_boost_1x1(p3), inplace=True)
+        s = torch.sigmoid(self.p3_sv_boost_gain * self.p3_sv_boost_head(z.mean(dim=(2, 3))))
+        s = s.view(-1, 1, 1, 1)
+        if mask_area_pixels is not None:
+            ma = mask_area_pixels.detach().float().view(-1, 1, 1, 1).clamp(min=0.0)
+            area_gate = torch.exp(-ma / 6000.0)
+        else:
+            area_gate = torch.tensor(1.0, device=p3.device, dtype=p3.dtype)
+        p3 = p3 * (1.0 + s * area_gate)
         feat = self.delta_fuse(p3, p4, p5)
         seg = self.seg_up(feat)
         hm_lr = self.kp_hm_encoder(feat)
@@ -234,8 +254,7 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     meta["model_arch"] = ARCH_CNN
     m = AquaForgeCnn(imgsz=imgsz, n_landmarks=nl)
     fv = int(meta.get("format_version", 1))
-    # Only format_version >= 6 expects an exact match (Delta-Fuse + cross-scale 1×1). Older checkpoints
-    # load loosely so new layers (e.g. ``cross_scale_attn``) initialize from scratch.
-    strict = fv >= 6
+    # format_version >= 7: Delta-Fuse + p3 small-vessel boost. 6: Delta-Fuse only. Older: loose load.
+    strict = fv >= 7
     m.load_state_dict(ckpt["state_dict"], strict=strict)
     return m, meta

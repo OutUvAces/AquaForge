@@ -11,6 +11,8 @@ reported in [0°, 180°] (same as :func:`angular_error_deg`). Wake axis uses the
 opposite directions (:func:`best_wake_line_error_deg`).
 
 JSON export: :func:`eval_result_to_jsonable`.
+
+Summary table (small-vessel rate, heading MAE, L/W error, F1): :func:`evaluate_aquaforge_performance`.
 """
 
 from __future__ import annotations
@@ -907,6 +909,165 @@ def run_detection_evaluation(
     return res
 
 
+def aquaforge_performance_markdown_from_metrics(summary: dict[str, Any]) -> str:
+    """
+    Build the **AquaForge performance** markdown table (``eval_aquaforge.md`` body).
+
+    **Original design** for ablation / paper-style reporting: one row per headline metric.
+    ``summary`` keys: ``jsonl``, ``chip_half``, ``n_geometry_spots``, ``small_vessel_rate``,
+    ``n_small_vessel``, ``n_small_vessel_detected``, ``heading_mae_deg``, ``mean_lw_rel_err``,
+    ``binary_f1``, ``pearson_r`` (optional), ``map_note`` (string), ``notes`` (list of str).
+    """
+    def _cell_rate(r: float | None, hit: int, tot: int) -> str:
+        if tot <= 0 or r is None:
+            return _NA
+        return f"{100.0 * float(r):.1f}% ({hit}/{tot})"
+
+    jl = str(summary.get("jsonl", ""))
+    ch = int(summary.get("chip_half", 0))
+    n_geo = int(summary.get("n_geometry_spots", 0))
+    sr = summary.get("small_vessel_rate")
+    ns = int(summary.get("n_small_vessel", 0))
+    nd = int(summary.get("n_small_vessel_detected", 0))
+    hdg = summary.get("heading_mae_deg")
+    lw = summary.get("mean_lw_rel_err")
+    f1 = summary.get("binary_f1")
+    pr = summary.get("pearson_r")
+    mnote = str(summary.get("map_note", "N/A (point labels)"))
+    notes: list[str] = list(summary.get("notes") or [])
+
+    lines = [
+        "# AquaForge performance summary",
+        "",
+        f"- **JSONL:** `{jl}`",
+        f"- **Chip half (px):** `{ch}`",
+        f"- **Geometry spots evaluated:** {n_geo}",
+        "",
+        "| Metric | Value |",
+        "| :--- | ---: |",
+        "| Small-vessel detection rate (L < 45 m) | "
+        + _cell_rate(
+            float(sr) if sr is not None else None,
+            nd,
+            ns,
+        )
+        + " |",
+        "| Heading MAE (deg) | " + fmt_eval_num(hdg, ndigits=2) + " |",
+        "| Mean L/W relative error | " + fmt_eval_num(lw, ndigits=4) + " |",
+        "| Binary F1 (labeled points) | " + fmt_eval_num(f1, ndigits=4) + " |",
+        "| mAP | " + mnote + " |",
+        "| Pearson r (P(vessel) vs label) | " + fmt_eval_num(pr, ndigits=4) + " |",
+    ]
+    lines.extend(["", "## Notes", ""])
+    if notes:
+        lines.extend(f"- {n}" for n in notes)
+    else:
+        lines.append("- (none)")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def evaluate_aquaforge_performance(
+    jsonl_path: Path,
+    *,
+    project_root: Path | None = None,
+    output_md: Path | None = None,
+    max_spots: int | None = None,
+    threshold: float | None = None,
+) -> dict[str, Any]:
+    """
+    **Original AquaForge** end-to-end benchmark on a labeled JSONL set: runs the same spot + binary
+    paths as production, aggregates small-vessel detection (geometry rows with L < 45 m), heading
+    MAE, mean length/width relative error, and binary F1. Writes ``eval_aquaforge.md`` (default: under
+    ``project_root``) and returns a JSON-friendly dict for tooling.
+    """
+    root = project_root or jsonl_path.resolve().parent.parent.parent
+    if not root.joinpath("aquaforge").is_dir():
+        root = jsonl_path.resolve().parents[2]
+
+    jp = Path(jsonl_path).resolve()
+    settings = load_aquaforge_settings(root)
+    thr = float(threshold) if threshold is not None else float(settings.aquaforge.conf_threshold)
+    chip_half = int(settings.aquaforge.chip_half)
+
+    notes: list[str] = []
+    bin_ev = evaluate_aquaforge_vs_binary_labels(
+        jp, project_root=root, threshold=thr
+    )
+    pred_ok = bin_ev.get("error") != "no_aquaforge_weights"
+    if not pred_ok:
+        notes.append(str(bin_ev.get("error", "no_aquaforge_weights")))
+    pred_af = get_cached_aquaforge_predictor(root, settings) if pred_ok else None
+    if pred_ok and pred_af is None:
+        notes.append("predictor_none_after_cache")
+        pred_ok = False
+
+    res = run_detection_evaluation(
+        root,
+        jp,
+        aquaforge_settings=settings,
+        max_spots=max_spots,
+    )
+
+    geo = collect_vessel_geometry_ground_truth(jp, root, chip_half=chip_half)
+    n_small = 0
+    n_small_det = 0
+    if pred_ok and pred_af is not None:
+        for g in geo:
+            lm = g.length_m
+            if lm is None:
+                continue
+            try:
+                L = float(lm)
+            except (TypeError, ValueError):
+                continue
+            if L <= 0.0 or L >= 45.0:
+                continue
+            n_small += 1
+            py = aquaforge_chip_vessel_confidence(pred_af, g.tci_path, g.cx, g.cy)
+            if py is not None and float(py) >= thr:
+                n_small_det += 1
+    elif geo and not pred_ok:
+        notes.append("small_vessel_rate_skipped_no_weights")
+
+    small_rate = (float(n_small_det) / float(n_small)) if n_small > 0 else None
+
+    h_mae = res.mean_abs_heading_error_fused
+    if h_mae is None:
+        h_mae = res.mean_abs_heading_error_keypoint
+
+    ml, mw = res.mean_rel_length_error, res.mean_rel_width_error
+    if ml is not None and mw is not None:
+        lw_err = (float(ml) + float(mw)) / 2.0
+    else:
+        lw_err = ml if ml is not None else mw
+
+    mets = bin_ev.get("metrics") or {}
+    f1v = mets.get("f1")
+
+    out: dict[str, Any] = {
+        "jsonl": str(jp),
+        "chip_half": chip_half,
+        "n_geometry_spots": res.n_geometry_spots,
+        "small_vessel_rate": small_rate,
+        "n_small_vessel": n_small,
+        "n_small_vessel_detected": n_small_det,
+        "heading_mae_deg": h_mae,
+        "mean_lw_rel_err": lw_err,
+        "binary_f1": f1v,
+        "pearson_r": res.pearson_r,
+        "map_note": "N/A (point supervision; use binary F1)",
+        "notes": notes + list(res.notes),
+    }
+
+    md = aquaforge_performance_markdown_from_metrics(out)
+    out_path = output_md if output_md is not None else (root / "eval_aquaforge.md")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(md, encoding="utf-8")
+    print(md, flush=True)
+    return out
+
+
 def _heading_cell_mae(bucket: HeadingErrorBucket, field: str) -> str:
     seq = getattr(bucket, field, [])
     return fmt_eval_num(circular_mae_deg(seq), ndigits=2)
@@ -1265,6 +1426,17 @@ def main_cli(argv: list[str] | None = None) -> int:
         default=96.0,
         help="Pixel radius in full raster for matching a vessel label to a tiled detection centroid",
     )
+    ap.add_argument(
+        "--performance-md",
+        action="store_true",
+        help="Run evaluate_aquaforge_performance: print summary table and write eval_aquaforge.md",
+    )
+    ap.add_argument(
+        "--performance-md-out",
+        type=Path,
+        default=None,
+        help="Output path for --performance-md (default: <project-root>/eval_aquaforge.md)",
+    )
     args = ap.parse_args(argv)
 
     root = args.project_root.resolve()
@@ -1284,6 +1456,30 @@ def main_cli(argv: list[str] | None = None) -> int:
     else:
         jp = args.jsonl or (root / "data" / "labels" / "ship_reviews.jsonl")
         jsonl_paths = [Path(jp).resolve()]
+
+    if args.performance_md:
+        if args.labels_dir is not None:
+            print(
+                "--performance-md expects a single JSONL via --jsonl (not --labels-dir).",
+                flush=True,
+            )
+            return 1
+        jp_perf = jsonl_paths[0]
+        if not jp_perf.is_file():
+            print(f"Missing jsonl: {jp_perf}", flush=True)
+            return 1
+        out_perf = (
+            Path(args.performance_md_out).resolve()
+            if args.performance_md_out is not None
+            else None
+        )
+        evaluate_aquaforge_performance(
+            jp_perf,
+            project_root=root,
+            output_md=out_perf,
+            max_spots=args.max_spots,
+        )
+        return 0
 
     if args.tiled_recall:
         out_payload: list[dict[str, Any]] = []

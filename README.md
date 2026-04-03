@@ -41,7 +41,7 @@ Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_ov
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN only; checkpoints store **`meta["model_arch"]`: `cnn`**. Export with `scripts/export_aquaforge_onnx.py`. Detection is only `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
+- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN only; checkpoints store **`meta["model_arch"]`: `cnn`**. Older checkpoints with any other `model_arch` value will not load — retrain with this script. Export with `scripts/export_aquaforge_onnx.py`. Detection is only `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
 
 Optional **third-party pose ONNX** for keypoint hints is configured only via **`detection.yaml`** (`keypoints.*`); see [`scripts/export_shipstructure_to_onnx.py`](scripts/export_shipstructure_to_onnx.py) for export notes.
 
@@ -56,9 +56,23 @@ py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_re
 py -3 scripts/run_detection_eval.py --summary-markdown -o eval_github.md
 py -3 scripts/run_detection_eval.py --demo --max-spots 8
 py -3 scripts/run_detection_eval.py --tiled-recall --tiled-recall-radius 96
+py -3 scripts/run_detection_eval.py --performance-md --jsonl data/labels/ship_reviews.jsonl
 ```
 
-Use `--detection-config` or set `AF_DETECTION_CONFIG` / `VD_DETECTION_CONFIG`. **`--profile`** prints cProfile roll-ups.
+Use `--detection-config` or set `AF_DETECTION_CONFIG` / `VD_DETECTION_CONFIG`. **`--profile`** prints cProfile roll-ups. **`--performance-md`** writes [`eval_aquaforge.md`](eval_aquaforge.md) (same table shape as below).
+
+### Current performance
+
+Regenerate numbers with `--performance-md` (optional `--performance-md-out <path>`). The table matches `evaluate_aquaforge_performance` in [`aquaforge/evaluation.py`](aquaforge/evaluation.py) (ablation / reporting).
+
+| Metric | Value (example — run eval to refresh) |
+| :--- | :--- |
+| Small-vessel detection rate (L < 45 m) | *from `eval_aquaforge.md`* |
+| Heading MAE (deg) | *from `eval_aquaforge.md`* |
+| Mean L/W relative error | *from `eval_aquaforge.md`* |
+| Binary F1 (labeled points) | *from `eval_aquaforge.md`* |
+| mAP | N/A (point supervision; use binary F1) |
+| Pearson r (P(vessel) vs label) | *from `eval_aquaforge.md`* |
 
 ---
 

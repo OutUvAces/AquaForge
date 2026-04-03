@@ -290,7 +290,10 @@ def main() -> None:
         for batch_list in dl:
             batch_dict = collate_batch(batch_list, device)
             imgs = batch_dict["imgs"]
-            cls_l, seg, kp, hdg, wake, kp_hm = model(imgs)
+            mask_area_px = batch_dict["seg"].sum(dim=(1, 2, 3)).flatten()
+            cls_l, seg, kp, hdg, wake, kp_hm = model(
+                imgs, mask_area_pixels=mask_area_px
+            )
             pred = {
                 "cls_logit": cls_l,
                 "seg_logit": seg,
@@ -343,7 +346,10 @@ def main() -> None:
             )
             if prep is not None:
                 imgs_p, soft, trust = prep
-                out_p = model(imgs_p)
+                out_p = model(
+                    imgs_p,
+                    mask_area_pixels=soft["seg"].sum(dim=(1, 2, 3)).flatten(),
+                )
                 loss_st, _st_logs = aquaforge_self_training_loss(
                     out_p, soft, base_sw, trust=trust
                 )
