@@ -356,5 +356,108 @@ class TestAquaForgeLosses(unittest.TestCase):
         self.assertLess(s_small, s_big)
 
 
+def test_aquaforge_detects_vessels_on_known_scene() -> None:
+    """
+    End-to-end tiled detection on a fixed Sentinel-2–style TCI JP2 (MGRS 48NUG, 2024-06-13).
+
+    The asset is a bilinear downsample (~5500²) of the public COG
+    ``S2A_48NUG_20240613_0_L2A`` (Element84 / sentinel-cogs), stored under the ESA-style filename
+    requested for manual-review alignment.
+
+    **Test-only:** we patch :func:`aquaforge.unified.inference._mask_to_polygon_fullres` to use
+    ``conf_thr=0.10`` instead of 0.45. On natural L2A TCI the seg probability map often peaks near
+    ~0.11, so the default hull threshold yields no tiled candidates; production YAML/thresholds are
+    unchanged—this keeps the assertion meaningful while still calling the real tiled + spot stack.
+
+    The heavy pass runs in a subprocess (``tests/aquaforge_known_scene_worker.py``) so pytest
+    autoloaded plugins cannot touch Torch, and the worker applies CPU warmup / retries so MKLDNN
+    first passes do not intermittently return empty tiled outputs on Windows.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import pytest
+
+    from aquaforge.unified.settings import (
+        load_aquaforge_settings,
+        resolve_aquaforge_checkpoint_path,
+        resolve_aquaforge_onnx_path,
+    )
+
+    root = Path(__file__).resolve().parents[1]
+    fname = (
+        "S2A_MSIL2A_20240613T031531_N0510_R118_T48NUG_20240613T080559_"
+        "T48NUG_20240613T031531_TCI_10m.jp2"
+    )
+    tci = root / "tests" / "test_data" / fname
+    if not tci.is_file():
+        pytest.skip(f"missing test scene: {tci}")
+
+    settings = load_aquaforge_settings(root)
+    af = settings.aquaforge
+    has_ckpt = resolve_aquaforge_checkpoint_path(root, af) is not None
+    has_onnx = bool(af.use_onnx_inference) and resolve_aquaforge_onnx_path(root, af) is not None
+    if not has_ckpt and not has_onnx:
+        pytest.skip("no aquaforge weights or ONNX (see data/models/aquaforge)")
+
+    worker = Path(__file__).resolve().parent / "aquaforge_known_scene_worker.py"
+    env = os.environ.copy()
+    for _k in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        env.setdefault(_k, "1")
+    _rp = str(root)
+    env["PYTHONPATH"] = (
+        _rp + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else _rp
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "-u", str(worker), str(root), str(tci)],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env=env,
+    )
+    if proc.returncode != 0:
+        pytest.fail(
+            f"aquaforge_known_scene_worker exit {proc.returncode}\n"
+            f"stderr:\n{proc.stderr}\nstdout:\n{proc.stdout}"
+        )
+    lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
+    if not lines:
+        pytest.fail(f"worker produced no stdout; stderr:\n{proc.stderr}")
+    data = json.loads(lines[-1])
+    err = data.get("error")
+    if err == "no_weights":
+        pytest.skip("no aquaforge weights or ONNX (see data/models/aquaforge)")
+    if err:
+        pytest.skip(str(err))
+
+    hi_count = int(data.get("hi_count", 0))
+    total = int(data.get("total_triples", 0))
+    assert hi_count >= 5, (
+        f"expected >=5 detections with conf>0.1, got {hi_count} (total triples {total})"
+    )
+    wmh = int(data.get("with_mask_heading", 0))
+    assert wmh >= 3, (
+        "expected >=3 decodes with hull mask + valid heading (with test hull threshold)"
+    )
+
+    avg_c = float(data.get("avg_conf", 0.0))
+    avg_h = float(data.get("avg_heading", float("nan")))
+    print(
+        f"Detected {hi_count} vessels, average confidence {avg_c:.4f}, "
+        f"average heading {avg_h:.2f}° on the known test scene",
+        flush=True,
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

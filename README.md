@@ -90,6 +90,22 @@ Default image command runs a short [`scripts/train_aquaforge.py`](scripts/train_
 
 ---
 
+## Automated Tests
+
+End-to-end tiled detection on a fixed Sentinel-2 TCI JP2 (many vessels, MGRS 48NUG) lives in
+[`tests/test_aquaforge.py`](tests/test_aquaforge.py). The heavy pass runs in
+[`tests/aquaforge_known_scene_worker.py`](tests/aquaforge_known_scene_worker.py) (subprocess + Torch warmup)
+for stable CPU inference. Requires `data/models/aquaforge` weights (or ONNX per `detection.yaml`). The scene file is
+[`tests/test_data/S2A_MSIL2A_20240613T031531_N0510_R118_T48NUG_20240613T080559_T48NUG_20240613T031531_TCI_10m.jp2`](tests/test_data/S2A_MSIL2A_20240613T031531_N0510_R118_T48NUG_20240613T080559_T48NUG_20240613T031531_TCI_10m.jp2).
+
+```bash
+py -3 -m pytest tests/test_aquaforge.py::test_aquaforge_detects_vessels_on_known_scene -q
+```
+
+Project-local [`pytest.ini`](pytest.ini) disables autoloaded plugins that interfere with raster/Torch tests (`-p no:seleniumbase -p no:anyio`). Override `addopts` only if you intentionally need those plugins in this tree.
+
+---
+
 ## Contributing & tests
 
 - Prefer changes that keep **one** detector path: `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
