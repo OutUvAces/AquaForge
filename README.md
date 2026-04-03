@@ -36,6 +36,8 @@ JPEG logos live in [`aquaforge/static/images/`](aquaforge/static/images/) and ar
 
 ![AquaForge large hero](aquaforge/static/images/AquaForge_large.jpg)
 
+**If logos or the tab icon do not show:** confirm the three JPEGs exist under `aquaforge/static/images/` in the same tree you run Streamlit from, then **restart** the app (`Ctrl+C` and `py -3 -m streamlit run app.py`). For the **favicon**, browsers cache aggressively — try a hard refresh, another browser, or a private window. The UI uses **`st.logo`** (Streamlit 1.39+) for the small mark in the **upper-left** so it is visible even when the sidebar is collapsed; favicons are passed as **PIL images** so Windows paths are read reliably.
+
 ### Daily review
 
 1. Open the **left panel** — choose a **scene** and **Refresh spot list** (full-scene AquaForge pass).

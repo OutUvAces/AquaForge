@@ -21,15 +21,54 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_AF_BRAND_DIR = Path(__file__).resolve().parent / "static" / "images"
-_AF_BRAND_SMALL = _AF_BRAND_DIR / "AquaForge_small.jpg"
-_AF_BRAND_TEXT = _AF_BRAND_DIR / "AquaForge_text.jpg"
-_AF_BRAND_LARGE = _AF_BRAND_DIR / "AquaForge_large.jpg"
+
+def _af_brand_dir_candidates() -> list[Path]:
+    """Ordered search locations for ``aquaforge/static/images`` (package, then cwd ancestors)."""
+    out: list[Path] = []
+    added: set[Path] = set()
+
+    def add(p: Path) -> None:
+        try:
+            r = p.resolve()
+        except OSError:
+            return
+        if r not in added:
+            added.add(r)
+            out.append(r)
+
+    pkg = Path(__file__).resolve().parent
+    add(pkg / "static" / "images")
+    add(pkg.parent / "aquaforge" / "static" / "images")
+    cur = Path.cwd()
+    try:
+        cur = cur.resolve()
+    except OSError:
+        cur = Path.cwd()
+    for _ in range(14):
+        add(cur / "aquaforge" / "static" / "images")
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return out
+
+
+def _resolve_af_brand_dir() -> Path | None:
+    """First candidate directory that contains at least one branding JPEG."""
+    for d in _af_brand_dir_candidates():
+        for name in (
+            "AquaForge_small.jpg",
+            "AquaForge_text.jpg",
+            "AquaForge_large.jpg",
+        ):
+            if (d / name).is_file():
+                return d
+    return None
 
 
 def _probability_to_percent_str(p: float | None) -> str:
@@ -320,8 +359,6 @@ def _ui_styles() -> None:
   /* Repo branding: hero + title row */
   .af-brand-hero-wrap { text-align: center; margin: 0.15rem auto 0.85rem auto; max-width: 420px; }
   .af-brand-hero-wrap img { max-width: 400px; width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 10px; box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12); }
-  .af-sidebar-brand { text-align: center; padding: 0.15rem 0 0.5rem 0; margin-bottom: 0.35rem; border-bottom: 1px solid rgba(148, 163, 184, 0.35); }
-  .af-sidebar-brand [data-testid="stImage"] { display: flex; justify-content: center; }
 </style>
         """,
         unsafe_allow_html=True,
@@ -1247,13 +1284,21 @@ def _sidebar_spot_finding_settings() -> None:
         )
 
 
-def _render_af_branding_header() -> None:
+def _render_af_branding_header(brand_dir: Path | None) -> None:
     """Main column: text mark + title row, then responsive hero (``AquaForge_large.jpg``, max 400px)."""
-    if _AF_BRAND_TEXT.is_file() and _AF_BRAND_LARGE.is_file():
-        b64_hero = base64.b64encode(_AF_BRAND_LARGE.read_bytes()).decode("ascii")
+    if brand_dir is None:
+        st.markdown("# AquaForge")
+        return
+    p_text = brand_dir / "AquaForge_text.jpg"
+    p_large = brand_dir / "AquaForge_large.jpg"
+    if p_text.is_file() and p_large.is_file():
+        b64_hero = base64.b64encode(p_large.read_bytes()).decode("ascii")
         c_logo, c_title = st.columns([1, 2], gap="small")
         with c_logo:
-            st.image(str(_AF_BRAND_TEXT), use_container_width=True)
+            try:
+                st.image(Image.open(p_text).convert("RGB"), use_container_width=True)
+            except OSError:
+                st.image(str(p_text), use_container_width=True)
         with c_title:
             st.markdown("# AquaForge")
         st.markdown(
@@ -1263,20 +1308,39 @@ def _render_af_branding_header() -> None:
         st.markdown("---")
         return
     st.markdown("# AquaForge")
-    if _AF_BRAND_LARGE.is_file():
-        st.image(str(_AF_BRAND_LARGE), width=400)
+    if p_large.is_file():
+        try:
+            st.image(Image.open(p_large).convert("RGB"), width=400)
+        except OSError:
+            st.image(str(p_large), width=400)
         st.markdown("---")
 
 
 def main() -> None:
-    _page_icon: str = str(_AF_BRAND_SMALL) if _AF_BRAND_SMALL.is_file() else "🛰️"
+    brand_dir = _resolve_af_brand_dir()
+    p_small = brand_dir / "AquaForge_small.jpg" if brand_dir is not None else None
+    pil_small = None
+    if p_small is not None and p_small.is_file():
+        try:
+            pil_small = Image.open(p_small).convert("RGB")
+        except OSError:
+            pil_small = None
+    # Favicon: pass a PIL image — Windows paths as strings often fail inside image_to_url and yield a broken tab icon.
     st.set_page_config(
         page_title="AquaForge",
         layout="wide",
         initial_sidebar_state="collapsed",
-        page_icon=_page_icon,
+        page_icon=pil_small if pil_small is not None else "🛰️",
     )
+    if pil_small is not None:
+        # Upper-left + sidebar: visible even when the sidebar starts collapsed (Streamlit ≥1.39).
+        if hasattr(st, "logo"):
+            st.logo(pil_small.copy(), size="medium")
     _ui_styles()
+    if pil_small is not None and not hasattr(st, "logo"):
+        with st.sidebar:
+            st.image(pil_small.copy(), width=56)
+            st.markdown("---")
     load_env(ROOT)
     SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     PREVIEW_THUMB_DIR.mkdir(parents=True, exist_ok=True)
@@ -1287,7 +1351,7 @@ def main() -> None:
     if _af_train_flash:
         st.success(str(_af_train_flash))
 
-    _render_af_branding_header()
+    _render_af_branding_header(brand_dir)
 
     if st.session_state.get("vd_ui_mode") == "training_review":
         render_training_label_review_ui(
@@ -1321,10 +1385,6 @@ def main() -> None:
     # Sidebar: only scene + refresh on first glance; everything else under **Advanced**.
     tci_loaded_sidebar = str(st.session_state.get("tci_loaded") or "").strip()
     with st.sidebar:
-        if _AF_BRAND_SMALL.is_file():
-            st.markdown('<div class="af-sidebar-brand">', unsafe_allow_html=True)
-            st.image(str(_AF_BRAND_SMALL), width=56)
-            st.markdown("</div>", unsafe_allow_html=True)
         if not tci_list:
             st.caption("Add an image to start.")
         else:
