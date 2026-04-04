@@ -991,15 +991,18 @@ def _subprocess_train_aquaforge(
     *,
     status_obj: Any = None,
     progress_placeholder: Any = None,
-) -> tuple[int, str, str]:
-    """Run ``scripts/train_aquaforge.py`` with :func:`_streamlit_python_exe` (same as Streamlit).
+) -> None:
+    """Launch ``scripts/train_aquaforge.py`` as a non-blocking background process.
 
-    Streams epoch log lines in real time to *status_obj* (``st.status`` context).
-    Writes PID to ``data/_training_pid.txt`` so the stop button can terminate early.
+    Output is streamed to ``data/train_log.txt``.  PID is written to
+    ``data/_training_pid.txt`` so the stop button can terminate early.
+    The caller should call ``st.rerun()`` immediately after this returns;
+    the progress panel (``_render_training_progress_panel``) will then display
+    live log updates on each subsequent rerun.
     """
     script = project_root / "scripts" / "train_aquaforge.py"
     if not script.is_file():
-        return -1, "", f"Missing {script}"
+        raise OSError(f"Missing {script}")
     py = _streamlit_python_exe()
     cmd = [
         py,
@@ -1012,59 +1015,118 @@ def _subprocess_train_aquaforge(
     ]
     pid_file = _training_pid_file(project_root)
     pid_file.parent.mkdir(parents=True, exist_ok=True)
+    log_path = project_root / "data" / "train_log.txt"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(project_root.resolve()),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    with open(log_path, "w", encoding="utf-8", errors="replace") as _lf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root.resolve()),
+            stdout=_lf,
+            stderr=subprocess.STDOUT,
+        )
     pid_file.write_text(str(proc.pid))
 
-    stdout_lines: list[str] = []
-    stderr_lines: list[str] = []
-    last_epoch_line = ""
 
-    import threading as _threading
+def _training_is_active(project_root: Path) -> tuple[bool, int | None]:
+    """Return (is_running, pid) by checking the PID file and OS process table."""
+    import os
+    pid_file = _training_pid_file(project_root)
+    if not pid_file.is_file():
+        return False, None
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        return False, None
+    try:
+        os.kill(pid, 0)  # signal 0 = existence check, does not kill
+        return True, pid
+    except (OSError, PermissionError):
+        pid_file.unlink(missing_ok=True)
+        return False, None
 
-    def _drain_stderr() -> None:
-        for ln in iter(proc.stderr.readline, ""):
-            stderr_lines.append(ln)
 
-    _se_t = _threading.Thread(target=_drain_stderr, daemon=True)
-    _se_t.start()
+def _render_training_progress_panel(project_root: Path) -> None:
+    """
+    Show a live training progress panel whenever a training job is active or a
+    recent log exists.  Called from ``main()`` at every rerun.
+    """
+    import re as _re
+    import time as _time
 
-    for line in iter(proc.stdout.readline, ""):
-        stdout_lines.append(line)
-        stripped = line.strip()
-        if not stripped:
-            continue
-        # Parse epoch lines for structured progress display
-        if stripped.startswith("epoch ") and "score=" in stripped:
-            last_epoch_line = stripped
-            if status_obj is not None:
-                try:
-                    status_obj.write(f"`{stripped}`")
-                except Exception:
-                    pass
-        elif status_obj is not None:
-            # Only show non-verbose lines (checkpoint saves, band checks, etc.)
-            if any(x in stripped for x in ("checkpoint", "spectral", "self-training", "Wrote ")):
-                try:
-                    status_obj.write(stripped)
-                except Exception:
-                    pass
+    log_path = project_root / "data" / "train_log.txt"
+    is_active, pid = _training_is_active(project_root)
 
-    proc.wait()
-    _se_t.join(timeout=5.0)
-    pid_file.unlink(missing_ok=True)
+    if not is_active and not log_path.is_file():
+        return
 
-    tail_o = "".join(stdout_lines)[-12000:]
-    tail_e = "".join(stderr_lines)[-12000:]
-    return int(proc.returncode), tail_o, tail_e
+    st.markdown("---")
+    with st.container():
+        if is_active:
+            _hdr_col, _stop_col = st.columns([5, 1])
+            with _hdr_col:
+                st.markdown("#### Training in progress…")
+            with _stop_col:
+                if st.button("Stop training", key="vd_stop_training_panel",
+                             type="secondary", use_container_width=True):
+                    _stop_training(project_root)
+                    st.rerun()
+        else:
+            st.markdown("#### Last training run")
+
+        if log_path.is_file():
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                lines = []
+
+            # Parse epoch progress
+            epoch_lines = [l for l in lines if l.startswith("epoch ") and "score=" in l]
+            if epoch_lines:
+                last = epoch_lines[-1]
+                # extract epoch X/Y
+                m_ep = _re.search(r"epoch (\d+)/(\d+)", last)
+                # extract score
+                m_sc = _re.search(r"score=([\d.]+)/100", last)
+                # extract cls_acc
+                m_ca = _re.search(r"cls_acc=([\d.]+)%", last)
+                # extract loss
+                m_lo = _re.search(r"loss=([\d.]+)", last)
+
+                if m_ep:
+                    ep_cur, ep_tot = int(m_ep.group(1)), int(m_ep.group(2))
+                    st.progress(ep_cur / ep_tot,
+                                text=f"Epoch {ep_cur} / {ep_tot}")
+
+                _c1, _c2, _c3 = st.columns(3)
+                if m_sc:
+                    _c1.metric("Score", f"{float(m_sc.group(1)):.1f} / 100")
+                if m_ca:
+                    _c2.metric("Class accuracy", f"{float(m_ca.group(1)):.1f}%")
+                if m_lo:
+                    _c3.metric("Loss", f"{float(m_lo.group(1)):.4f}")
+
+            # Show last 18 log lines in a code block
+            tail = lines[-18:] if len(lines) > 18 else lines
+            st.code("\n".join(tail), language="text")
+
+        if is_active:
+            # Auto-rerun every 4 s to poll for new output
+            _time.sleep(4)
+            st.rerun()
+        else:
+            # Training just finished — reload the model so new weights take effect
+            from aquaforge.model_manager import clear_aquaforge_predictor_cache as _clr
+            _clr()
+            # Invalidate scan cache (model changed)
+            _scan_dir = project_root / "data" / "scan_cache"
+            if _scan_dir.is_dir():
+                for _sc in _scan_dir.glob("*_scan.json"):
+                    try:
+                        _sc.unlink()
+                    except OSError:
+                        pass
+
 
 
 def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None:
@@ -1232,42 +1294,12 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
         if not labels_path.is_file():
             st.warning("No labels file yet — save a few reviews first.")
             return
-        with st.status("Training AquaForge…", expanded=True) as status:
-            status.write(f"Python: `{_streamlit_python_exe()}`")
-            # Stop button visible while training runs
-            _stop_col, _ = st.columns([1, 3])
-            with _stop_col:
-                if st.button("Stop training early", key="vd_stop_retrain_btn", type="secondary",
-                             help="Sends a termination signal to the training process."):
-                    _stop_training(ROOT)
-                    status.update(label="Training stopped by user", state="error")
-                    st.rerun()
-            try:
-                code, out, err = _subprocess_train_aquaforge(
-                    project_root, labels_path, [],
-                    status_obj=status,
-                )
-            except OSError as e:
-                status.update(label="Training failed to start", state="error")
-                st.error(str(e))
-                return
-            if code == 0:
-                status.update(label="Training finished", state="complete")
-                clear_aquaforge_predictor_cache()
-                if out.strip():
-                    st.code(out, language="text")
-                st.session_state["_vd_af_train_flash"] = (
-                    "AquaForge retrained — weights reloaded. ONNX export ran if dependencies allowed."
-                )
-                st.rerun()
-            else:
-                status.update(label="Training failed", state="error")
-                _hint = _explain_aquaforge_train_failure(code, err, out)
-                st.error(_hint or f"Exit code {code}")
-                if err.strip():
-                    st.code(err, language="text")
-                elif out.strip():
-                    st.code(out, language="text")
+        try:
+            _subprocess_train_aquaforge(project_root, labels_path, [])
+        except OSError as e:
+            st.error(str(e))
+            return
+        st.rerun()
 
 
 def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path) -> None:
@@ -1315,44 +1347,16 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
         if not labels_path.is_file():
             st.warning("No labels file yet.")
             return
-        with st.status("First AquaForge training…", expanded=True) as status:
-            status.write(f"Python: `{_streamlit_python_exe()}`")
-            _stop_col2, _ = st.columns([1, 3])
-            with _stop_col2:
-                if st.button("Stop training early", key="vd_stop_first_btn", type="secondary",
-                             help="Sends a termination signal to the training process."):
-                    _stop_training(ROOT)
-                    status.update(label="Training stopped by user", state="error")
-                    st.rerun()
-            try:
-                code, out, err = _subprocess_train_aquaforge(
-                    project_root,
-                    labels_path,
-                    ["--epochs", "4", "--batch-size", "2"],
-                    status_obj=status,
-                )
-            except OSError as e:
-                status.update(label="Training failed to start", state="error")
-                st.error(str(e))
-                return
-            if code == 0:
-                status.update(label="Training finished", state="complete")
-                clear_aquaforge_predictor_cache()
-                if out.strip():
-                    st.code(out, language="text")
-                st.session_state["_vd_af_train_flash"] = (
-                    "First AquaForge model saved — open a spot to see masks and headings. "
-                    "Use **Retrain AquaForge** later for a longer run."
-                )
-                st.rerun()
-            else:
-                status.update(label="Training failed", state="error")
-                _hint = _explain_aquaforge_train_failure(code, err, out)
-                st.error(_hint or f"Exit code {code}")
-                if err.strip():
-                    st.code(err, language="text")
-                elif out.strip():
-                    st.code(out, language="text")
+        try:
+            _subprocess_train_aquaforge(
+                project_root,
+                labels_path,
+                ["--epochs", "4", "--batch-size", "2"],
+            )
+        except OSError as e:
+            st.error(str(e))
+            return
+        st.rerun()
 
 
 def _sidebar_spot_finding_settings() -> None:
@@ -1631,6 +1635,9 @@ def main() -> None:
     tci_list = discover_tci_jp2()
     choice: Path | None = None
     refresh = False
+
+    # Show training progress panel at the top of every rerun when a job is active
+    _render_training_progress_panel(ROOT)
 
     _had_tci = bool(str(st.session_state.get("tci_loaded") or "").strip())
 
