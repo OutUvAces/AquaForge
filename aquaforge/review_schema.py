@@ -119,3 +119,111 @@ def model_run_fingerprint(*paths: Path) -> str | None:
     if not parts:
         return None
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Per-chip pixel statistics
+# ---------------------------------------------------------------------------
+
+def chip_image_statistics(chip_rgb: "np.ndarray") -> dict[str, Any]:
+    """Compute pixel statistics for a detection chip (H×W×3 uint8 RGB array).
+
+    Returns a dict with keys:
+      chip_rgb_mean_r/g/b  — per-channel mean (0–255, rounded to 1 dp)
+      chip_rgb_std_r/g/b   — per-channel std dev
+      chip_brightness_mean — grayscale (perceptual) mean
+      chip_brightness_std  — grayscale std dev
+      chip_contrast_rms    — RMS contrast (global; measures "sharpness" proxy)
+      chip_nir_proxy       — NIR-proxy ratio (R-B)/max(B,1); vessels often brighter red
+    """
+    try:
+        import numpy as np
+        arr = np.asarray(chip_rgb, dtype=np.float32)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            return {}
+        r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+        gray = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        brightness_mean = float(gray.mean())
+        brightness_std = float(gray.std())
+        rms_contrast = float(np.sqrt(((gray - gray.mean()) ** 2).mean()))
+        r_mean, g_mean, b_mean = float(r.mean()), float(g.mean()), float(b.mean())
+        nir_proxy = (r_mean - b_mean) / max(float(b.mean()), 1.0)
+        return {
+            "chip_rgb_mean_r": round(r_mean, 1),
+            "chip_rgb_mean_g": round(g_mean, 1),
+            "chip_rgb_mean_b": round(b_mean, 1),
+            "chip_rgb_std_r": round(float(r.std()), 1),
+            "chip_rgb_std_g": round(float(g.std()), 1),
+            "chip_rgb_std_b": round(float(b.std()), 1),
+            "chip_brightness_mean": round(brightness_mean, 1),
+            "chip_brightness_std": round(brightness_std, 1),
+            "chip_contrast_rms": round(rms_contrast, 1),
+            "chip_nir_proxy": round(nir_proxy, 4),
+        }
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-2 filename metadata parser
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_S2_FILENAME_RE = _re.compile(
+    r"(?P<platform>S2[AB])_"
+    r"MSIL\w+_"
+    r"(?P<sensing_dt>\d{8}T\d{6})_"
+    r"N\d+_"
+    r"(?P<orbit>R\d+)_"
+    r"(?P<tile>T[A-Z0-9]+)_",
+    _re.IGNORECASE,
+)
+
+
+def parse_s2_tci_filename_metadata(tci_path: "Path") -> dict[str, Any]:
+    """Extract Sentinel-2 metadata embedded in the TCI filename.
+
+    Returns a dict with keys (all strings/floats, all optional — empty dict on no match):
+      s2_platform          — "S2A" or "S2B"
+      s2_tile_id           — e.g. "T48NUG"
+      s2_orbit             — e.g. "R118"
+      s2_sensing_datetime  — ISO-8601 UTC string, e.g. "2024-06-13T03:15:31Z"
+      s2_utc_hour          — float hour of acquisition (e.g. 3.258)
+      s2_season            — "spring" | "summer" | "autumn" | "winter" (N hemisphere)
+    """
+    try:
+        name = Path(tci_path).name
+        m = _S2_FILENAME_RE.search(name)
+        if not m:
+            return {}
+        platform = m.group("platform").upper()
+        sensing_raw = m.group("sensing_dt")  # e.g. "20240613T031531"
+        orbit = m.group("orbit").upper()
+        tile = m.group("tile").upper()
+        # Parse datetime
+        from datetime import datetime, timezone as _tz
+        dt = datetime.strptime(sensing_raw, "%Y%m%dT%H%M%S").replace(tzinfo=_tz.utc)
+        iso_str = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        utc_hour = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+        # Season (N-hemisphere approximation)
+        month = dt.month
+        if month in (3, 4, 5):
+            season = "spring"
+        elif month in (6, 7, 8):
+            season = "summer"
+        elif month in (9, 10, 11):
+            season = "autumn"
+        else:
+            season = "winter"
+        return {
+            "s2_platform": platform,
+            "s2_tile_id": tile,
+            "s2_orbit": orbit,
+            "s2_sensing_datetime": iso_str,
+            "s2_utc_hour": round(utc_hour, 3),
+            "s2_season": season,
+        }
+    except Exception:
+        return {}
+

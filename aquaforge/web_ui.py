@@ -126,6 +126,8 @@ from aquaforge.locator_coords import (
 from aquaforge.review_schema import (
     enrich_extra_with_predictions,
     model_run_fingerprint,
+    chip_image_statistics,
+    parse_s2_tci_filename_metadata,
 )
 from aquaforge.model_manager import (
     aquaforge_chip_vessel_confidence,
@@ -3306,6 +3308,8 @@ def _commit_review_label(
     quad_crop_h1: list[tuple[float, float]] | None = None
     spot_sc = int(sc0)
     spot_sr = int(sr0)
+    spot_rgb: "np.ndarray | None" = None
+    chip_px: int = 0
     if tci_p.is_file():
         try:
             tci_mt = tci_p.stat().st_mtime
@@ -3491,6 +3495,45 @@ def _commit_review_label(
     _af_conf_save = af_spot_save.get("aquaforge_confidence")
     if _af_conf_save is None:
         _af_conf_save = float(sv_comb)
+
+    # --- Hull polygon (full-res) — computed by model, not yet persisted ---
+    _hull_poly_save = af_spot_save.get("aquaforge_hull_polygon_fullres")
+    if _hull_poly_save is not None:
+        extra["aquaforge_hull_polygon_fullres"] = _hull_poly_save
+    _hull_poly_crop = af_spot_save.get("aquaforge_hull_polygon_crop")
+    if _hull_poly_crop is not None:
+        extra["aquaforge_hull_polygon_crop"] = _hull_poly_crop
+
+    # --- Per-chip pixel statistics ---
+    try:
+        if spot_rgb is not None:
+            _chip_stats = chip_image_statistics(spot_rgb)
+            if _chip_stats:
+                extra.update(_chip_stats)
+    except Exception:
+        pass
+
+    # --- Sentinel-2 filename metadata ---
+    _s2_meta = parse_s2_tci_filename_metadata(tci_p)
+    if _s2_meta:
+        extra.update(_s2_meta)
+
+    # --- Land mask fraction under the chip ---
+    try:
+        from aquaforge.land_mask import get_land_mask as _get_lm
+        _lm_arr = _get_lm(tci_p, ROOT)
+        if _lm_arr is not None:
+            _r0 = int(sr0)
+            _c0 = int(sc0)
+            _csz = int(chip_px)
+            _r1 = min(_r0 + _csz, _lm_arr.shape[0])
+            _c1 = min(_c0 + _csz, _lm_arr.shape[1])
+            if _r1 > _r0 and _c1 > _c0:
+                _patch = _lm_arr[_r0:_r1, _c0:_c1]
+                extra["land_mask_chip_land_fraction"] = round(float(_patch.mean()), 4)
+    except Exception:
+        pass
+
     extra = enrich_extra_with_predictions(
         extra,
         model_run_id=fpid,

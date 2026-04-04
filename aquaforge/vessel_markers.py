@@ -90,6 +90,7 @@ MARKER_ROLE_LABELS: dict[str, str] = {
     "end": "Ends",
     "side": "Side",
     "bridge": "Bridge/Aft",
+    "wake": "Wake tip",
 }
 
 # Short labels for UI buttons (same keys as MARKER_ROLES).
@@ -99,6 +100,7 @@ MARKER_ROLE_BUTTON_LABELS: dict[str, str] = {
     "end": "Ends",
     "side": "Side",
     "bridge": "Bridge",
+    "wake": "Wake",
 }
 
 # PIL-friendly BGR not used; RGB tuples for drawing

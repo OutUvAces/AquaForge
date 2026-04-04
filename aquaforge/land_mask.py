@@ -39,7 +39,7 @@ NE_GEOJSON_URL: str = (
 )
 _LOCAL_FILENAME = "ne_110m_land.geojson"
 
-LAND_SKIP_FRACTION: float = 0.85  # skip tile if ≥ 85 % land pixels
+LAND_SKIP_FRACTION: float = 1.0  # only skip tiles that are 100% land (no water pixels at all)
 
 
 # ---------------------------------------------------------------------------
