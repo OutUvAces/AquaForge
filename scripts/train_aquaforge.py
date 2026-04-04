@@ -316,6 +316,8 @@ def main() -> None:
         total_loss = 0.0
         n_batches = 0
         ru_epoch = 0.0
+        cls_correct = 0
+        cls_total = 0
         for batch_list in dl:
             batch_dict = collate_batch(batch_list, device)
             imgs = batch_dict["imgs"]
@@ -338,6 +340,12 @@ def main() -> None:
             total_loss += float(logs.get("loss_total", 0.0))
             n_batches += 1
             ru_epoch += float(batch_dict["review_uncertainty"].mean().item())
+            # Classification accuracy: threshold sigmoid(cls_logit) at 0.5
+            with torch.no_grad():
+                _pred_cls = (torch.sigmoid(cls_l.squeeze(-1)) >= 0.5).float()
+                _gt_cls = batch_dict["cls"].float()
+                cls_correct += int((_pred_cls == _gt_cls).sum().item())
+                cls_total += int(_gt_cls.numel())
             if balancer is not None:
                 balancer.update_from_logs(logs)
                 cov = float(batch_dict["seg"].mean().item())
@@ -394,10 +402,18 @@ def main() -> None:
 
         avg = total_loss / max(n_batches, 1)
         ru_m = ru_epoch / max(n_batches, 1)
+        cls_acc = 100.0 * cls_correct / max(cls_total, 1)
+        # Training score: 0-100 scale where 100 = perfect, derived from loss.
+        # Uses 100/(1+loss) so score approaches 100 as loss->0.
+        # Treat anything above 90 as excellent; below 30 = still early.
+        t_score = 100.0 / (1.0 + avg)
+        # Which heads are active this epoch (curriculum weight > 0)
+        active = [k for k, v in base_sw.items() if float(v) > 0 and k not in ("distill",)]
         # ASCII-only: Windows cp1252 consoles cannot print U+2248 (approx) or fancy punctuation.
         print(
-            f"epoch {epoch + 1}/{args.epochs} loss={avg:.4f} review_ui_u~{ru_m:.3f} "
-            f"curriculum={base_sw} model_arch={ARCH_CNN} balance={'on' if use_balance else 'off'}",
+            f"epoch {epoch + 1}/{args.epochs}  "
+            f"score={t_score:.1f}/100  cls_acc={cls_acc:.1f}%  loss={avg:.4f}  "
+            f"active_heads={','.join(active)}",
             flush=True,
         )
 
