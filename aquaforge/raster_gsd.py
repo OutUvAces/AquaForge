@@ -148,3 +148,92 @@ def build_jp2_overviews(tci_path: str | Path) -> dict[str, object]:
         error_msg = str(exc)
 
     return {"status": "failed", "ovr_path": ovr, "error": error_msg}
+
+
+def convert_jp2_to_cog(tci_path: str | Path) -> dict[str, object]:
+    """Convert *tci_path* (JPEG2000) to a Cloud-Optimized GeoTIFF (COG) beside it.
+
+    A COG uses 256×256 internal tiles with DEFLATE compression plus embedded overview
+    levels.  Any window read — full-resolution or downsampled, tiny or large — reads
+    only the tiles it needs instead of decompressing JP2 wavelet data.  This is the
+    definitive fix for slow JP2 window reads used in model inference chips (640 px),
+    review chips (50 px), and locator reads.
+
+    The output file is written next to *tci_path* with the extension replaced by
+    ``_cog.tif``.  If it already exists the function returns immediately.
+
+    Returns a dict with keys:
+      ``status``   : ``"already_exists"`` | ``"built"`` | ``"failed"``
+      ``cog_path`` : Path to the COG output
+      ``error``    : error string if ``status == "failed"``
+    """
+    import subprocess as _sp
+
+    src = Path(tci_path).resolve()
+    cog = src.with_name(src.stem + "_cog.tif")
+    if cog.exists():
+        return {"status": "already_exists", "cog_path": cog, "error": None}
+
+    error_msg: str | None = None
+
+    # --- attempt 1: rasterio / GDAL Python bindings ---
+    try:
+        import rasterio as _rio
+        from rasterio.enums import Resampling as _Res
+
+        with _rio.open(src) as ds:
+            profile = ds.profile.copy()
+            profile.update(
+                driver="GTiff",
+                compress="deflate",
+                tiled=True,
+                blockxsize=256,
+                blockysize=256,
+                interleave="pixel",
+                copy_src_overviews=False,
+            )
+            # Write full-res copy first as a regular tiled GeoTIFF, then convert to COG
+            # by re-writing with copy_src_overviews after building overviews.
+            _tmp = cog.with_suffix(".tmp.tif")
+            try:
+                with _rio.open(_tmp, "w", **profile) as dst:
+                    dst.write(ds.read())
+                    dst.build_overviews([2, 4, 8, 16, 32], _Res.average)
+                    dst.update_tags(ns="rio_overview", resampling="average")
+                profile.update(copy_src_overviews=True)
+                with _rio.open(_tmp) as src2:
+                    with _rio.open(cog, "w", **profile) as dst2:
+                        dst2.write(src2.read())
+                if cog.exists():
+                    return {"status": "built", "cog_path": cog, "error": None}
+            finally:
+                try:
+                    _tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    except Exception as exc:
+        error_msg = str(exc)
+
+    # --- attempt 2: gdal_translate subprocess ---
+    try:
+        cmd = [
+            "gdal_translate",
+            "-of", "COG",
+            "-co", "BLOCKSIZE=256",
+            "-co", "COMPRESS=DEFLATE",
+            "-co", "OVERVIEWS=IGNORE_EXISTING",
+            str(src), str(cog),
+        ]
+        result = _sp.run(cmd, capture_output=True, timeout=900)
+        if result.returncode == 0 and cog.exists():
+            return {"status": "built", "cog_path": cog, "error": None}
+        error_msg = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+    except FileNotFoundError:
+        error_msg = (
+            "gdal_translate not found. Install GDAL tools "
+            "(conda: `conda install -c conda-forge gdal`)."
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+
+    return {"status": "failed", "cog_path": cog, "error": error_msg}

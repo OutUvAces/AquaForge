@@ -209,7 +209,7 @@ from aquaforge.static_sea_witness import (
     default_static_sea_witness_path,
     summarize_static_sea_cells,
 )
-from aquaforge.raster_gsd import build_jp2_overviews
+from aquaforge.raster_gsd import build_jp2_overviews, convert_jp2_to_cog
 
 SAMPLES_DIR = ROOT / "data" / "samples"
 PREVIEW_THUMB_DIR = SAMPLES_DIR / ".preview_thumbnails"
@@ -1520,58 +1520,114 @@ def main() -> None:
 
             if tci_loaded_sidebar:
                 _ovr_path = Path(tci_loaded_sidebar + ".ovr")
+                _cog_path = Path(
+                    Path(tci_loaded_sidebar).with_name(
+                        Path(tci_loaded_sidebar).stem + "_cog.tif"
+                    )
+                )
                 _ovr_exists = _ovr_path.exists()
-                with st.expander("⚡ Optimize scene (fast reads)", expanded=not _ovr_exists):
-                    if _ovr_exists:
+                _cog_exists = _cog_path.exists()
+                _fully_optimized = _cog_exists  # COG is the best state
+                with st.expander("⚡ Optimize scene (fast reads)", expanded=not _cog_exists):
+                    if _cog_exists:
                         st.success(
-                            f"Overviews built — JP2 reads are optimized. "
-                            f"(`{_ovr_path.name}`)"
+                            f"Scene fully optimized — COG GeoTIFF active. "
+                            f"All JP2 reads replaced with fast tiled GeoTIFF. "
+                            f"(`{_cog_path.name}`)"
                         )
-                        if st.button("Rebuild overviews", key="vd_rebuild_ovr"):
-                            try:
-                                _ovr_path.unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                            st.session_state["_vd_ovr_status"] = None
-                            st.rerun()
+                    elif _ovr_exists:
+                        st.info(
+                            "Overview file built (locator reads fast). "
+                            "Convert to COG GeoTIFF for full-speed inference chip reads too."
+                        )
                     else:
                         st.warning(
-                            "No overview file found. Building it once makes every JP2 "
-                            "read 10–50× faster (locator, prefetch, whole-scene map)."
+                            "Scene not optimized. First-chip load will be slow (1–5 min). "
+                            "Build overviews for a quick win, or convert to COG for the full fix."
                         )
-                        if st.button(
-                            "🚀 Build overviews now",
-                            key="vd_build_ovr",
-                            type="primary",
-                        ):
-                            with st.spinner("Building GDAL overviews — this takes 1–3 min once…"):
-                                _res = build_jp2_overviews(tci_loaded_sidebar)
-                            if _res["status"] in ("built", "already_exists"):
-                                st.success("Done! Overviews written.")
-                                st.session_state["_vd_ovr_status"] = "ok"
-                                # Flush the chip read cache so next load uses overviews.
-                                _CHIP_READ_CACHE.clear()
-                                st.rerun()
-                            else:
-                                st.error(
-                                    f"Overview build failed: {_res.get('error', 'unknown error')}\n\n"
-                                    "You can also run manually:\n"
-                                    f"```\ngdaladdo -ro -r average \"{tci_loaded_sidebar}\" 2 4 8 16 32\n```"
-                                )
 
-            # Auto-build overviews for ALL scenes that are missing a .ovr file.
-            # A single daemon thread processes them sequentially so builds don't
-            # compete for CPU.  Session-state key prevents re-spawning on every rerun
-            # (the ovr.exists() check in build_jp2_overviews handles file-level dedup).
+                    if not _cog_exists:
+                        _c1, _c2 = st.columns(2)
+                        with _c1:
+                            if st.button(
+                                "🚀 Convert to COG GeoTIFF",
+                                key="vd_build_cog",
+                                type="primary",
+                                help="One-time 2–5 min conversion. Makes ALL reads (inference chip, review chip, locator) fast forever.",
+                            ):
+                                with st.spinner(
+                                    "Converting to Cloud-Optimized GeoTIFF — takes 2–5 min once…"
+                                ):
+                                    _res = convert_jp2_to_cog(tci_loaded_sidebar)
+                                if _res["status"] in ("built", "already_exists"):
+                                    st.success(f"COG written: `{_cog_path.name}`")
+                                    _CHIP_READ_CACHE.clear()
+                                    st.session_state["_vd_cog_autoswitch"] = str(_cog_path)
+                                    st.rerun()
+                                else:
+                                    st.error(
+                                        f"Conversion failed: {_res.get('error', 'unknown error')}"
+                                    )
+                        with _c2:
+                            if not _ovr_exists:
+                                if st.button(
+                                    "Build overviews only",
+                                    key="vd_build_ovr",
+                                    help="Faster to run (~1 min). Speeds up locator but not inference chips.",
+                                ):
+                                    with st.spinner("Building GDAL overviews…"):
+                                        _res2 = build_jp2_overviews(tci_loaded_sidebar)
+                                    if _res2["status"] in ("built", "already_exists"):
+                                        st.success("Overviews written.")
+                                        _CHIP_READ_CACHE.clear()
+                                        st.rerun()
+                                    else:
+                                        st.error(
+                                            f"Failed: {_res2.get('error', 'unknown error')}"
+                                        )
+
+            # Auto-convert ALL scenes to COG GeoTIFF in the background.
+            # COG is the definitive fix: it speeds up inference chips (640 px),
+            # review chips (50 px), AND locator reads — all in one file.
+            # Fall back to .ovr if COG fails or is not yet built.
+            import threading as _ovr_threading
+
+            def _cog_path_for(p: "Path | str") -> "Path":
+                _p = Path(p)
+                return _p.with_name(_p.stem + "_cog.tif")
+
+            _scenes_needing_cog = [
+                p for p in tci_list
+                if not _cog_path_for(p).exists()
+            ]
+            _auto_cog_key = "_vd_cog_autobuild_queue"
+            _cog_pending = frozenset(str(p) for p in _scenes_needing_cog)
+            if _cog_pending and st.session_state.get(_auto_cog_key) != _cog_pending:
+                st.session_state[_auto_cog_key] = _cog_pending
+                def _auto_build_cogs(paths=list(_scenes_needing_cog)):
+                    for _p in paths:
+                        try:
+                            res = convert_jp2_to_cog(_p)
+                            if res["status"] == "failed":
+                                # COG failed — fall back to .ovr for locator speed
+                                build_jp2_overviews(_p)
+                        except Exception:
+                            pass
+                    _CHIP_READ_CACHE.clear()
+                _cog_t = _ovr_threading.Thread(target=_auto_build_cogs, daemon=True)
+                _cog_t.start()
+
+            # Separate pass: also build .ovr for any scene that has neither
+            # (so locator reads are at least fast while COG is being built).
             _scenes_needing_ovr = [
                 p for p in tci_list
                 if not Path(str(p) + ".ovr").exists()
+                and not _cog_path_for(p).exists()
             ]
-            _auto_queue_key = "_vd_ovr_autobuild_queue"
-            _pending = frozenset(str(p) for p in _scenes_needing_ovr)
-            if _pending and st.session_state.get(_auto_queue_key) != _pending:
-                st.session_state[_auto_queue_key] = _pending
-                import threading as _ovr_threading
+            _auto_ovr_key = "_vd_ovr_autobuild_queue"
+            _ovr_pending = frozenset(str(p) for p in _scenes_needing_ovr)
+            if _ovr_pending and st.session_state.get(_auto_ovr_key) != _ovr_pending:
+                st.session_state[_auto_ovr_key] = _ovr_pending
                 def _auto_build_all(paths=list(_scenes_needing_ovr)):
                     for _p in paths:
                         try:
@@ -1801,6 +1857,10 @@ def _render_hundred_cell_overview(
                 st.rerun()
 
         tci_p = Path(tci_loaded)
+        # Prefer COG GeoTIFF if it exists — any window read is ~10× faster
+        _tci_cog = tci_p.with_name(tci_p.stem + "_cog.tif")
+        if _tci_cog.is_file():
+            tci_p = _tci_cog
         if not tci_p.is_file():
             st.warning("Image file missing — cannot build overview.")
             return
@@ -2216,6 +2276,10 @@ def _render_review_deck(
         st.success(str(flash_loc))
 
     tci_p = Path(tci_loaded)
+    # Prefer COG GeoTIFF if it exists — all reads (inference, review chip, locator) are fast
+    _tci_cog2 = tci_p.with_name(tci_p.stem + "_cog.tif")
+    if _tci_cog2.is_file():
+        tci_p = _tci_cog2
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
     det_settings = load_aquaforge_settings(ROOT)
 
