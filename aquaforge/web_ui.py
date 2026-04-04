@@ -2044,8 +2044,13 @@ def main() -> None:
     if st.session_state.get("_pending_scene_key") != scene_key:
         st.session_state.pending_locator_candidates = []
         st.session_state._pending_scene_key = scene_key
+        # Clear stale candidates when image changes so the old list isn't shown
+        # under a new image — but do NOT auto-scan; wait for explicit button press.
+        if st.session_state.last_scene_key != scene_key:
+            st.session_state.detector_candidates = []
+            st.session_state.tci_loaded = ""
 
-    should_load = refresh or (st.session_state.last_scene_key != scene_key)
+    should_load = refresh  # only scan on explicit button press
 
     if should_load:
         if not tci_path.is_file():
@@ -2228,9 +2233,8 @@ def main() -> None:
             )
         else:
             st.info(
-                "**No spot list yet.** Open the **←** sidebar, pick an **Image**, then press "
-                "**Refresh detection list**. The main area stays empty until that scan finishes "
-                "(large JP2s can take a minute or two — you will see a progress message then)."
+                "**Ready.** Select an image in the **←** sidebar, then press "
+                "**Refresh detection list** to scan for vessels."
             )
         return
 
