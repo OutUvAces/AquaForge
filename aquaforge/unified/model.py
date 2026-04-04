@@ -317,7 +317,21 @@ def load_checkpoint(
     meta = dict(ckpt.get("meta") or {})
     imgsz = int(meta.get("imgsz", 512))
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
-    in_ch_meta = override_in_channels if override_in_channels is not None else int(meta.get("in_channels", 3))
+
+    # Detect actual channel count from the first conv weight BEFORE resolving in_ch_meta,
+    # so that checkpoints trained with 12 channels but missing "in_channels" in meta
+    # (saved before that field was added) still load correctly without a warm-start reshape.
+    sd = ckpt["state_dict"]
+    first_w_key = "encoder.block01.0.weight"
+    ckpt_in_ch = int(sd[first_w_key].shape[1]) if first_w_key in sd else 3
+
+    # Priority: explicit override > meta field > actual checkpoint channels
+    in_ch_meta = (
+        override_in_channels
+        if override_in_channels is not None
+        else int(meta.get("in_channels", ckpt_in_ch))
+    )
+
     arch_raw = str(meta.get("model_arch", ARCH_CNN)).strip().lower()
     if arch_raw != ARCH_CNN:
         raise ValueError(
@@ -325,13 +339,6 @@ def load_checkpoint(
             "Retrain with scripts/train_aquaforge.py."
         )
     meta["model_arch"] = ARCH_CNN
-
-    # Determine actual checkpoint channel count from the first conv weight shape
-    sd = ckpt["state_dict"]
-    first_w_key = "encoder.block01.0.weight"
-    ckpt_in_ch = 3
-    if first_w_key in sd:
-        ckpt_in_ch = int(sd[first_w_key].shape[1])
 
     m = AquaForgeCnn(imgsz=imgsz, n_landmarks=nl, in_channels=in_ch_meta)
     fv = int(meta.get("format_version", 1))
@@ -366,5 +373,6 @@ def load_checkpoint(
         sd[_wake_w_key] = new_ww
         sd[_wake_b_key] = new_wb
 
-    # New heads (type_head, dim_head) may be missing from older checkpoints — load non-strictly.
+    # New heads (type_head, dim_head, mat_head) may be missing from older checkpoints — load non-strictly.
     m.load_state_dict(sd, strict=False)
+    return m, meta
