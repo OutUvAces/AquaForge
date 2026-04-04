@@ -13,9 +13,11 @@ input channels beyond the TCI RGB.  Channels are ordered by wavelength:
   ch  8:  B11  – SWIR 1         – 1610 nm – native 20 m → 2× upsample
   ch  9:  B12  – SWIR 2         – 2190 nm – native 20 m → 2× upsample
   ch 10:  B01  – Coastal aer.   –  443 nm – native 60 m → 6× upsample
-  ch 11:  B10  – SWIR cirrus    – 1375 nm – native 60 m → 6× upsample
+  ch 11:  B09  – Water vapour  –  945 nm – native 60 m → 6× upsample
 
 Total model input channels: 3 (TCI) + 9 (extra) = 12
+
+Note: B10 (SWIR cirrus, 1375 nm) is L1C-only and not present in L2A products.
 
 L2A reflectance values are stored as uint16 DN; divide by 10 000 to get
 surface reflectance in [0, 1].  We clip to [0, 1.0] (saturated snow / cloud
@@ -55,7 +57,7 @@ EXTRA_BANDS: tuple[BandDef, ...] = (
     BandDef("B11",  "B11_20m",  20, 1610, "SWIR 1"),
     BandDef("B12",  "B12_20m",  20, 2190, "SWIR 2"),
     BandDef("B01",  "B01_60m",  60,  443, "Coastal aerosol"),
-    BandDef("B10",  "B10_60m",  60, 1375, "SWIR cirrus"),
+    BandDef("B09",  "B09_60m",  60,  945, "Water vapour"),
 )
 
 N_EXTRA_BANDS: int = len(EXTRA_BANDS)   # 9

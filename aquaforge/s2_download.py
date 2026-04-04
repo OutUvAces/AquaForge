@@ -426,7 +426,7 @@ def download_extra_bands_for_tci(
         return result
 
     try:
-        item = stac_get_item_by_id(token, item_id)
+        item = stac_get_item_by_id(token, collection_id="sentinel-2-l2a", item_id=item_id)
     except Exception:
         for bd in missing:
             result[bd.name] = None
