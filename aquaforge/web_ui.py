@@ -159,7 +159,6 @@ from aquaforge.review_overlay import (
     footprint_width_length_m,
     fullres_xy_from_spot_red_outline_aabb_center,
     overlay_bow_heading_arrowhead,
-    overlay_heading_arrow_north_on_letterbox,
     overlay_aquaforge_on_spot_rgb,
     read_locator_and_spot_rgb_matching_stretch,
     vessel_quad_for_label,
@@ -3156,8 +3155,19 @@ def _render_review_deck(
                 offset_m=50.0,
             )
         else:
-            spot_sq = overlay_heading_arrow_north_on_letterbox(
-                spot_sq, spot_lb_meta, _arrow_h
+            # Bow position unknown — place the arrowhead at the chip centre so the
+            # heading indicator is still the same green style (no more yellow line).
+            _cx = float(scw) / 2.0 if scw > 0 else float(main_px) / 2.0
+            _cy = float(sch) / 2.0 if sch > 0 else float(main_px) / 2.0
+            spot_sq = overlay_bow_heading_arrowhead(
+                spot_sq,
+                spot_lb_meta,
+                _arrow_h,
+                (_cx, _cy),
+                chip_native_w=scw if scw > 0 else main_px,
+                chip_native_h=sch if sch > 0 else main_px,
+                meters_per_native_px=float(gavg) if gavg else 10.0,
+                offset_m=80.0,
             )
     loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, side_px)
 
