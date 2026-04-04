@@ -252,7 +252,12 @@ def build_model(
     return AquaForgeCnn(imgsz=imgsz, n_landmarks=n_landmarks, in_channels=in_channels)
 
 
-def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
+def load_checkpoint(
+    path: Any,
+    device: torch.device,
+    *,
+    override_in_channels: int | None = None,
+) -> tuple[nn.Module, dict[str, Any]]:
     """Load ``.pt`` with ``state_dict`` + ``meta`` (``model_arch``, ``imgsz``, ``n_landmarks``, ``in_channels``, …).
 
     **Warm-start across channel counts**: if the checkpoint has a 3-channel first conv
@@ -260,6 +265,9 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     meta requests more channels, the extra channels are initialised to a small fraction of
     the mean RGB weight so the RGB features are preserved while spectral channels start
     from near-zero.  This avoids training from scratch when adding new S2 bands.
+
+    Pass ``override_in_channels`` to force a target channel count regardless of what the
+    checkpoint metadata says (e.g. upgrading a 3-ch checkpoint to 12-ch training).
     """
     import torch as T
 
@@ -274,7 +282,7 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     meta = dict(ckpt.get("meta") or {})
     imgsz = int(meta.get("imgsz", 512))
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
-    in_ch_meta = int(meta.get("in_channels", 3))
+    in_ch_meta = override_in_channels if override_in_channels is not None else int(meta.get("in_channels", 3))
     arch_raw = str(meta.get("model_arch", ARCH_CNN)).strip().lower()
     if arch_raw != ARCH_CNN:
         raise ValueError(
