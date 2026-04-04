@@ -1433,21 +1433,6 @@ def main() -> None:
     refresh = False
 
     _had_tci = bool(str(st.session_state.get("tci_loaded") or "").strip())
-    if (
-        tci_list
-        and not _had_tci
-        and not st.session_state.get("_vd_startup_hint_done")
-    ):
-        st.session_state["_vd_startup_hint_done"] = True
-        st.markdown(
-            '<div class="vd-main-top-spacer" aria-hidden="true"></div>',
-            unsafe_allow_html=True,
-        )
-        st.info(
-            "**AquaForge is running.** Open the **←** sidebar, pick a **Scene**, then press "
-            "**Refresh spot list**. While the scene is scanned you will see a **spinner** in the main "
-            "area; large JP2 files can take a minute or two."
-        )
 
     # Sidebar: only scene + refresh on first glance; everything else under **Advanced**.
     tci_loaded_sidebar = str(st.session_state.get("tci_loaded") or "").strip()
@@ -2169,39 +2154,19 @@ def _render_review_deck(
     mt = tci_p.stat().st_mtime if tci_p.is_file() else 0.0
     det_settings = load_aquaforge_settings(ROOT)
 
-    # Minimal header + top-right overlay toggles (defaults: all layers on).
+    # Header — spot counter. Overlay defaults set here; checkboxes rendered below the review chip.
     _sc_prev_hdr = cands[idx][2]
     _hint_hdr = " · map" if _sc_prev_hdr == LOCATOR_MANUAL_SCORE else ""
-    _hl, _hr = st.columns([3.5, 1.05])
-    with _hl:
-        st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
-    with _hr:
-        # Default overlays: outline, heading, landmarks, wake (all on).
-        for _xk, _dv in (
-            ("vd_ov_hull", True),
-            ("vd_ov_mark", True),
-            ("vd_ov_dir", True),
-            ("vd_ov_wake", True),
-        ):
-            if _xk not in st.session_state:
-                st.session_state[_xk] = _dv
-        st.markdown('<div class="vd-overlay-exp">', unsafe_allow_html=True)
-        with st.expander("On image", expanded=False):
-            st.toggle("Outline", key="vd_ov_hull")
-            st.toggle("Direction", key="vd_ov_dir")
-            st.toggle("Keypoints", key="vd_ov_mark")
-            st.toggle("Wake", key="vd_ov_wake")
-            st.markdown(
-                "<div style='font-size:0.78em;line-height:2;margin-top:4px'>"
-                "<span style='color:#00ffdc;font-size:1.3em'>▬</span>&nbsp;<b>Outline</b> — cyan hull / mask boundary<br>"
-                "<span style='color:#ffe040;font-size:1.3em'>↑</span>&nbsp;<b>Direction</b> — yellow heading arrow (north = up)<br>"
-                "<span style='color:#ff00c8;font-size:1.3em'>●</span>&nbsp;<b>Keypoints</b> — purple structural landmarks<br>"
-                "<span style='color:#ff9b00;font-size:1.3em'>─</span>&nbsp;<b>Wake</b> — orange-yellow wake / motion line<br>"
-                "<span style='color:#78ff50;font-size:1.3em'>─</span>&nbsp;<b>Keel</b> — green bow-to-stern axis"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
+    # Default overlays (all on). Checkboxes below update these on the next rerun.
+    for _xk, _dv in (
+        ("vd_ov_hull", True),
+        ("vd_ov_mark", True),
+        ("vd_ov_dir", True),
+        ("vd_ov_wake", True),
+    ):
+        if _xk not in st.session_state:
+            st.session_state[_xk] = _dv
 
     # Optional consent: global toggle under **Advanced** when YAML requires it.
     _af_overlay_allow = True
@@ -2566,23 +2531,8 @@ def _render_review_deck(
             )
     loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, side_px)
 
-    # Keys + quick notes above the image row so marker metrics see wake/cloud state on the same run.
     wake_vis_k = f"wake_vis_{spot_k}"
     cloud_partial_k = f"cloud_partial_{spot_k}"
-    st.caption("Optional training flags (affect marker-derived lengths)")
-    _wn1, _wn2 = st.columns(2)
-    with _wn1:
-        st.checkbox(
-            "Wake visible behind the ship",
-            key=wake_vis_k,
-            help="Helps the model learn water patterns.",
-        )
-    with _wn2:
-        st.checkbox(
-            "Partly hidden by cloud",
-            key=cloud_partial_k,
-            help="Marks a harder example.",
-        )
 
     mk_list_fb = st.session_state.get(dim_key, [])
     if not isinstance(mk_list_fb, list):
@@ -2652,12 +2602,18 @@ def _render_review_deck(
             use_column_width=False,
             cursor="crosshair",
         )
+        # Overlay checkboxes — one row directly under the review chip.
+        _ov1, _ov2, _ov3, _ov4 = st.columns(4)
+        with _ov1:
+            st.checkbox("Outline", key="vd_ov_hull")
+        with _ov2:
+            st.checkbox("Direction", key="vd_ov_dir")
+        with _ov3:
+            st.checkbox("Keypoints", key="vd_ov_mark")
+        with _ov4:
+            st.checkbox("Wake", key="vd_ov_wake")
     with _cside:
-        st.caption("Locator — add another detection to the queue")
-        st.markdown(
-            '<p class="vd-deck-foot">Orange = suggestions · green = queued · purple = saved · yellow = here</p>',
-            unsafe_allow_html=True,
-        )
+        st.caption("Locator")
         click_loc = streamlit_image_coordinates(
             loc_sq,
             key=f"loc_vessel_{spot_k}",
@@ -2665,6 +2621,25 @@ def _render_review_deck(
             height=side_px,
             use_column_width=False,
             cursor="crosshair",
+        )
+        st.markdown(
+            '<p class="vd-deck-foot">'
+            "<span style='color:#ff6600'>●</span>&nbsp;suggestions&emsp;"
+            "<span style='color:#22cc55'>●</span>&nbsp;queued&emsp;"
+            "<span style='color:#9944ff'>●</span>&nbsp;saved&emsp;"
+            "<span style='color:#ffdd00'>●</span>&nbsp;here"
+            "</p>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<p class="vd-deck-foot">'
+            "<span style='color:#00ffdc'>▬</span>&nbsp;hull boundary&emsp;"
+            "<span style='color:#ffe040'>↑</span>&nbsp;heading&emsp;"
+            "<span style='color:#ff00c8'>●</span>&nbsp;structures&emsp;"
+            "<span style='color:#ff9b00'>─</span>&nbsp;Wake&emsp;"
+            "<span style='color:#78ff50'>─</span>&nbsp;Keel"
+            "</p>",
+            unsafe_allow_html=True,
         )
         if af_spot:
             _render_spot_measurements_panel(
@@ -2801,7 +2776,20 @@ def _render_review_deck(
                 st.rerun()
         if is_twin:
             st.caption(f"Placing on **hull {int(st.session_state.get(active_hull_k, 1))}**.")
-        
+        st.markdown("##### Training flags")
+        _wn1, _wn2 = st.columns(2)
+        with _wn1:
+            st.checkbox(
+                "Wake visible behind the ship",
+                key=wake_vis_k,
+                help="Helps the model learn water patterns.",
+            )
+        with _wn2:
+            st.checkbox(
+                "Partly hidden by cloud",
+                key=cloud_partial_k,
+                help="Marks a harder example.",
+            )
     if click_spot_dim is not None:
         sdd = (
             f"{click_spot_dim.get('unix_time')}|{click_spot_dim.get('x')}|"
