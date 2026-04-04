@@ -3098,8 +3098,8 @@ def _render_review_deck(
                 bow_stern_min_confidence=_bs_conf,
                 wake_polyline_crop=_wk,
                 draw_hull_outline=_show_hull,
-                draw_keypoints=_show_mark,
-                draw_bow_stern=_show_mark,
+                draw_keypoints=_show_mark and bool(_poly),
+                draw_bow_stern=_show_mark and bool(_poly),
                 draw_wake=_show_wake,
             )
     mk_draw2 = st.session_state.get(dim_key, [])
@@ -3238,15 +3238,16 @@ def _render_review_deck(
             cursor="crosshair",
         )
         # Overlay checkboxes — one row directly under the review chip.
+        # Default all to True (checked) so overlays are visible on fresh load.
         _ov1, _ov2, _ov3, _ov4 = st.columns(4)
         with _ov1:
-            st.checkbox("Outline", key="vd_ov_hull")
+            st.checkbox("Outline", key="vd_ov_hull", value=True)
         with _ov2:
-            st.checkbox("Direction", key="vd_ov_dir")
+            st.checkbox("Direction", key="vd_ov_dir", value=True)
         with _ov3:
-            st.checkbox("Structures", key="vd_ov_mark")
+            st.checkbox("Structures", key="vd_ov_mark", value=True)
         with _ov4:
-            st.checkbox("Wake", key="vd_ov_wake")
+            st.checkbox("Wake", key="vd_ov_wake", value=True)
     with _cside:
         click_loc = streamlit_image_coordinates(
             loc_sq,
