@@ -601,6 +601,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.0,
                 "dim": 0.0,
                 "vessel_type": 0.0,
+                "chroma_hdg": 0.0,
                 "distill": 0.0,
             },
         ),
@@ -616,6 +617,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.0,
                 "dim": 0.0,
                 "vessel_type": 0.0,
+                "chroma_hdg": 0.0,
                 "distill": 0.0,
             },
         ),
@@ -631,6 +633,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.0,
                 "dim": 0.0,
                 "vessel_type": 0.0,
+                "chroma_hdg": 0.0,
                 "distill": 0.0,
             },
         ),
@@ -646,6 +649,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.15,
                 "dim": 0.1,
                 "vessel_type": 0.0,
+                "chroma_hdg": 0.12,
                 "distill": 0.0,
             },
         ),
@@ -661,6 +665,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.28,
                 "dim": 0.3,
                 "vessel_type": 0.15,
+                "chroma_hdg": 0.22,
                 "distill": 0.0,
             },
         ),
@@ -676,6 +681,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.38,
                 "dim": 0.45,
                 "vessel_type": 0.28,
+                "chroma_hdg": 0.28,
                 "distill": 0.0,
             },
         ),
@@ -1102,6 +1108,26 @@ def aquaforge_joint_loss(
                 )
     logs["loss_type"] = float(type_loss.detach())
 
+    # Chromatic fringe heading supervision: soft teacher using physics-derived
+    # B02/B04 phase-correlation heading.  Only active when PNR-qualified chroma
+    # heading is available (batch["chroma_valid"] > 0).  Weight is kept low to
+    # preserve the primacy of human-labeled headings.
+    w_chroma = float(sw.get("chroma_hdg", 0.25))
+    chroma_loss = torch.zeros((), device=dev, dtype=dt)
+    if w_chroma > 0:
+        chroma_sc = batch.get("chroma_hdg_sc")
+        chroma_valid = batch.get("chroma_valid")
+        if chroma_sc is not None and chroma_valid is not None:
+            valid_mask = chroma_valid > 0
+            if valid_mask.any():
+                pred_sc = F.normalize(out["hdg"][:, :2], dim=-1, eps=1e-6)
+                chroma_loss = distill_l2(
+                    pred_sc,
+                    chroma_sc.to(device=dev),
+                    valid_mask,
+                )
+    logs["loss_chroma_hdg"] = float(chroma_loss.detach())
+
     # Normalized weights (sum=1) already embed curriculum via base_stage; multiply losses only.
     total = total + float(weights["seg"]) * seg_loss
     total = total + float(weights["kp"]) * kp_loss
@@ -1110,6 +1136,7 @@ def aquaforge_joint_loss(
     total = total + w_wconf * wake_conf_loss
     total = total + w_dim * dim_loss
     total = total + w_type * type_loss
+    total = total + w_chroma * chroma_loss
 
     w = sw.get("kp", 1.0)
     if w > 0:

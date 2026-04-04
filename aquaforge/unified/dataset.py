@@ -165,6 +165,10 @@ class AquaForgeSample:
     # Hull dimensions in metres from review UI annotation (None = unlabeled)
     dim_length_m: float | None = None
     dim_width_m: float | None = None
+    # Chromatic fringe heading (degrees from north): auto-computed at inference time,
+    # persisted in JSONL extra.  Used as a physics-derived soft teacher for heading.
+    chroma_heading_deg: float | None = None
+    chroma_pnr: float | None = None   # phase-correlation quality (higher = more trustworthy)
 
 
 def iter_aquaforge_samples(
@@ -279,6 +283,15 @@ def iter_aquaforge_samples(
             dim_wid: float | None = float(extra["estimated_width_m"])
         except (KeyError, TypeError, ValueError):
             dim_wid = None
+        # Chromatic fringe heading from JSONL extra (physics-derived teacher)
+        try:
+            chroma_hdg: float | None = float(extra["aquaforge_chroma_heading_deg"])
+        except (KeyError, TypeError, ValueError):
+            chroma_hdg = None
+        try:
+            chroma_pnr_val: float | None = float(extra["aquaforge_chroma_pnr"])
+        except (KeyError, TypeError, ValueError):
+            chroma_pnr_val = None
         yield AquaForgeSample(
             Path(path),
             cx,
@@ -294,6 +307,8 @@ def iter_aquaforge_samples(
             wake_visible=wake_vis,
             dim_length_m=dim_len,
             dim_width_m=dim_wid,
+            chroma_heading_deg=chroma_hdg,
+            chroma_pnr=chroma_pnr_val,
         )
 
 
@@ -386,6 +401,23 @@ def collate_batch(
         device=device,
         dtype=torch.float32,
     )
+    # Chromatic fringe heading: convert degrees → sin/cos for distillation loss
+    ch_vals = [b[16] if len(b) >= 17 else None for b in batch_items]
+    cp_vals = [b[17] if len(b) >= 18 else None for b in batch_items]
+    chroma_sc = []
+    chroma_valid = []
+    for i in range(bsz):
+        hdg_deg = ch_vals[i]
+        pnr = cp_vals[i]
+        if hdg_deg is not None and pnr is not None and float(pnr) >= 2.8:
+            rad = math.radians(float(hdg_deg))
+            chroma_sc.append([math.cos(rad), math.sin(rad)])
+            chroma_valid.append(1.0)
+        else:
+            chroma_sc.append([1.0, 0.0])
+            chroma_valid.append(0.0)
+    chroma_sc_t = torch.tensor(chroma_sc, device=device, dtype=torch.float32)
+    chroma_valid_t = torch.tensor(chroma_valid, device=device, dtype=torch.float32)
     return {
         "imgs": imgs,
         "cls": cls,
@@ -407,6 +439,8 @@ def collate_batch(
         "dim_length_norm": dim_len_t,
         "dim_width_norm": dim_wid_t,
         "dim_mask": dim_mask,
+        "chroma_hdg_sc": chroma_sc_t,    # (B, 2) sin/cos teacher heading from B02/B04 fringe
+        "chroma_valid": chroma_valid_t,  # (B,) 1.0 if PNR-qualified chromatic heading available
     }
 
 
@@ -552,6 +586,8 @@ def build_training_row(
         sample.wake_visible,  # index 13: None | 0.0 | 1.0
         sample.dim_length_m,  # index 14: metres | None
         sample.dim_width_m,   # index 15: metres | None
+        sample.chroma_heading_deg,   # index 16: degrees from north | None
+        sample.chroma_pnr,           # index 17: PNR quality | None
     )
 
 

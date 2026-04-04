@@ -458,3 +458,79 @@ def download_extra_bands_for_tci(
             result[bd.name] = None
 
     return result
+
+
+def download_chroma_bands_for_tci(
+    tci_path: "Path | str",
+    band_names: "list[str]",
+    out_dir: "Path | None" = None,
+    token: str = "",
+) -> dict[str, "Path | None"]:
+    """Download specific 10 m bands (e.g. B02, B04) needed for chromatic velocity.
+
+    Functionally identical to :func:`download_extra_bands_for_tci` but accepts
+    an explicit list of band names and handles 10 m suffix automatically.  Used
+    by the chromatic velocity auto-download background thread.
+
+    Returns a dict ``{band_name: path_or_None}`` for each requested band.
+    """
+    from pathlib import Path as _Path
+
+    tci_p = _Path(tci_path)
+    dest_dir = _Path(out_dir) if out_dir else tci_p.parent
+    result: dict[str, "_Path | None"] = {}
+
+    # Check which are already present
+    missing: list[str] = []
+    for band_name in band_names:
+        suffix = f"{band_name}_10m"
+        for tci_tag in ("_TCI_10m", "_TCI"):
+            if tci_tag in tci_p.name:
+                p = tci_p.parent / tci_p.name.replace(tci_tag, f"_{suffix}", 1)
+                break
+        else:
+            p = tci_p.parent / (tci_p.stem.replace("TCI", suffix) + ".jp2")
+        if p.is_file() and p.stat().st_size > 0:
+            result[band_name] = p
+        else:
+            missing.append(band_name)
+
+    if not missing:
+        return result
+
+    item_id = parse_stac_item_id_from_tci_filename(tci_p.name)
+    if not item_id:
+        for band_name in missing:
+            result[band_name] = None
+        return result
+
+    try:
+        item = stac_get_item_by_id(token, collection_id="sentinel-2-l2a", item_id=item_id)
+    except Exception:
+        for band_name in missing:
+            result[band_name] = None
+        return result
+
+    assets = item.get("assets") or {}
+    for band_name in missing:
+        suffix = f"{band_name}_10m"
+        asset_key = None
+        for candidate in (suffix, band_name):
+            if candidate in assets:
+                asset_key = candidate
+                break
+        if asset_key is None:
+            for k in assets:
+                if k.startswith(band_name):
+                    asset_key = k
+                    break
+        if asset_key is None:
+            result[band_name] = None
+            continue
+        try:
+            dest, _ = download_item_asset(item, asset_key, dest_dir, token, skip_if_exists=True)
+            result[band_name] = dest
+        except Exception:
+            result[band_name] = None
+
+    return result

@@ -44,6 +44,10 @@ class AquaForgeSpotResult:
     vessel_type_logits: list[float] | None = None  # 6-class type logits
     length_norm: float | None = None       # predicted length / chip ground size
     width_norm: float | None = None        # predicted width / chip ground size
+    chroma_speed_ms: float | None = None   # chromatic fringe ground speed (m/s)
+    chroma_speed_kn: float | None = None   # chromatic fringe ground speed (knots)
+    chroma_heading_deg: float | None = None  # chromatic fringe motion heading
+    chroma_pnr: float | None = None        # phase-correlation peak-to-noise ratio
 
 
 def _mask_to_polygon_fullres(
@@ -842,6 +846,11 @@ def _aquaforge_spot_to_overlay_dict(
         "aquaforge_vessel_type_logits": None,     # 6-class type logits
         "aquaforge_predicted_length_m": None,     # dimension-head predicted length
         "aquaforge_predicted_width_m": None,      # dimension-head predicted width
+        "aquaforge_chroma_speed_ms": None,        # chromatic fringe speed (m/s)
+        "aquaforge_chroma_speed_kn": None,        # chromatic fringe speed (knots)
+        "aquaforge_chroma_heading_deg": None,     # chromatic fringe motion heading
+        "aquaforge_chroma_pnr": None,             # phase-correlation confidence
+        "aquaforge_chroma_agrees_with_model": None,  # heading cross-validation flag
         "aquaforge_keypoints_xy_conf_crop": None,
         "aquaforge_warnings": [],
         "aquaforge_hull_polygon_fullres": None,
@@ -908,6 +917,37 @@ def _aquaforge_spot_to_overlay_dict(
         chip_ground_m = float(max(ar.chip_w, ar.chip_h)) * 10.0  # 10 m/px for Sentinel-2
         out["aquaforge_predicted_length_m"] = float(ar.length_norm * chip_ground_m)
         out["aquaforge_predicted_width_m"] = float(ar.width_norm * chip_ground_m)
+
+    # Chromatic fringe velocity: estimate vessel speed and motion heading from
+    # sub-pixel shift between S-2 B02 and B04 bands (~1 s apart).
+    # Runs in-process — fast (~5 ms) when bands are cached on disk; silently
+    # skipped when B02/B04 not yet downloaded.
+    try:
+        from aquaforge.chromatic_velocity import (
+            estimate_chroma_velocity,
+            chroma_agrees_with_model,
+        )
+        chip_half_cv = max(24, min(48, (int(ar.chip_w) + int(ar.chip_h)) // 4))
+        cv_result = estimate_chroma_velocity(
+            tci_path,
+            cx,
+            cy,
+            chip_half=chip_half_cv,
+            background_half=chip_half_cv * 3,
+        )
+        if cv_result is not None:
+            out["aquaforge_chroma_speed_ms"] = cv_result.speed_ms
+            out["aquaforge_chroma_speed_kn"] = cv_result.speed_kn
+            out["aquaforge_chroma_heading_deg"] = cv_result.heading_deg
+            out["aquaforge_chroma_pnr"] = cv_result.pnr
+            fused_hdg = out.get("aquaforge_heading_fused_deg")
+            if fused_hdg is not None:
+                agrees = chroma_agrees_with_model(
+                    cv_result, float(fused_hdg), tolerance_deg=45.0
+                )
+                out["aquaforge_chroma_agrees_with_model"] = agrees
+    except Exception:
+        pass
 
     # Dependent overlay chain: keypoints require hull → heading requires keypoints.
     # If no hull polygon was decoded, suppress all downstream overlays.

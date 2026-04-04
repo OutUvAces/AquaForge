@@ -1733,6 +1733,19 @@ def main() -> None:
                                         tci_loaded_sidebar, token=_tok
                                     )
                                 _ok_count = sum(1 for v in _res.values() if v is not None)
+                                # Also download B02/B04 for chromatic velocity
+                                try:
+                                    from aquaforge.s2_download import download_chroma_bands_for_tci
+                                    from aquaforge.chromatic_velocity import chroma_band_paths_for_download
+                                    _cv_missing = chroma_band_paths_for_download(Path(tci_loaded_sidebar))
+                                    if _cv_missing:
+                                        _cv_bnames = [s.replace("_10m", "") for s in _cv_missing]
+                                        _cv_res = download_chroma_bands_for_tci(
+                                            tci_loaded_sidebar, _cv_bnames, token=_tok
+                                        )
+                                        _ok_count += sum(1 for v in _cv_res.values() if v is not None)
+                                except Exception:
+                                    pass
                                 st.success(
                                     f"Downloaded {_ok_count}/{N_EXTRA_BANDS} extra bands. "
                                     "Refresh the page to use them."
@@ -1827,12 +1840,21 @@ def main() -> None:
                 st.session_state[_band_dl_key] = _band_pending
                 def _auto_download_bands(paths=list(_scenes_needing_bands)):
                     try:
-                        from aquaforge.s2_download import download_extra_bands_for_tci as _dl_bands
+                        from aquaforge.s2_download import download_extra_bands_for_tci as _dl_bands, download_chroma_bands_for_tci as _dl_chroma
                         from aquaforge.cdse import get_access_token as _get_tok
                         _tok = _get_tok()
                         for _p in paths:
                             try:
                                 _dl_bands(Path(_p), token=_tok)
+                            except Exception:
+                                pass
+                            # Also download B02/B04 for chromatic velocity
+                            try:
+                                from aquaforge.chromatic_velocity import chroma_band_paths_for_download
+                                _missing_cv = chroma_band_paths_for_download(Path(_p))
+                                if _missing_cv:
+                                    _cv_bands = [s.replace("_10m", "") for s in _missing_cv]
+                                    _dl_chroma(Path(_p), _cv_bands, token=_tok)
                             except Exception:
                                 pass
                     except Exception:
@@ -2450,6 +2472,24 @@ def _render_spot_measurements_panel(
             st.caption(
                 f"Shown heading: **{int(round(float(af_spot['aquaforge_heading_fused_deg'])))}°**"
             )
+        # Chromatic fringe velocity — from B02/B04 band temporal offset
+        _cv_spd = af_spot.get("aquaforge_chroma_speed_kn")
+        _cv_hdg = af_spot.get("aquaforge_chroma_heading_deg")
+        _cv_pnr = af_spot.get("aquaforge_chroma_pnr")
+        _cv_agree = af_spot.get("aquaforge_chroma_agrees_with_model")
+        if _cv_spd is not None and _cv_hdg is not None:
+            _agree_icon = ""
+            if _cv_agree is True:
+                _agree_icon = " — heading confirmed"
+            elif _cv_agree is False:
+                _agree_icon = " — heading conflict"
+            st.caption(
+                f"Chromatic velocity: **{float(_cv_spd):.1f} kn** "
+                f"| motion heading **{int(round(float(_cv_hdg)))}°** "
+                f"| PNR **{float(_cv_pnr):.1f}**{_agree_icon}"
+            )
+        elif af_spot.get("aquaforge_chroma_speed_ms") is None:
+            st.caption("Chromatic velocity: *B02/B04 bands not yet downloaded*")
         sw = af_spot.get("aquaforge_warnings") or []
         if isinstance(sw, list):
             sw = [x for x in sw if str(x) != "aquaforge_weights_missing"]
@@ -3912,6 +3952,10 @@ def _commit_review_label(
             "aquaforge_landmark_stern_confidence"
         ),
         aquaforge_landmark_heading_trust=af_spot_save.get("aquaforge_landmark_heading_trust"),
+        aquaforge_chroma_speed_kn=af_spot_save.get("aquaforge_chroma_speed_kn"),
+        aquaforge_chroma_heading_deg=af_spot_save.get("aquaforge_chroma_heading_deg"),
+        aquaforge_chroma_pnr=af_spot_save.get("aquaforge_chroma_pnr"),
+        aquaforge_chroma_agrees_with_model=af_spot_save.get("aquaforge_chroma_agrees_with_model"),
     )
     append_review(
         labels_path,

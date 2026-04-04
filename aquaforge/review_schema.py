@@ -46,6 +46,12 @@ EXTRA_AQUAFORGE_LANDMARK_BOW_CONF = "aquaforge_landmark_bow_confidence"
 EXTRA_AQUAFORGE_LANDMARK_STERN_CONF = "aquaforge_landmark_stern_confidence"
 EXTRA_AQUAFORGE_LANDMARK_HEADING_TRUST = "aquaforge_landmark_heading_trust"
 
+# Chromatic fringe velocity (B02/B04 phase correlation, computed at inference time).
+EXTRA_CHROMA_SPEED_KN = "aquaforge_chroma_speed_kn"
+EXTRA_CHROMA_HEADING_DEG = "aquaforge_chroma_heading_deg"
+EXTRA_CHROMA_PNR = "aquaforge_chroma_pnr"
+EXTRA_CHROMA_AGREES_WITH_MODEL = "aquaforge_chroma_agrees_with_model"
+
 # Optional manual boost for AquaForge training sampler (see aquaforge.unified.distill).
 EXTRA_AF_TRAINING_PRIORITY = "af_training_priority"
 
@@ -69,6 +75,10 @@ def enrich_extra_with_predictions(
     aquaforge_landmark_bow_confidence: float | None = None,
     aquaforge_landmark_stern_confidence: float | None = None,
     aquaforge_landmark_heading_trust: float | None = None,
+    aquaforge_chroma_speed_kn: float | None = None,
+    aquaforge_chroma_heading_deg: float | None = None,
+    aquaforge_chroma_pnr: float | None = None,
+    aquaforge_chroma_agrees_with_model: bool | None = None,
 ) -> dict[str, Any]:
     """Merge AquaForge scores into ``extra`` for training analysis (what the UI believed vs label)."""
     out = dict(extra or {})
@@ -106,6 +116,14 @@ def enrich_extra_with_predictions(
         out[EXTRA_AQUAFORGE_LANDMARK_STERN_CONF] = float(aquaforge_landmark_stern_confidence)
     if aquaforge_landmark_heading_trust is not None:
         out[EXTRA_AQUAFORGE_LANDMARK_HEADING_TRUST] = float(aquaforge_landmark_heading_trust)
+    if aquaforge_chroma_speed_kn is not None:
+        out[EXTRA_CHROMA_SPEED_KN] = float(aquaforge_chroma_speed_kn)
+    if aquaforge_chroma_heading_deg is not None:
+        out[EXTRA_CHROMA_HEADING_DEG] = float(aquaforge_chroma_heading_deg)
+    if aquaforge_chroma_pnr is not None:
+        out[EXTRA_CHROMA_PNR] = float(aquaforge_chroma_pnr)
+    if aquaforge_chroma_agrees_with_model is not None:
+        out[EXTRA_CHROMA_AGREES_WITH_MODEL] = bool(aquaforge_chroma_agrees_with_model)
     return out
 
 
