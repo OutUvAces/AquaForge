@@ -1587,6 +1587,23 @@ def main() -> None:
                 _ovr_t = _ovr_threading.Thread(target=_auto_build_all, daemon=True)
                 _ovr_t.start()
 
+            # Background land mask build: rasterise NE 110m land polygons for
+            # every image that doesn't yet have a .land.npy sidecar.
+            from aquaforge.land_mask import build_land_mask_background as _build_land_mask
+            _scenes_needing_lm = [
+                p for p in tci_list
+                if not Path(str(p) + ".land.npy").exists()
+            ]
+            _auto_lm_key = "_vd_lm_autobuild_queue"
+            _lm_pending = frozenset(str(p) for p in _scenes_needing_lm)
+            if _lm_pending and st.session_state.get(_auto_lm_key) != _lm_pending:
+                st.session_state[_auto_lm_key] = _lm_pending
+                def _auto_build_landmasks(paths=list(_scenes_needing_lm), root=ROOT):
+                    for _p in paths:
+                        _build_land_mask(_p, root)
+                _lm_t = _ovr_threading.Thread(target=_auto_build_landmasks, daemon=True)
+                _lm_t.start()
+
     if not tci_list:
         st.info("Add a satellite image: open **← Advanced → Download**, or drop a file under **data/**.")
         st.caption(f"Labels: `{labels_path}`")
@@ -1653,18 +1670,29 @@ def main() -> None:
                     _img_desc = f"{_img_w:,} × {_img_h:,} px  ({_n_tiles:,} tiles, {_tile}px each)"
                 except Exception:
                     _img_desc = str(tci_path.name)
+                # --- Check land mask status (built by background thread) ---
+                from aquaforge.land_mask import get_land_mask as _get_land_mask
+                _land_mask_cache = Path(str(tci_path) + ".land.npy")
+                if _land_mask_cache.is_file():
+                    _lm_note = "🌍 Land mask active — skipping land tiles"
+                else:
+                    _lm_note = "🌍 Building land mask in background (first scan includes all tiles)"
                 with st.status(
                     "Scanning image for vessels…",
                     expanded=True,
                 ) as _det_status:
                     st.write(f"📂 Image: `{tci_path.name}`")
                     st.write(f"🗺️ Grid: {_img_desc}")
+                    st.write(_lm_note)
                     st.write(
                         f"⚙️ Running AquaForge model on each tile "
                         f"(conf ≥ {det_cfg.aquaforge.conf_threshold:.2f}, "
                         f"proposal floor {det_cfg.aquaforge.tiled_min_proposal_confidence:.2f})…"
                     )
                     raw, meta = run_aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
+                    _skipped = meta.get("land_tiles_skipped", 0)
+                    if _skipped:
+                        st.write(f"🌍 Land masking skipped **{_skipped:,}** land tiles")
                     if meta.get("error") == "aquaforge_weights_missing":
                         try:
                             _af_rel = expected_aquaforge_checkpoint_path(
