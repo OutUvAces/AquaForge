@@ -1085,20 +1085,22 @@ def _training_is_active(project_root: Path) -> tuple[bool, int | None]:
 
 def _render_training_progress_panel(project_root: Path) -> None:
     """
-    Show a live training progress panel whenever a training job is active or a
-    recent log exists.  Called from ``main()`` at every rerun.
+    Show a live training progress panel whenever a training job is active.
+    Called from ``main()`` at every rerun.  The inner fragment polls every 4 s
+    without touching the rest of the page (no full-page reload).
     """
-    import re as _re
-
-    log_path = project_root / "data" / "train_log.txt"
-    is_active, pid = _training_is_active(project_root)
-
-    # Only show while training is actively running — never on startup or after completion.
+    is_active, _ = _training_is_active(project_root)
     if not is_active:
         return
 
-    st.markdown("---")
-    with st.container():
+    @st.fragment(run_every="4s")
+    def _progress_fragment() -> None:
+        import re as _re
+
+        log_path = project_root / "data" / "train_log.txt"
+        is_active2, pid2 = _training_is_active(project_root)
+
+        st.markdown("---")
         _hdr_col, _stop_col = st.columns([5, 1])
         with _hdr_col:
             st.markdown("#### Training in progress…")
@@ -1108,13 +1110,16 @@ def _render_training_progress_panel(project_root: Path) -> None:
                 _stop_training(project_root)
                 st.rerun()
 
+        if not is_active2:
+            st.info("Training finished.")
+            return
+
         if log_path.is_file():
             try:
                 lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 lines = []
 
-            # Parse epoch progress
             epoch_lines = [l for l in lines if l.startswith("epoch ") and "score=" in l]
             if epoch_lines:
                 last = epoch_lines[-1]
@@ -1122,12 +1127,9 @@ def _render_training_progress_panel(project_root: Path) -> None:
                 m_sc = _re.search(r"score=([\d.]+)/100", last)
                 m_ca = _re.search(r"cls_acc=([\d.]+)%", last)
                 m_lo = _re.search(r"loss=([\d.]+)", last)
-
                 if m_ep:
                     ep_cur, ep_tot = int(m_ep.group(1)), int(m_ep.group(2))
-                    st.progress(ep_cur / ep_tot,
-                                text=f"Epoch {ep_cur} / {ep_tot}")
-
+                    st.progress(ep_cur / ep_tot, text=f"Epoch {ep_cur} / {ep_tot}")
                 _c1, _c2, _c3 = st.columns(3)
                 if m_sc:
                     _c1.metric("Score", f"{float(m_sc.group(1)):.1f} / 100")
@@ -1136,17 +1138,10 @@ def _render_training_progress_panel(project_root: Path) -> None:
                 if m_lo:
                     _c3.metric("Loss", f"{float(m_lo.group(1)):.4f}")
 
-            # Show last 18 log lines in a code block
             tail = lines[-18:] if len(lines) > 18 else lines
             st.code("\n".join(tail), language="text")
 
-        # Auto-rerun every 4 s — use a JS timer so the main thread is never
-        # blocked (time.sleep blocks Streamlit's WebSocket heartbeat and causes
-        # the browser to report a "connection error").
-        st.components.v1.html(
-            "<script>setTimeout(function(){window.parent.location.reload();},4000);</script>",
-            height=0,
-        )
+    _progress_fragment()
 
 
 def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None:
