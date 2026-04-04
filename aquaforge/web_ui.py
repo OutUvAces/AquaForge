@@ -1028,18 +1028,26 @@ def _subprocess_train_aquaforge(
         _child_env["PROCESSOR_ARCHITECTURE"] = "AMD64"
 
     with open(log_path, "w", encoding="utf-8", errors="replace") as _lf:
+        # On Windows use CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW so the
+        # training process is in its own signal group and has no console.
+        # This prevents CTRL_C / CTRL_BREAK events fired by Streamlit's parent
+        # process (e.g. on browser reconnects) from propagating into the child.
+        # start_new_session=True maps to DETACHED_PROCESS on Windows, which is
+        # NOT sufficient — it does not block CTRL_C propagation.
+        if sys.platform == "win32":
+            _creation_flags = (
+                subprocess.CREATE_NEW_PROCESS_GROUP  # new signal group
+                | subprocess.CREATE_NO_WINDOW        # no console → no console signals
+            )
+        else:
+            _creation_flags = 0
         proc = subprocess.Popen(
             cmd,
             cwd=str(project_root.resolve()),
             stdout=_lf,
             stderr=subprocess.STDOUT,
             env=_child_env,
-            # Isolate the training process into its own process group so that
-            # CTRL_C / CTRL_BREAK signals from the Streamlit parent (e.g. on
-            # browser disconnect) are not propagated into the training child.
-            # On Windows this sets CREATE_NEW_PROCESS_GROUP; on POSIX it calls
-            # os.setsid() in the child, achieving the same isolation.
-            start_new_session=True,
+            creationflags=_creation_flags,
         )
     pid_file.write_text(str(proc.pid))
 
@@ -1081,7 +1089,6 @@ def _render_training_progress_panel(project_root: Path) -> None:
     recent log exists.  Called from ``main()`` at every rerun.
     """
     import re as _re
-    import time as _time
 
     log_path = project_root / "data" / "train_log.txt"
     is_active, pid = _training_is_active(project_root)
@@ -1133,9 +1140,13 @@ def _render_training_progress_panel(project_root: Path) -> None:
             tail = lines[-18:] if len(lines) > 18 else lines
             st.code("\n".join(tail), language="text")
 
-        # Auto-rerun every 4 s to poll for new output
-        _time.sleep(4)
-        st.rerun()
+        # Auto-rerun every 4 s — use a JS timer so the main thread is never
+        # blocked (time.sleep blocks Streamlit's WebSocket heartbeat and causes
+        # the browser to report a "connection error").
+        st.components.v1.html(
+            "<script>setTimeout(function(){window.parent.location.reload();},4000);</script>",
+            height=0,
+        )
 
 
 def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None:
