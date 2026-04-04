@@ -1140,7 +1140,7 @@ def _render_training_progress_panel(project_root: Path) -> None:
 
             tail = lines[-18:] if len(lines) > 18 else lines
             st.markdown(
-                "<pre style='white-space:pre-wrap;word-break:break-all;"
+                "<pre style='white-space:pre-wrap;"
                 "font-size:0.78rem;line-height:1.4;max-height:320px;"
                 "overflow-y:auto;background:#0e1117;color:#fafafa;"
                 "padding:0.6rem;border-radius:6px;'>"
