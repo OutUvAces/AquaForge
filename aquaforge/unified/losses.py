@@ -1040,7 +1040,7 @@ def aquaforge_joint_loss(
         and gt["wake_dir"] is not None
     ):
         wake_loss = wake_direction_loss(
-            pred["wake_dir"],
+            pred["wake_dir"][:, :2],       # direction only — col 2 is conf_logit, handled separately
             gt["wake_dir"],
             pred["heading_sin_cos"],
             wake_valid=batch["wake_valid"] > 0,
