@@ -2814,6 +2814,34 @@ def _render_review_deck(
         except Exception:
             pass
 
+    # --- Step 2.5: Expand review chip so the full hull boundary + structures are visible ---
+    # Collect all annotated full-res coordinates from the inference result.
+    _fit_pts_x: list[float] = []
+    _fit_pts_y: list[float] = []
+    _hull_fit = af_spot.get("aquaforge_hull_polygon_fullres") if af_spot else None
+    if isinstance(_hull_fit, list):
+        for _p in _hull_fit:
+            if isinstance(_p, (list, tuple)) and len(_p) >= 2:
+                _fit_pts_x.append(float(_p[0]))
+                _fit_pts_y.append(float(_p[1]))
+    _kp_fit = af_spot.get("aquaforge_landmarks_xy_fullres") if af_spot else None
+    if isinstance(_kp_fit, list):
+        for _p in _kp_fit:
+            if isinstance(_p, (list, tuple)) and len(_p) >= 2:
+                _fit_pts_x.append(float(_p[0]))
+                _fit_pts_y.append(float(_p[1]))
+    if _fit_pts_x and _fit_pts_y:
+        _max_dx = max(abs(x - display_cx) for x in _fit_pts_x)
+        _max_dy = max(abs(y - display_cy) for y in _fit_pts_y)
+        _required_half = max(_max_dx, _max_dy)
+        # 25% border so no feature touches the edge; minimum 50 m (≈5 px at 10 m/px).
+        _border_px = max(5, int(round(50.0 / max(gavg, 1.0))))
+        _needed_size = 2 * (int(math.ceil(_required_half)) + _border_px)
+        # Never shrink below the default window; cap at 5 000 m to guard against
+        # erroneous outlier predictions blowing out the view.
+        _max_chip_px = max(spot_px_read, int(round(5000.0 / max(gavg, 1.0))))
+        spot_px_read = min(max(spot_px_read, _needed_size), _max_chip_px)
+
     # --- Step 3: Read JP2 chip — use module-level cache to avoid re-reading on every toggle ---
     _chip_cache_key = (str(tci_p.resolve()), round(display_cx, 2), round(display_cy, 2), spot_px_read, locator_px, mt)
     if _chip_cache_key not in _CHIP_READ_CACHE:
