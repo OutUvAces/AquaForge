@@ -97,7 +97,7 @@ def main() -> None:
         default=None,
         help="Labels JSONL (default: <root>/data/labels/ship_reviews.jsonl)",
     )
-    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--imgsz", type=int, default=512)
@@ -107,6 +107,11 @@ def main() -> None:
         type=Path,
         default=None,
         help="Checkpoint path (default: data/models/aquaforge/aquaforge.pt)",
+    )
+    ap.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Start training from random weights even if a checkpoint already exists.",
     )
     ap.add_argument(
         "--no-dynamic-balance",
@@ -356,6 +361,29 @@ def main() -> None:
         print(f"  spectral band check skipped ({_e}); using in_channels=3", flush=True)
 
     model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS, in_channels=_in_channels).to(device)
+
+    # ── Resume from existing checkpoint (default behaviour) ───────────────
+    # Unless --no-resume is passed, load weights from the existing checkpoint
+    # so each training run fine-tunes the current model rather than starting
+    # from scratch with random weights.
+    _resumed = False
+    if not getattr(args, "no_resume", False) and ckpt_path.is_file():
+        try:
+            from aquaforge.unified.model import load_checkpoint as _load_ckpt
+            _ckpt_model, _ckpt_meta = _load_ckpt(
+                str(ckpt_path),
+                device=str(device),
+                in_channels=_in_channels,
+            )
+            model.load_state_dict(_ckpt_model.state_dict(), strict=False)
+            _resumed = True
+            print(f"  resumed from checkpoint: {ckpt_path}", flush=True)
+        except Exception as _re:
+            print(f"  checkpoint load skipped ({_re}); starting from random weights", flush=True)
+    elif getattr(args, "no_resume", False):
+        print("  --no-resume: starting from random weights", flush=True)
+    else:
+        print("  no existing checkpoint — starting from random weights", flush=True)
 
     # ── torch.compile (PyTorch 2.0+) ──────────────────────────────────────
     # Compiles the model graph with Triton kernels when available; gives
