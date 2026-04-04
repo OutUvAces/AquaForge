@@ -1519,72 +1519,20 @@ def main() -> None:
                     )
 
             if tci_loaded_sidebar:
-                _ovr_path = Path(tci_loaded_sidebar + ".ovr")
                 _cog_path = Path(
                     Path(tci_loaded_sidebar).with_name(
                         Path(tci_loaded_sidebar).stem + "_cog.tif"
                     )
                 )
-                _ovr_exists = _ovr_path.exists()
+                _ovr_path = Path(tci_loaded_sidebar + ".ovr")
                 _cog_exists = _cog_path.exists()
-                _fully_optimized = _cog_exists  # COG is the best state
-                with st.expander("⚡ Optimize scene (fast reads)", expanded=not _cog_exists):
-                    if _cog_exists:
-                        st.success(
-                            f"Scene fully optimized — COG GeoTIFF active. "
-                            f"All JP2 reads replaced with fast tiled GeoTIFF. "
-                            f"(`{_cog_path.name}`)"
-                        )
-                    elif _ovr_exists:
-                        st.info(
-                            "Overview file built (locator reads fast). "
-                            "Convert to COG GeoTIFF for full-speed inference chip reads too."
-                        )
-                    else:
-                        st.warning(
-                            "Scene not optimized. First-chip load will be slow (1–5 min). "
-                            "Build overviews for a quick win, or convert to COG for the full fix."
-                        )
-
-                    if not _cog_exists:
-                        _c1, _c2 = st.columns(2)
-                        with _c1:
-                            if st.button(
-                                "🚀 Convert to COG GeoTIFF",
-                                key="vd_build_cog",
-                                type="primary",
-                                help="One-time 2–5 min conversion. Makes ALL reads (inference chip, review chip, locator) fast forever.",
-                            ):
-                                with st.spinner(
-                                    "Converting to Cloud-Optimized GeoTIFF — takes 2–5 min once…"
-                                ):
-                                    _res = convert_jp2_to_cog(tci_loaded_sidebar)
-                                if _res["status"] in ("built", "already_exists"):
-                                    st.success(f"COG written: `{_cog_path.name}`")
-                                    _CHIP_READ_CACHE.clear()
-                                    st.session_state["_vd_cog_autoswitch"] = str(_cog_path)
-                                    st.rerun()
-                                else:
-                                    st.error(
-                                        f"Conversion failed: {_res.get('error', 'unknown error')}"
-                                    )
-                        with _c2:
-                            if not _ovr_exists:
-                                if st.button(
-                                    "Build overviews only",
-                                    key="vd_build_ovr",
-                                    help="Faster to run (~1 min). Speeds up locator but not inference chips.",
-                                ):
-                                    with st.spinner("Building GDAL overviews…"):
-                                        _res2 = build_jp2_overviews(tci_loaded_sidebar)
-                                    if _res2["status"] in ("built", "already_exists"):
-                                        st.success("Overviews written.")
-                                        _CHIP_READ_CACHE.clear()
-                                        st.rerun()
-                                    else:
-                                        st.error(
-                                            f"Failed: {_res2.get('error', 'unknown error')}"
-                                        )
+                _ovr_exists = _ovr_path.exists()
+                if _cog_exists:
+                    st.caption("⚡ Scene optimized (COG active — all reads fast)")
+                elif _ovr_exists:
+                    st.caption("⚙️ Optimizing scene in background (overviews ready, COG building…)")
+                else:
+                    st.caption("⚙️ Optimizing scene in background (first chip may be slow)…")
 
             # Auto-convert ALL scenes to COG GeoTIFF in the background.
             # COG is the definitive fix: it speeds up inference chips (640 px),
