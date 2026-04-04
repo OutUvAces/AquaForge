@@ -1559,22 +1559,28 @@ def main() -> None:
                                     f"```\ngdaladdo -ro -r average \"{tci_loaded_sidebar}\" 2 4 8 16 32\n```"
                                 )
 
-            # Auto-build overviews in the background when a scene is first loaded
-            # (only if overviews are missing and no build is already in progress).
-            if tci_loaded_sidebar:
-                _auto_ovr = Path(tci_loaded_sidebar + ".ovr")
-                _auto_key = f"_vd_ovr_autobuild_{tci_loaded_sidebar}"
-                if not _auto_ovr.exists() and not st.session_state.get(_auto_key):
-                    st.session_state[_auto_key] = True
-                    import threading as _ovr_threading
-                    def _auto_build_ovr(p=tci_loaded_sidebar):
+            # Auto-build overviews for ALL scenes that are missing a .ovr file.
+            # A single daemon thread processes them sequentially so builds don't
+            # compete for CPU.  Session-state key prevents re-spawning on every rerun
+            # (the ovr.exists() check in build_jp2_overviews handles file-level dedup).
+            _scenes_needing_ovr = [
+                p for p in tci_list
+                if not Path(str(p) + ".ovr").exists()
+            ]
+            _auto_queue_key = "_vd_ovr_autobuild_queue"
+            _pending = frozenset(str(p) for p in _scenes_needing_ovr)
+            if _pending and st.session_state.get(_auto_queue_key) != _pending:
+                st.session_state[_auto_queue_key] = _pending
+                import threading as _ovr_threading
+                def _auto_build_all(paths=list(_scenes_needing_ovr)):
+                    for _p in paths:
                         try:
-                            build_jp2_overviews(p)
-                            _CHIP_READ_CACHE.clear()
+                            build_jp2_overviews(_p)
                         except Exception:
                             pass
-                    _ovr_t = _ovr_threading.Thread(target=_auto_build_ovr, daemon=True)
-                    _ovr_t.start()
+                    _CHIP_READ_CACHE.clear()
+                _ovr_t = _ovr_threading.Thread(target=_auto_build_all, daemon=True)
+                _ovr_t.start()
 
     if not tci_list:
         st.info("Add a satellite image: open **← Advanced → Download**, or drop a file under **data/**.")
