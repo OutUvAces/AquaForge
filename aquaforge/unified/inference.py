@@ -40,6 +40,10 @@ class AquaForgeSpotResult:
     heading_direct_deg: float | None
     heading_direct_conf: float
     wake_dxdy: tuple[float, float] | None  # normalized auxiliary (chip space)
+    wake_conf: float = 0.0                 # P(vessel is underway / wake present)
+    vessel_type_logits: list[float] | None = None  # 6-class type logits
+    length_norm: float | None = None       # predicted length / chip ground size
+    width_norm: float | None = None        # predicted width / chip ground size
 
 
 def _mask_to_polygon_fullres(
@@ -363,7 +367,8 @@ class AquaForgePredictor:
         return want
 
     def _network_forward_numpy_batch(self, arr_bchw: np.ndarray) -> tuple[
-        np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None,
+        np.ndarray | None, np.ndarray | None,
     ]:
         """Run AquaForge for batch ``arr_bchw`` float32 NCHW [0,1]. Returns numpy outputs."""
         import torch
@@ -373,7 +378,9 @@ class AquaForgePredictor:
             outs = self._sess.run(None, {in_name: arr_bchw})
             cls_l, seg, kp, hdg, wake = outs[0], outs[1], outs[2], outs[3], outs[4]
             kp_hm = np.asarray(outs[5], dtype=np.float32) if len(outs) > 5 else None
-            return cls_l, seg, kp, hdg, wake, kp_hm
+            type_l = np.asarray(outs[6], dtype=np.float32) if len(outs) > 6 else None
+            dim_p = np.asarray(outs[7], dtype=np.float32) if len(outs) > 7 else None
+            return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p
         if self._torch is None:
             raise RuntimeError("no aquaforge runtime")
         x = torch.from_numpy(arr_bchw.astype(np.float32))
@@ -382,22 +389,15 @@ class AquaForgePredictor:
         self._torch.eval()
         with torch.no_grad():
             raw = self._torch(x)
-            cls_l, seg, kp, hdg, wake, kp_hm_t = (
-                raw[0],
-                raw[1],
-                raw[2],
-                raw[3],
-                raw[4],
-                raw[5],
-            )
-        return (
-            cls_l.cpu().numpy(),
-            seg.cpu().numpy(),
-            kp.cpu().numpy(),
-            hdg.cpu().numpy(),
-            wake.cpu().numpy(),
-            kp_hm_t.cpu().numpy(),
-        )
+        cls_l = raw[0].cpu().numpy()
+        seg = raw[1].cpu().numpy()
+        kp = raw[2].cpu().numpy()
+        hdg = raw[3].cpu().numpy()
+        wake = raw[4].cpu().numpy()
+        kp_hm = raw[5].cpu().numpy() if len(raw) > 5 else None
+        type_l = raw[6].cpu().numpy() if len(raw) > 6 else None
+        dim_p = raw[7].cpu().numpy() if len(raw) > 7 else None
+        return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p
 
     def _decode_batch_index(
         self,
@@ -414,6 +414,8 @@ class AquaForgePredictor:
         ch: int,
         *,
         proposal_floor: float | None,
+        type_l: np.ndarray | None = None,
+        dim_p: np.ndarray | None = None,
     ) -> AquaForgeSpotResult | None:
         """Decode one sample from batched raw outputs."""
         imgsz = int(self._af.imgsz)
@@ -472,6 +474,18 @@ class AquaForgePredictor:
         w = np.asarray(wake[bi]).reshape(-1)
         wx, wy = float(w[0]), float(w[1]) if len(w) > 1 else 0.0
         wn = max(1e-6, math.hypot(wx, wy))
+        wake_conf_val = float(1.0 / (1.0 + math.exp(-float(w[2])))) if len(w) > 2 else 0.0
+
+        # Vessel type and dimension heads (may be None for older models)
+        type_logits_list = None
+        if type_l is not None:
+            type_logits_list = [float(v) for v in np.asarray(type_l[bi]).reshape(-1)[:6]]
+        length_norm = width_norm = None
+        if dim_p is not None:
+            dp = np.asarray(dim_p[bi]).reshape(-1)
+            if len(dp) >= 2:
+                length_norm = float(dp[0])
+                width_norm = float(dp[1])
 
         return AquaForgeSpotResult(
             confidence=p_vessel,
@@ -484,6 +498,10 @@ class AquaForgePredictor:
             heading_direct_deg=h_deg,
             heading_direct_conf=hconf,
             wake_dxdy=(wx / wn, wy / wn),
+            wake_conf=wake_conf_val,
+            vessel_type_logits=type_logits_list,
+            length_norm=length_norm,
+            width_norm=width_norm,
         )
 
     def _forward_bgr_minibatch(
@@ -521,7 +539,7 @@ class AquaForgePredictor:
                 extra = load_extra_bands_chip(tci_path, cx_chip, cy_chip, half, imgsz)
                 if extra is not None:
                     arrs[i, 3:3 + extra.shape[0]] = extra
-        cls_l, seg, kp, hdg, wake, kp_hm = self._network_forward_numpy_batch(arrs)
+        cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p = self._network_forward_numpy_batch(arrs)
         out: list[AquaForgeSpotResult | None] = []
         for i in range(batch):
             bgr, c0, r0, cw, ch = meta[i]
@@ -539,6 +557,8 @@ class AquaForgePredictor:
                     cw,
                     ch,
                     proposal_floor=proposal_floor,
+                    type_l=type_l,
+                    dim_p=dim_p,
                 )
             )
         return out
@@ -817,6 +837,11 @@ def _aquaforge_spot_to_overlay_dict(
         "aquaforge_bow_stern_segment_crop": None,
         "aquaforge_wake_segment_crop": None,
         "aquaforge_wake_heading_confidence": None,
+        "aquaforge_wake_confidence": None,        # P(vessel is underway)
+        "aquaforge_is_underway": None,            # bool flag (wake_conf >= 0.5)
+        "aquaforge_vessel_type_logits": None,     # 6-class type logits
+        "aquaforge_predicted_length_m": None,     # dimension-head predicted length
+        "aquaforge_predicted_width_m": None,      # dimension-head predicted width
         "aquaforge_keypoints_xy_conf_crop": None,
         "aquaforge_warnings": [],
         "aquaforge_hull_polygon_fullres": None,
@@ -849,6 +874,13 @@ def _aquaforge_spot_to_overlay_dict(
     out["aquaforge_confidence"] = float(ar.confidence)
     out["aquaforge_heading_direct_deg"] = ar.heading_direct_deg
 
+    # Wake confidence and is_underway flag
+    out["aquaforge_wake_confidence"] = float(ar.wake_conf)
+    out["aquaforge_is_underway"] = bool(ar.wake_conf >= 0.5)
+
+    # Vessel type logits (may be None for older models without the type head)
+    out["aquaforge_vessel_type_logits"] = ar.vessel_type_logits
+
     ic0 = int(ar.chip_col_off)
     ir0 = int(ar.chip_row_off)
     _ = spot_col_off, spot_row_off
@@ -870,10 +902,22 @@ def _aquaforge_spot_to_overlay_dict(
             out["aquaforge_length_m"] = float(lm)
             out["aquaforge_width_m"] = float(wm)
             out["aquaforge_aspect_ratio"] = float(ar_)
+    # Dimension head predictions (model-predicted; use hull polygon dims as authoritative when available)
+    if ar.length_norm is not None and ar.width_norm is not None:
+        # Convert normalised [0,1] predictions to meters using chip ground size
+        chip_ground_m = float(max(ar.chip_w, ar.chip_h)) * 10.0  # 10 m/px for Sentinel-2
+        out["aquaforge_predicted_length_m"] = float(ar.length_norm * chip_ground_m)
+        out["aquaforge_predicted_width_m"] = float(ar.width_norm * chip_ground_m)
 
-    kp = _landmark_points_from_spot_result(ar)
+    # Dependent overlay chain: keypoints require hull → heading requires keypoints.
+    # If no hull polygon was decoded, suppress all downstream overlays.
+    _hull_present = poly_crop is not None and len(poly_crop) >= 3
+
+    kp = None
+    if _hull_present:
+        kp = _landmark_points_from_spot_result(ar)
     out["aquaforge_keypoints_json"] = landmarks_to_jsonable(kp)
-    if ar.landmarks_fullres and len(ar.landmarks_fullres) > 0:
+    if _hull_present and ar.landmarks_fullres and len(ar.landmarks_fullres) > 0:
         out["aquaforge_landmarks_xy_fullres"] = [
             [float(x), float(y), float(c)] for x, y, c in ar.landmarks_fullres
         ]
@@ -920,16 +964,21 @@ def _aquaforge_spot_to_overlay_dict(
                 [float(stern[0]) - float(ic0), float(stern[1]) - float(ir0)],
             ]
 
+    # Heading is only computed when keypoints with sufficient confidence exist.
+    # No keypoints (or hull absent) → heading is suppressed.
+    _kp_heading_available = h_kp is not None
     h_dir = ar.heading_direct_deg
     hconf = float(ar.heading_direct_conf)
     fused = None
     src = "none"
-    if h_dir is not None and hconf >= float(settings.aquaforge.min_direct_heading_confidence):
-        fused = float(h_dir)
-        src = "aquaforge_direct"
-    elif h_kp is not None:
-        fused = float(h_kp)
-        src = "aquaforge_landmarks"
+    if _kp_heading_available:
+        # Prefer direct heading when high-confidence, otherwise use landmark heading
+        if h_dir is not None and hconf >= float(settings.aquaforge.min_direct_heading_confidence):
+            fused = float(h_dir)
+            src = "aquaforge_direct"
+        else:
+            fused = float(h_kp)
+            src = "aquaforge_landmarks"
     out["aquaforge_heading_fused_deg"] = fused
     out["aquaforge_heading_fusion_source"] = src
 

@@ -5,20 +5,10 @@ AquaForge — web UI (Streamlit).
 then use the bookmark file ``AquaForge.url`` or http://127.0.0.1:8501
 
 **Terminal:** ``py -3 -m streamlit run app.py`` or ``run_web.bat``
-
-**Daily flow:** open a scene → review spots → save labels → **Advanced → Train first AquaForge model** once if weights are missing, then **Retrain AquaForge** for longer training when you want a new model.
-
-**Main:** large close-up, **On image** toggles, **Back / Next** and save buttons. **Left:** scene + refresh; **Advanced** has retrain, downloads, exports, label fixer.
-
-**Branding:** JPEG logos live under ``aquaforge/static/images/`` (``AquaForge_small.jpg``, ``AquaForge_text.jpg``, ``AquaForge_large.jpg``). ``web_ui`` resolves that folder from the package path and from cwd ancestors, uses a **PIL** image for the tab favicon (reliable on Windows), ``st.logo`` for the upper-left mark (Streamlit 1.39+), and the main column for the text mark + hero.
-
-The app only answers at that URL while this computer is running the server.
-For a public URL with no local server, host the app (e.g. Streamlit Community Cloud).
 """
 
 import importlib
 import sys
-
 
 def _streamlit_refresh_review_card_export() -> None:
     """

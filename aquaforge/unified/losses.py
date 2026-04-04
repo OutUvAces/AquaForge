@@ -598,6 +598,9 @@ class CurriculumSchedule:
                 "kp_hm": 0.0,
                 "hdg": 0.0,
                 "wake": 0.0,
+                "wake_conf": 0.0,
+                "dim": 0.0,
+                "vessel_type": 0.0,
                 "distill": 0.0,
             },
         ),
@@ -610,6 +613,9 @@ class CurriculumSchedule:
                 "kp_hm": 0.0,
                 "hdg": 0.0,
                 "wake": 0.0,
+                "wake_conf": 0.0,
+                "dim": 0.0,
+                "vessel_type": 0.0,
                 "distill": 0.0,
             },
         ),
@@ -622,6 +628,9 @@ class CurriculumSchedule:
                 "kp_hm": 0.55,
                 "hdg": 0.0,
                 "wake": 0.0,
+                "wake_conf": 0.0,
+                "dim": 0.0,
+                "vessel_type": 0.0,
                 "distill": 0.0,
             },
         ),
@@ -634,6 +643,9 @@ class CurriculumSchedule:
                 "kp_hm": 0.78,
                 "hdg": 0.55,
                 "wake": 0.0,
+                "wake_conf": 0.15,
+                "dim": 0.1,
+                "vessel_type": 0.0,
                 "distill": 0.0,
             },
         ),
@@ -646,6 +658,9 @@ class CurriculumSchedule:
                 "kp_hm": 0.72,
                 "hdg": 1.05,
                 "wake": 0.35,
+                "wake_conf": 0.28,
+                "dim": 0.3,
+                "vessel_type": 0.15,
                 "distill": 0.0,
             },
         ),
@@ -658,6 +673,9 @@ class CurriculumSchedule:
                 "kp_hm": 0.65,
                 "hdg": 1.08,
                 "wake": 0.62,
+                "wake_conf": 0.38,
+                "dim": 0.45,
+                "vessel_type": 0.28,
                 "distill": 0.0,
             },
         ),
@@ -1017,11 +1035,81 @@ def aquaforge_joint_loss(
         )
     logs["loss_wake"] = float(wake_loss.detach())
 
+    # Wake confidence loss: BCE(wake[:, 2], wake_visible_flag)
+    # Supervised by the "Wake visible behind the ship" checkbox from the review UI.
+    # Only active when "wake_conf" head exists (wake tensor has ≥3 columns).
+    w_wconf = float(sw.get("wake_conf", 0.3))
+    wake_conf_loss = torch.zeros((), device=dev, dtype=dt)
+    wake_pred = pred["wake_dir"]
+    if w_wconf > 0 and wake_pred is not None and wake_pred.shape[-1] >= 3:
+        wake_conf_logit = wake_pred[:, 2]
+        wake_visible_tgt = batch.get("wake_visible")
+        if wake_visible_tgt is not None:
+            wake_visible_f = wake_visible_tgt.float().to(device=dev)
+            # Mask: only supervise on samples where wake visibility label is explicit
+            has_label = batch.get("wake_visible_mask")
+            if has_label is not None:
+                valid_mask = has_label.float().to(device=dev) > 0
+                if valid_mask.any():
+                    wake_conf_loss = F.binary_cross_entropy_with_logits(
+                        wake_conf_logit[valid_mask],
+                        wake_visible_f[valid_mask],
+                    )
+            else:
+                wake_conf_loss = F.binary_cross_entropy_with_logits(
+                    wake_conf_logit,
+                    wake_visible_f,
+                )
+    logs["loss_wake_conf"] = float(wake_conf_loss.detach())
+
+    # Hull dimension regression loss: Smooth-L1 on (length_norm, width_norm) targets.
+    # Supervised by annotated hull outlines from the review UI (estimated_length_m / estimated_width_m).
+    # dim_pred shape: (B, 2); batch provides dim_length_norm, dim_width_norm, dim_mask.
+    w_dim = float(sw.get("dim", 0.4))
+    dim_loss = torch.zeros((), device=dev, dtype=dt)
+    dim_pred_t = out.get("dim_pred")
+    if w_dim > 0 and dim_pred_t is not None:
+        dim_tgt_l = batch.get("dim_length_norm")
+        dim_tgt_w = batch.get("dim_width_norm")
+        dim_valid = batch.get("dim_mask")
+        if dim_tgt_l is not None and dim_tgt_w is not None and dim_valid is not None:
+            valid_mask = dim_valid > 0
+            if valid_mask.any():
+                # Stack into (B, 2): [length_norm, width_norm]; model output already (B, 2)
+                dim_target = torch.stack(
+                    [dim_tgt_l.to(dev), dim_tgt_w.to(dev)], dim=1
+                )
+                pred_dim_masked = dim_pred_t[valid_mask]
+                tgt_dim_masked = dim_target[valid_mask]
+                dim_loss = F.smooth_l1_loss(pred_dim_masked, tgt_dim_masked)
+    logs["loss_dim"] = float(dim_loss.detach())
+
+    # Vessel type classification loss: cross-entropy on vessel type labels.
+    # Currently a stub — labels will be provided once the review UI exposes the selector.
+    # ``type_logit`` shape: (B, NUM_VESSEL_TYPES).
+    w_type = float(sw.get("vessel_type", 0.3))
+    type_loss = torch.zeros((), device=dev, dtype=dt)
+    type_logit_t = out.get("type_logit")
+    if w_type > 0 and type_logit_t is not None:
+        type_tgt = batch.get("vessel_type_idx")  # int64 tensor (B,)
+        type_valid = batch.get("vessel_type_mask")
+        if type_tgt is not None and type_valid is not None:
+            valid_mask = type_valid > 0
+            if valid_mask.any():
+                type_loss = F.cross_entropy(
+                    type_logit_t[valid_mask],
+                    type_tgt.long().to(dev)[valid_mask],
+                )
+    logs["loss_type"] = float(type_loss.detach())
+
     # Normalized weights (sum=1) already embed curriculum via base_stage; multiply losses only.
     total = total + float(weights["seg"]) * seg_loss
     total = total + float(weights["kp"]) * kp_loss
     total = total + float(weights["heading"]) * heading_loss
     total = total + float(weights["wake"]) * wake_loss
+    total = total + w_wconf * wake_conf_loss
+    total = total + w_dim * dim_loss
+    total = total + w_type * type_loss
 
     w = sw.get("kp", 1.0)
     if w > 0:

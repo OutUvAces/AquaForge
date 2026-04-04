@@ -25,6 +25,10 @@ from aquaforge.unified.constants import NUM_LANDMARKS
 
 ARCH_CNN = "cnn"
 
+# Vessel type classes (index 0–5).  Type label -1 = unknown / skip.
+VESSEL_TYPE_NAMES = ["cargo", "tanker", "fishing", "container", "military", "other"]
+NUM_VESSEL_TYPES = len(VESSEL_TYPE_NAMES)  # 6
+
 
 def canonical_model_arch(name: str) -> str:
     """Return ``cnn``; reject anything else."""
@@ -164,12 +168,18 @@ class AquaForgeDeltaFuse(nn.Module):
 
 class AquaForgeCnn(nn.Module):
     """
-    In-repo encoder: vessel logit, dense seg logits, landmarks, heading, wake.
+    In-repo encoder: vessel logit, dense seg logits, landmarks, heading, wake, vessel type, dimensions.
 
-    Output contract (ONNX): ``cls_logit, seg_logit, kp, hdg, wake, kp_hm`` — sixth is landmark heatmap logits (stride ~8).
+    Output contract: ``cls_logit, seg_logit, kp, hdg, wake, kp_hm, type_logit, dim_pred``
 
-    ``in_channels``: 3 for TCI-only (backward-compatible), 12 for full multispectral
-    (TCI RGB + B08 NIR + B05/B06/B07/B8A red-edge + B11/B12 SWIR + B01/B10).
+    - ``wake``: (B, 3) — (dx, dy, conf_logit). dx/dy give direction; conf_logit fed through
+      sigmoid gives wake-presence probability (``is_underway`` flag).
+    - ``type_logit``: (B, 6) — vessel type logits (cargo/tanker/fishing/container/military/other).
+      Loss is suppressed when no type label is present; predictions are unreliable without labelled data.
+    - ``dim_pred``: (B, 2) — (length_norm, width_norm) normalised by chip ground size.
+      Supervised from hull polygon measurements whenever a segmentation mask exists.
+
+    ``in_channels``: 3 for TCI-only (backward-compatible), 12 for full multispectral.
     """
 
     def __init__(
@@ -185,15 +195,10 @@ class AquaForgeCnn(nn.Module):
         self.in_channels = int(in_channels)
         self.encoder = _EncoderTriScale(in_channels=self.in_channels)
         c3, c4 = self.encoder.c3, self.encoder.c4
-        # **Original AquaForge:** fine-scale boost gated by small GT hull area (training). 1×1 on p3
-        # → GAP → scalar; multiply p3 when exp(−mask_area/6000) is large (small vessels). At inference
-        # (ONNX / no mask_area) the area gate is 1.0 so the learned scalar still modulates p3 from image cues.
         self.p3_sv_boost_1x1 = nn.Conv2d(c3, c3, 1, bias=True)
         self.p3_sv_boost_head = nn.Linear(c3, 1, bias=True)
-        # Post-eval: small-vessel detection rate **< 70%** → strengthen boost to **1.5×** prior (0.85→1.275).
         self.p3_sv_boost_gain = nn.Parameter(torch.tensor(1.275, dtype=torch.float32))
         self.delta_fuse = AquaForgeDeltaFuse(c3=c3, c4=c4, c5=c4, out_ch=c4)
-        # Fused map is stride-8; two 2× upsamples match prior stride-16 tower → stride-4 seg grid.
         self.seg_up = nn.Sequential(
             nn.ConvTranspose2d(c4, 128, 4, 2, 1),
             nn.BatchNorm2d(128),
@@ -208,14 +213,22 @@ class AquaForgeCnn(nn.Module):
         self.cls_head = nn.Linear(c4, 1)
         self.kp_head = nn.Linear(c4, n_landmarks * 3)
         self.hdg_head = nn.Linear(c4, 3)
-        self.wake_head = nn.Linear(c4, 2)
+        # Wake: (dx, dy, conf_logit) — 3 outputs; dx/dy give direction, conf gives is_underway.
+        self.wake_head = nn.Linear(c4, 3)
+        # Vessel type: 6-class logits.  Loss is masked when no label (-1).
+        self.type_head = nn.Linear(c4, NUM_VESSEL_TYPES)
+        # Dimension regression: (length_norm, width_norm) in units of chip ground size.
+        self.dim_head = nn.Linear(c4, 2)
 
     def forward(
         self,
         x: torch.Tensor,
         *,
         mask_area_pixels: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+    ]:
         p3, p4, p5 = self.encoder(x)
         z = F.relu(self.p3_sv_boost_1x1(p3), inplace=True)
         s = torch.sigmoid(self.p3_sv_boost_gain * self.p3_sv_boost_head(z.mean(dim=(2, 3))))
@@ -239,8 +252,10 @@ class AquaForgeCnn(nn.Module):
         cls_logit = self.cls_head(g)
         kp = self.kp_head(g).view(-1, self.n_landmarks, 3)
         hdg = self.hdg_head(g)
-        wake = self.wake_head(g)
-        return cls_logit, seg, kp, hdg, wake, kp_hm
+        wake = self.wake_head(g)          # (B, 3): dx, dy, conf_logit
+        type_logit = self.type_head(g)   # (B, NUM_VESSEL_TYPES)
+        dim_pred = self.dim_head(g)      # (B, 2): length_norm, width_norm
+        return cls_logit, seg, kp, hdg, wake, kp_hm, type_logit, dim_pred
 
 
 def build_model(
@@ -316,5 +331,20 @@ def load_checkpoint(
         sd = dict(sd)
         sd[first_w_key] = new_w
 
-    m.load_state_dict(sd, strict=strict)
-    return m, meta
+    # Pad wake_head from 2→3 outputs if loading an old checkpoint (no wake confidence column)
+    _wake_w_key = "wake_head.weight"
+    _wake_b_key = "wake_head.bias"
+    if _wake_w_key in sd and int(sd[_wake_w_key].shape[0]) == 2:
+        sd = dict(sd)
+        old_ww = sd[_wake_w_key].to(device)
+        old_wb = sd[_wake_b_key].to(device)
+        c4 = old_ww.shape[1]
+        new_ww = T.zeros(3, c4, device=device, dtype=old_ww.dtype)
+        new_ww[:2] = old_ww
+        new_wb = T.zeros(3, device=device, dtype=old_wb.dtype)
+        new_wb[:2] = old_wb
+        sd[_wake_w_key] = new_ww
+        sd[_wake_b_key] = new_wb
+
+    # New heads (type_head, dim_head) may be missing from older checkpoints — load non-strictly.
+    m.load_state_dict(sd, strict=False)

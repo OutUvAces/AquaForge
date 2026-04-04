@@ -158,6 +158,7 @@ from aquaforge.review_overlay import (
     extent_preview_image,
     footprint_width_length_m,
     fullres_xy_from_spot_red_outline_aabb_center,
+    overlay_bow_heading_arrowhead,
     overlay_heading_arrow_north_on_letterbox,
     overlay_aquaforge_on_spot_rgb,
     read_locator_and_spot_rgb_matching_stretch,
@@ -956,12 +957,46 @@ def _explain_aquaforge_train_failure(code: int, stderr_txt: str, stdout_txt: str
     return None
 
 
+def _training_pid_file(project_root: Path) -> Path:
+    return project_root / "data" / "_training_pid.txt"
+
+
+def _stop_training(project_root: Path) -> bool:
+    """Kill the training subprocess if its PID file exists. Returns True if killed."""
+    pid_file = _training_pid_file(project_root)
+    if not pid_file.is_file():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        import signal, os as _os
+        try:
+            if sys.platform == "win32":
+                import subprocess as _sp
+                _sp.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+            else:
+                _os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        pid_file.unlink(missing_ok=True)
+        return True
+    except Exception:
+        pid_file.unlink(missing_ok=True)
+        return False
+
+
 def _subprocess_train_aquaforge(
     project_root: Path,
     labels_path: Path,
     extra_args: list[str],
+    *,
+    status_obj: Any = None,
+    progress_placeholder: Any = None,
 ) -> tuple[int, str, str]:
-    """Run ``scripts/train_aquaforge.py`` with :func:`_streamlit_python_exe` (same as Streamlit)."""
+    """Run ``scripts/train_aquaforge.py`` with :func:`_streamlit_python_exe` (same as Streamlit).
+
+    Streams epoch log lines in real time to *status_obj* (``st.status`` context).
+    Writes PID to ``data/_training_pid.txt`` so the stop button can terminate early.
+    """
     script = project_root / "scripts" / "train_aquaforge.py"
     if not script.is_file():
         return -1, "", f"Missing {script}"
@@ -975,16 +1010,60 @@ def _subprocess_train_aquaforge(
         str(labels_path.resolve()),
         *extra_args,
     ]
-    proc = subprocess.run(
+    pid_file = _training_pid_file(project_root)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+
+    proc = subprocess.Popen(
         cmd,
         cwd=str(project_root.resolve()),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
-    tail_o = (proc.stdout or "")[-12000:]
-    tail_e = (proc.stderr or "")[-12000:]
+    pid_file.write_text(str(proc.pid))
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    last_epoch_line = ""
+
+    import threading as _threading
+
+    def _drain_stderr() -> None:
+        for ln in iter(proc.stderr.readline, ""):
+            stderr_lines.append(ln)
+
+    _se_t = _threading.Thread(target=_drain_stderr, daemon=True)
+    _se_t.start()
+
+    for line in iter(proc.stdout.readline, ""):
+        stdout_lines.append(line)
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Parse epoch lines for structured progress display
+        if stripped.startswith("epoch ") and "score=" in stripped:
+            last_epoch_line = stripped
+            if status_obj is not None:
+                try:
+                    status_obj.write(f"`{stripped}`")
+                except Exception:
+                    pass
+        elif status_obj is not None:
+            # Only show non-verbose lines (checkpoint saves, band checks, etc.)
+            if any(x in stripped for x in ("checkpoint", "spectral", "self-training", "Wrote ")):
+                try:
+                    status_obj.write(stripped)
+                except Exception:
+                    pass
+
+    proc.wait()
+    _se_t.join(timeout=5.0)
+    pid_file.unlink(missing_ok=True)
+
+    tail_o = "".join(stdout_lines)[-12000:]
+    tail_e = "".join(stderr_lines)[-12000:]
     return int(proc.returncode), tail_o, tail_e
 
 
@@ -1109,6 +1188,16 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
     st.caption(
         "Uses your latest saved reviews and feedback in the labels file — no extra export step."
     )
+
+    # Show stop button if a training process is currently running
+    _pid_file = _training_pid_file(project_root)
+    if _pid_file.is_file():
+        st.warning("A training process is currently running (or was interrupted).")
+        if st.button("Stop training now", key="vd_stop_orphan_btn", type="primary",
+                     help="Terminates the active training subprocess."):
+            killed = _stop_training(project_root)
+            st.success("Training process terminated." if killed else "No active process found (PID file removed).")
+            st.rerun()
     script = project_root / "scripts" / "train_aquaforge.py"
     if not script.is_file():
         st.caption(f"Training script not found: `{script}`")
@@ -1145,8 +1234,19 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
             return
         with st.status("Training AquaForge…", expanded=True) as status:
             status.write(f"Python: `{_streamlit_python_exe()}`")
+            # Stop button visible while training runs
+            _stop_col, _ = st.columns([1, 3])
+            with _stop_col:
+                if st.button("Stop training early", key="vd_stop_retrain_btn", type="secondary",
+                             help="Sends a termination signal to the training process."):
+                    _stop_training(ROOT)
+                    status.update(label="Training stopped by user", state="error")
+                    st.rerun()
             try:
-                code, out, err = _subprocess_train_aquaforge(project_root, labels_path, [])
+                code, out, err = _subprocess_train_aquaforge(
+                    project_root, labels_path, [],
+                    status_obj=status,
+                )
             except OSError as e:
                 status.update(label="Training failed to start", state="error")
                 st.error(str(e))
@@ -1217,11 +1317,19 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
             return
         with st.status("First AquaForge training…", expanded=True) as status:
             status.write(f"Python: `{_streamlit_python_exe()}`")
+            _stop_col2, _ = st.columns([1, 3])
+            with _stop_col2:
+                if st.button("Stop training early", key="vd_stop_first_btn", type="secondary",
+                             help="Sends a termination signal to the training process."):
+                    _stop_training(ROOT)
+                    status.update(label="Training stopped by user", state="error")
+                    st.rerun()
             try:
                 code, out, err = _subprocess_train_aquaforge(
                     project_root,
                     labels_path,
                     ["--epochs", "4", "--batch-size", "2"],
+                    status_obj=status,
                 )
             except OSError as e:
                 status.update(label="Training failed to start", state="error")
@@ -2667,6 +2775,13 @@ def _render_review_deck(
         meters_per_pixel=gavg,
         draw_footprint_outline=False,
     )
+    # Initialize overlay data — populated below if af_spot is available
+    _poly = None
+    _kpc = None
+    _kxc = None
+    _bs = None
+    _wk = None
+    _arrow_h: float | None = None
     if af_spot and (_show_hull or _show_mark or _show_wake):
         _sc0i = int(sc0)
         _sr0i = int(sr0)
@@ -2791,8 +2906,8 @@ def _render_review_deck(
     else:
         extent_sq2 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
-    if _show_dir and isinstance(af_spot, dict) and af_spot:
-        _arrow_h: float | None = None
+    # Compute heading value for both the arrow overlay and the legend presence indicator.
+    if isinstance(af_spot, dict) and af_spot:
         for _hk in (
             "aquaforge_heading_fused_deg",
             "aquaforge_heading_keypoint_deg",
@@ -2811,7 +2926,24 @@ def _render_review_deck(
             if math.isfinite(_fv):
                 _arrow_h = _fv
                 break
-        if _arrow_h is not None:
+    if _show_dir and _arrow_h is not None:
+        # Use bow position for a spatially grounded arrowhead 50 m off the bow.
+        # Fall back to the corner arrow if bow is unknown.
+        _bow_crop_xy = None
+        if _bs is not None:
+            _bow_crop_xy = _bs[0]  # bow is the first point of the segment
+        if _bow_crop_xy is not None and scw > 0 and sch > 0:
+            spot_sq = overlay_bow_heading_arrowhead(
+                spot_sq,
+                spot_lb_meta,
+                _arrow_h,
+                _bow_crop_xy,
+                chip_native_w=scw,
+                chip_native_h=sch,
+                meters_per_native_px=float(gavg) if gavg else 10.0,
+                offset_m=50.0,
+            )
+        else:
             spot_sq = overlay_heading_arrow_north_on_letterbox(
                 spot_sq, spot_lb_meta, _arrow_h
             )
@@ -2916,13 +3048,28 @@ def _render_review_deck(
             "</p>",
             unsafe_allow_html=True,
         )
+        # Overlay presence legend — items dim when overlay is absent from this chip.
+        _hull_on = bool(_poly) and _show_hull
+        _dir_on = (_arrow_h is not None) and _show_dir
+        _struct_on = bool(_kxc or _kpc) and _show_mark
+        _wake_on = bool(_wk) and _show_wake
+        def _leg_color(active: bool, base: str) -> str:
+            return base if active else "#3a3a4a"
+        def _leg_label(active: bool, text: str) -> str:
+            style = "" if active else "text-decoration:line-through;opacity:0.45;"
+            return f"<span style='{style}'>{text}</span>"
         st.markdown(
-            "<div style='font-size:0.82rem;color:#c8cdd8;line-height:1.8;margin-top:0.4rem'>"
-            "<span style='color:#00ffdc'>▬</span>&nbsp;hull boundary<br/>"
-            "<span style='color:#ffe040'>↑</span>&nbsp;heading<br/>"
-            "<span style='color:#ff00c8'>●</span>&nbsp;structures<br/>"
-            "<span style='color:#ff9b00'>─</span>&nbsp;Wake<br/>"
-            "<span style='color:#78ff50'>─</span>&nbsp;Keel"
+            "<div style='font-size:0.92rem;color:#c8cdd8;line-height:2.1;margin-top:0.5rem'>"
+            f"<span style='color:{_leg_color(_hull_on, '#00ffdc')};font-size:1.1em'>▬</span>&nbsp;"
+            f"{_leg_label(_hull_on, 'hull boundary')}<br/>"
+            f"<span style='color:{_leg_color(_dir_on, '#3cff60')};font-size:1.2em'>&#8679;</span>&nbsp;"
+            f"{_leg_label(_dir_on, 'heading')}<br/>"
+            f"<span style='color:{_leg_color(_struct_on, '#ff00c8')};font-size:1.1em'>●</span>&nbsp;"
+            f"{_leg_label(_struct_on, 'structures')}<br/>"
+            f"<span style='color:{_leg_color(_wake_on, '#ff9b00')};font-size:1.1em'>─</span>&nbsp;"
+            f"{_leg_label(_wake_on, 'Wake')}<br/>"
+            f"<span style='color:{_leg_color(bool(_bs) and _show_mark, '#78ff50')};font-size:1.1em'>─</span>&nbsp;"
+            f"{_leg_label(bool(_bs) and _show_mark, 'Keel')}"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -2980,101 +3127,101 @@ def _render_review_deck(
             )
         st.markdown(spot_body2, unsafe_allow_html=True)
 
-    with st.expander("Optional: sizes and outline markers", expanded=False):
-        st.caption("Bow, stern, sides: pick a role, then click the **large** image (left column).")
-        st.markdown("##### Ships in this chip")
-        v1, v2, v3, v4 = st.columns(4)
-        with v1:
-            if st.button(
-                "One ship",
-                key=f"hull_single_{spot_k}",
-                use_container_width=True,
-                type="primary" if not is_twin else "secondary",
-                help="Single vessel in this chip",
-            ):
-                st.session_state[hull_mode_k] = "single"
-                st.session_state[dim_key] = [
-                    m
-                    for m in st.session_state.get(dim_key, [])
-                    if marker_hull_index(m) == 1
-                ]
-                st.rerun()
-        with v2:
-            if st.button(
-                "Two ships",
-                key=f"hull_twin_{spot_k}",
-                use_container_width=True,
-                type="primary" if is_twin else "secondary",
-                help="Two vessels side by side",
-            ):
-                st.session_state[hull_mode_k] = "twin"
-                st.session_state[active_hull_k] = 1
-                st.rerun()
-        with v3:
-            if st.button(
-                "→ H1",
-                key=f"edit_h1_{spot_k}",
-                use_container_width=True,
-                disabled=not is_twin,
-                type="primary"
-                if is_twin and int(st.session_state.get(active_hull_k, 1)) == 1
-                else "secondary",
-                help="Markers apply to hull 1",
-            ):
-                st.session_state[active_hull_k] = 1
-                st.rerun()
-        with v4:
-            if st.button(
-                "→ H2",
-                key=f"edit_h2_{spot_k}",
-                use_container_width=True,
-                disabled=not is_twin,
-                type="primary"
-                if is_twin and int(st.session_state.get(active_hull_k, 1)) == 2
-                else "secondary",
-                help="Markers apply to hull 2",
-            ):
-                st.session_state[active_hull_k] = 2
-                st.rerun()
+    st.markdown("---")
+    st.caption("Bow, stern, sides: pick a role, then click the **large** image (left column).")
+    st.markdown("##### Ships in this chip")
+    v1, v2, v3, v4 = st.columns(4)
+    with v1:
+        if st.button(
+            "One ship",
+            key=f"hull_single_{spot_k}",
+            use_container_width=True,
+            type="primary" if not is_twin else "secondary",
+            help="Single vessel in this chip",
+        ):
+            st.session_state[hull_mode_k] = "single"
+            st.session_state[dim_key] = [
+                m
+                for m in st.session_state.get(dim_key, [])
+                if marker_hull_index(m) == 1
+            ]
+            st.rerun()
+    with v2:
+        if st.button(
+            "Two ships",
+            key=f"hull_twin_{spot_k}",
+            use_container_width=True,
+            type="primary" if is_twin else "secondary",
+            help="Two vessels side by side",
+        ):
+            st.session_state[hull_mode_k] = "twin"
+            st.session_state[active_hull_k] = 1
+            st.rerun()
+    with v3:
+        if st.button(
+            "→ H1",
+            key=f"edit_h1_{spot_k}",
+            use_container_width=True,
+            disabled=not is_twin,
+            type="primary"
+            if is_twin and int(st.session_state.get(active_hull_k, 1)) == 1
+            else "secondary",
+            help="Markers apply to hull 1",
+        ):
+            st.session_state[active_hull_k] = 1
+            st.rerun()
+    with v4:
+        if st.button(
+            "→ H2",
+            key=f"edit_h2_{spot_k}",
+            use_container_width=True,
+            disabled=not is_twin,
+            type="primary"
+            if is_twin and int(st.session_state.get(active_hull_k, 1)) == 2
+            else "secondary",
+            help="Markers apply to hull 2",
+        ):
+            st.session_state[active_hull_k] = 2
+            st.rerun()
         
-        st.markdown("##### Markers")
-        st.caption("Pick a role, then click the **center** image. **Clear** removes all points.")
-        r_cols = st.columns(6)
-        for i, role in enumerate(MARKER_ROLES):
-            with r_cols[i]:
-                active = st.session_state.get(sel_mk) == role
-                if st.button(
-                    MARKER_ROLE_BUTTON_LABELS.get(role, role),
-                    key=f"mkpick_{role}_{spot_k}",
-                    use_container_width=True,
-                    type="primary" if active else "secondary",
-                ):
-                    st.session_state[sel_mk] = role
-                    st.rerun()
-        with r_cols[5]:
+    st.markdown("##### Markers")
+    st.caption("Pick a role, then click the **center** image. **Clear** removes all points.")
+    r_cols = st.columns(6)
+    for i, role in enumerate(MARKER_ROLES):
+        with r_cols[i]:
+            active = st.session_state.get(sel_mk) == role
             if st.button(
-                "Clear",
-                key=f"clr_dim_{spot_k}",
+                MARKER_ROLE_BUTTON_LABELS.get(role, role),
+                key=f"mkpick_{role}_{spot_k}",
                 use_container_width=True,
+                type="primary" if active else "secondary",
             ):
-                st.session_state[dim_key] = []
+                st.session_state[sel_mk] = role
                 st.rerun()
-        if is_twin:
-            st.caption(f"Placing on **hull {int(st.session_state.get(active_hull_k, 1))}**.")
-        st.markdown("##### Training flags")
-        _wn1, _wn2 = st.columns(2)
-        with _wn1:
-            st.checkbox(
-                "Wake visible behind the ship",
-                key=wake_vis_k,
-                help="Helps the model learn water patterns.",
-            )
-        with _wn2:
-            st.checkbox(
-                "Partly hidden by cloud",
-                key=cloud_partial_k,
-                help="Marks a harder example.",
-            )
+    with r_cols[5]:
+        if st.button(
+            "Clear",
+            key=f"clr_dim_{spot_k}",
+            use_container_width=True,
+        ):
+            st.session_state[dim_key] = []
+            st.rerun()
+    if is_twin:
+        st.caption(f"Placing on **hull {int(st.session_state.get(active_hull_k, 1))}**.")
+    st.markdown("##### Training flags")
+    _wn1, _wn2 = st.columns(2)
+    with _wn1:
+        st.checkbox(
+            "Wake visible behind the ship",
+            key=wake_vis_k,
+            help="Helps the model learn water patterns.",
+        )
+    with _wn2:
+        st.checkbox(
+            "Partly hidden by cloud",
+            key=cloud_partial_k,
+            help="Marks a harder example.",
+        )
     if click_spot_dim is not None:
         sdd = (
             f"{click_spot_dim.get('unix_time')}|{click_spot_dim.get('x')}|"
@@ -3347,138 +3494,138 @@ def _render_review_deck(
                 fp=fp,
             )
 
-    with st.expander("Advanced (this spot)", expanded=False):
-        st.caption("Cloud, land, confidence — **Skip** is on the main bar above.")
+    st.markdown("---")
+    st.caption("Cloud, land, confidence — **Skip** is on the main bar above.")
 
-        # ── Cloud mask QC for this chip ──────────────────────────────────────
+    # ── Cloud mask QC for this chip ──────────────────────────────────────
+    try:
+        from aquaforge.cloud_mask import cloud_tile_stats as _cloud_stats_fn
+        _cm_bt_qc = int(st.session_state.get("vd_cloud_brightness_threshold", 235))
+        _cm_vt_qc = int(st.session_state.get("vd_cloud_variance_threshold", 400))
+        # Use the cached spot chip (already read for display above)
+        _qc_chip_bgr: object = None
         try:
-            from aquaforge.cloud_mask import cloud_tile_stats as _cloud_stats_fn
-            _cm_bt_qc = int(st.session_state.get("vd_cloud_brightness_threshold", 235))
-            _cm_vt_qc = int(st.session_state.get("vd_cloud_variance_threshold", 400))
-            # Use the cached spot chip (already read for display above)
-            _qc_chip_bgr: object = None
-            try:
-                # spot_rgb is the HxWx3 RGB chip read earlier in this function
-                _qc_chip_bgr = spot_rgb[:, :, ::-1]  # RGB → BGR
-            except Exception:
-                _qc_chip_bgr = None
-            if _qc_chip_bgr is not None:
-                _cm_stats = _cloud_stats_fn(
-                    _qc_chip_bgr,
-                    brightness_threshold=float(_cm_bt_qc),
-                    variance_threshold=float(_cm_vt_qc),
+            # spot_rgb is the HxWx3 RGB chip read earlier in this function
+            _qc_chip_bgr = spot_rgb[:, :, ::-1]  # RGB → BGR
+        except Exception:
+            _qc_chip_bgr = None
+        if _qc_chip_bgr is not None:
+            _cm_stats = _cloud_stats_fn(
+                _qc_chip_bgr,
+                brightness_threshold=float(_cm_bt_qc),
+                variance_threshold=float(_cm_vt_qc),
+            )
+            _cm_label = "🔴 **Would skip** (classified as 100% cloud)" if _cm_stats["would_skip"] else "🟢 **Would process** (not 100% cloud)"
+            st.markdown(f"**Cloud mask result:** {_cm_label}")
+            _cm_c1, _cm_c2 = st.columns(2)
+            with _cm_c1:
+                _bm_margin = _cm_stats["margin_brightness"]
+                _bm_color = "🔴" if _bm_margin > 0 else "🟢"
+                st.metric(
+                    "Brightness (mean)",
+                    f"{_cm_stats['brightness_mean']:.0f}",
+                    delta=f"{_bm_margin:+.0f} vs threshold",
+                    delta_color="inverse",
+                    help="Mean BT.601 luminance (0–255). Threshold set in ☁ Cloud mask QC.",
                 )
-                _cm_label = "🔴 **Would skip** (classified as 100% cloud)" if _cm_stats["would_skip"] else "🟢 **Would process** (not 100% cloud)"
-                st.markdown(f"**Cloud mask result:** {_cm_label}")
-                _cm_c1, _cm_c2 = st.columns(2)
-                with _cm_c1:
-                    _bm_margin = _cm_stats["margin_brightness"]
-                    _bm_color = "🔴" if _bm_margin > 0 else "🟢"
-                    st.metric(
-                        "Brightness (mean)",
-                        f"{_cm_stats['brightness_mean']:.0f}",
-                        delta=f"{_bm_margin:+.0f} vs threshold",
-                        delta_color="inverse",
-                        help="Mean BT.601 luminance (0–255). Threshold set in ☁ Cloud mask QC.",
-                    )
-                with _cm_c2:
-                    _pv_margin = _cm_stats["margin_variance"]
-                    st.metric(
-                        "Pixel variance",
-                        f"{_cm_stats['pixel_variance']:.0f}",
-                        delta=f"{_pv_margin:+.0f} vs threshold",
-                        delta_color="normal",
-                        help="Variance of luminance. Low = uniform (cloud-like). Threshold set in ☁ Cloud mask QC.",
-                    )
-                if _cm_stats["would_skip"]:
-                    st.warning(
-                        "⚠️ With current thresholds this chip would have been **skipped** "
-                        "during tile inference. If this is wrong, raise the brightness "
-                        "threshold or lower the variance threshold in **☁ Cloud mask QC**."
-                    )
-        except Exception as _cm_qc_err:
-            st.caption(f"Cloud QC unavailable: {_cm_qc_err}")
+            with _cm_c2:
+                _pv_margin = _cm_stats["margin_variance"]
+                st.metric(
+                    "Pixel variance",
+                    f"{_cm_stats['pixel_variance']:.0f}",
+                    delta=f"{_pv_margin:+.0f} vs threshold",
+                    delta_color="normal",
+                    help="Variance of luminance. Low = uniform (cloud-like). Threshold set in ☁ Cloud mask QC.",
+                )
+            if _cm_stats["would_skip"]:
+                st.warning(
+                    "⚠️ With current thresholds this chip would have been **skipped** "
+                    "during tile inference. If this is wrong, raise the brightness "
+                    "threshold or lower the variance threshold in **☁ Cloud mask QC**."
+                )
+    except Exception as _cm_qc_err:
+        st.caption(f"Cloud QC unavailable: {_cm_qc_err}")
 
-        st.markdown("---")
-        mx1, mx2 = st.columns(2)
-        with mx1:
-            if st.button(
-                "Cloud",
-                key=f"lbl_cloud_{idx}",
-                use_container_width=True,
-            ):
-                _commit_review_label(
-                    ckey="cloud",
-                    idx=idx,
-                    cx=cx,
-                    cy=cy,
-                    score=score,
-                    spot_k=spot_k,
-                    dim_key=dim_key,
-                    tci_loaded=tci_loaded,
-                    meta=meta,
-                    labels_path=labels_path,
-                    tci_p=tci_p,
-                    sc0=sc0,
-                    sr0=sr0,
-                    fp=fp,
-                )
-        with mx2:
-            if st.button(
-                "Land",
-                key=f"lbl_land_{idx}",
-                use_container_width=True,
-            ):
-                _commit_review_label(
-                    ckey="land",
-                    idx=idx,
-                    cx=cx,
-                    cy=cy,
-                    score=score,
-                    spot_k=spot_k,
-                    dim_key=dim_key,
-                    tci_loaded=tci_loaded,
-                    meta=meta,
-                    labels_path=labels_path,
-                    tci_p=tci_p,
-                    sc0=sc0,
-                    sr0=sr0,
-                    fp=fp,
-                )
-        st.markdown("**How sure are you?** (only matters if you did not pick **Unsure**)")
-        ch1, ch2, ch3, _ = st.columns(4)
-        cur_conf = str(st.session_state.get(conf_k, "high")).lower()
-        with ch1:
-            if st.button(
-                "High",
-                key=f"conf_hi_{spot_k}",
-                type="primary" if cur_conf == "high" else "secondary",
-            ):
-                st.session_state[conf_k] = "high"
-                st.rerun()
-        with ch2:
-            if st.button(
-                "Medium",
-                key=f"conf_med_{spot_k}",
-                type="primary" if cur_conf == "medium" else "secondary",
-            ):
-                st.session_state[conf_k] = "medium"
-                st.rerun()
-        with ch3:
-            if st.button(
-                "Low",
-                key=f"conf_lo_{spot_k}",
-                type="primary" if cur_conf == "low" else "secondary",
-            ):
-                st.session_state[conf_k] = "low"
-                st.rerun()
+    st.markdown("---")
+    mx1, mx2 = st.columns(2)
+    with mx1:
+        if st.button(
+            "Cloud",
+            key=f"lbl_cloud_{idx}",
+            use_container_width=True,
+        ):
+            _commit_review_label(
+                ckey="cloud",
+                idx=idx,
+                cx=cx,
+                cy=cy,
+                score=score,
+                spot_k=spot_k,
+                dim_key=dim_key,
+                tci_loaded=tci_loaded,
+                meta=meta,
+                labels_path=labels_path,
+                tci_p=tci_p,
+                sc0=sc0,
+                sr0=sr0,
+                fp=fp,
+            )
+    with mx2:
+        if st.button(
+            "Land",
+            key=f"lbl_land_{idx}",
+            use_container_width=True,
+        ):
+            _commit_review_label(
+                ckey="land",
+                idx=idx,
+                cx=cx,
+                cy=cy,
+                score=score,
+                spot_k=spot_k,
+                dim_key=dim_key,
+                tci_loaded=tci_loaded,
+                meta=meta,
+                labels_path=labels_path,
+                tci_p=tci_p,
+                sc0=sc0,
+                sr0=sr0,
+                fp=fp,
+            )
+    st.markdown("**How sure are you?** (only matters if you did not pick **Unsure**)")
+    ch1, ch2, ch3, _ = st.columns(4)
+    cur_conf = str(st.session_state.get(conf_k, "high")).lower()
+    with ch1:
+        if st.button(
+            "High",
+            key=f"conf_hi_{spot_k}",
+            type="primary" if cur_conf == "high" else "secondary",
+        ):
+            st.session_state[conf_k] = "high"
+            st.rerun()
+    with ch2:
+        if st.button(
+            "Medium",
+            key=f"conf_med_{spot_k}",
+            type="primary" if cur_conf == "medium" else "secondary",
+        ):
+            st.session_state[conf_k] = "medium"
+            st.rerun()
+    with ch3:
+        if st.button(
+            "Low",
+            key=f"conf_lo_{spot_k}",
+            type="primary" if cur_conf == "low" else "secondary",
+        ):
+            st.session_state[conf_k] = "low"
+            st.rerun()
 
-        st.divider()
-        st.markdown("**Queue / AquaForge**")
-        st.caption(
-            "Queue order is **AquaForge vessel confidence** (highest first). "
-            "**Vessel confidence** (as a %) is in the captions next to the locator above."
-        )
+    st.divider()
+    st.markdown("**Queue / AquaForge**")
+    st.caption(
+        "Queue order is **AquaForge vessel confidence** (highest first). "
+        "**Vessel confidence** (as a %) is in the captions next to the locator above."
+    )
 
 
 def _commit_review_label(

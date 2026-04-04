@@ -242,6 +242,8 @@ def main() -> None:
             sampler=sampler,
             shuffle=False,
             drop_last=False,
+            num_workers=0,  # 0 avoids Windows spawn overhead for small datasets
+            pin_memory=torch.cuda.is_available(),
             collate_fn=lambda b: list(b),
         )
     else:
@@ -251,10 +253,30 @@ def main() -> None:
             batch_size=int(args.batch_size),
             shuffle=True,
             drop_last=False,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
             collate_fn=lambda b: list(b),
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _use_gpu = device.type == "cuda"
+    # Mixed-precision scaler: ~2× faster on GPU with minimal accuracy cost.
+    # AMP is a no-op on CPU (scaler.scale(loss) == loss, no float16 cast).
+    _amp_enabled = _use_gpu
+    try:
+        from torch.amp import GradScaler, autocast
+        _scaler = GradScaler("cuda", enabled=_amp_enabled)
+        _autocast_ctx = lambda: autocast("cuda", enabled=_amp_enabled)
+    except Exception:
+        _amp_enabled = False
+        import contextlib
+        _scaler = None
+        _autocast_ctx = contextlib.nullcontext
+    print(
+        f"  device={device}  amp={'on' if _amp_enabled else 'off'}"
+        + (f"  gpu={torch.cuda.get_device_name(0)}" if _use_gpu else ""),
+        flush=True,
+    )
 
     # Auto-detect in_channels from band availability in training data.
     # Check up to 10 distinct TCI files from the labeled rows; if any extra
@@ -322,21 +344,31 @@ def main() -> None:
             batch_dict = collate_batch(batch_list, device)
             imgs = batch_dict["imgs"]
             mask_area_px = batch_dict["seg"].sum(dim=(1, 2, 3)).flatten()
-            cls_l, seg, kp, hdg, wake, kp_hm = model(
-                imgs, mask_area_pixels=mask_area_px
-            )
-            pred = {
-                "cls_logit": cls_l,
-                "seg_logit": seg,
-                "kp": kp,
-                "hdg": hdg,
-                "wake": wake,
-                "kp_hm": kp_hm,
-            }
-            loss, logs = aquaforge_joint_loss(pred, batch_dict, sw_eff)
+            with _autocast_ctx():
+                cls_l, seg, kp, hdg, wake, kp_hm, *_xh = model(
+                    imgs, mask_area_pixels=mask_area_px
+                )
+                type_l = _xh[0] if len(_xh) >= 1 else None
+                dim_p  = _xh[1] if len(_xh) >= 2 else None
+                pred = {
+                    "cls_logit": cls_l,
+                    "seg_logit": seg,
+                    "kp": kp,
+                    "hdg": hdg,
+                    "wake": wake,
+                    "kp_hm": kp_hm,
+                    "type_logit": type_l,
+                    "dim_pred": dim_p,
+                }
+                loss, logs = aquaforge_joint_loss(pred, batch_dict, sw_eff)
             opt.zero_grad()
-            loss.backward()
-            opt.step()
+            if _scaler is not None:
+                _scaler.scale(loss).backward()
+                _scaler.step(opt)
+                _scaler.update()
+            else:
+                loss.backward()
+                opt.step()
             total_loss += float(logs.get("loss_total", 0.0))
             n_batches += 1
             ru_epoch += float(batch_dict["review_uncertainty"].mean().item())
@@ -383,10 +415,20 @@ def main() -> None:
             )
             if prep is not None:
                 imgs_p, soft, trust = prep
-                out_p = model(
+                _out_p_t = model(
                     imgs_p,
                     mask_area_pixels=soft["seg"].sum(dim=(1, 2, 3)).flatten(),
                 )
+                # Convert model tuple output to the dict format expected by self-training loss
+                _cls_p, _seg_p, _kp_p, _hdg_p, _wake_p, _kphm_p, *_xh_p = _out_p_t
+                out_p = {
+                    "cls_logit": _cls_p,
+                    "seg_logit": _seg_p,
+                    "kp": _kp_p,
+                    "hdg": _hdg_p,
+                    "wake": _wake_p,
+                    "kp_hm": _kphm_p,
+                }
                 loss_st, _st_logs = aquaforge_self_training_loss(
                     out_p, soft, base_sw, trust=trust
                 )
@@ -409,7 +451,8 @@ def main() -> None:
         t_score = 100.0 / (1.0 + avg)
         # Friendly display names for the active heads line
         _head_display = {"cls": "detect", "seg": "hull", "kp": "structures",
-                         "kp_hm": "structures_hm", "hdg": "heading", "wake": "wake"}
+                         "kp_hm": "structures_hm", "hdg": "heading", "wake": "wake",
+                         "wake_conf": "wake_conf", "dim": "dimensions", "vessel_type": "type"}
         active = [_head_display.get(k, k) for k, v in base_sw.items()
                   if float(v) > 0 and k not in ("distill",)]
         active = list(dict.fromkeys(active))  # deduplicate while preserving order

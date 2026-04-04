@@ -160,6 +160,11 @@ class AquaForgeSample:
     small_vessel_hint: float = 0.0
     teacher_heading_sc: np.ndarray | None = None
     teacher_valid: float = 0.0
+    # Wake visibility label from review UI checkbox (None = unlabeled, 1.0 = visible, 0.0 = not)
+    wake_visible: float | None = None
+    # Hull dimensions in metres from review UI annotation (None = unlabeled)
+    dim_length_m: float | None = None
+    dim_width_m: float | None = None
 
 
 def iter_aquaforge_samples(
@@ -259,6 +264,21 @@ def iter_aquaforge_samples(
         )
         ch = coastal_scene_hint(extra)
         smh = small_vessel_length_hint(extra)
+        wp_raw = extra.get("wake_present")
+        wake_vis: float | None = None
+        if wp_raw is True:
+            wake_vis = 1.0
+        elif wp_raw is False:
+            wake_vis = 0.0
+        # Hull dimensions from the review UI annotation (in metres; None = unlabeled)
+        try:
+            dim_len: float | None = float(extra["estimated_length_m"])
+        except (KeyError, TypeError, ValueError):
+            dim_len = None
+        try:
+            dim_wid: float | None = float(extra["estimated_width_m"])
+        except (KeyError, TypeError, ValueError):
+            dim_wid = None
         yield AquaForgeSample(
             Path(path),
             cx,
@@ -271,6 +291,9 @@ def iter_aquaforge_samples(
             review_uncertainty=u_sig,
             coastal_hint=ch,
             small_vessel_hint=smh,
+            wake_visible=wake_vis,
+            dim_length_m=dim_len,
+            dim_width_m=dim_wid,
         )
 
 
@@ -330,6 +353,39 @@ def collate_batch(
         )
     else:
         ru = torch.zeros(bsz, device=device, dtype=torch.float32)
+    # wake_visible: None means unlabeled; build float target + valid mask separately
+    wv_vals = [b[13] if len(b) >= 14 else None for b in batch_items]
+    wake_vis_t = torch.tensor(
+        [float(v) if v is not None else 0.0 for v in wv_vals],
+        device=device,
+        dtype=torch.float32,
+    )
+    wake_vis_mask = torch.tensor(
+        [1.0 if v is not None else 0.0 for v in wv_vals],
+        device=device,
+        dtype=torch.float32,
+    )
+    # Hull dimension targets (in metres; normalized by 500m chip half for ~[0,1] range)
+    # Model predicts normalized [0,1]; we denormalize for display/loss.
+    _DIM_NORM = 500.0  # metres; same as the 500m chip-half used in the review UI
+    dl_vals = [b[14] if len(b) >= 15 else None for b in batch_items]
+    dw_vals = [b[15] if len(b) >= 16 else None for b in batch_items]
+    dim_len_t = torch.tensor(
+        [float(v) / _DIM_NORM if v is not None else 0.0 for v in dl_vals],
+        device=device,
+        dtype=torch.float32,
+    )
+    dim_wid_t = torch.tensor(
+        [float(v) / _DIM_NORM if v is not None else 0.0 for v in dw_vals],
+        device=device,
+        dtype=torch.float32,
+    )
+    dim_mask = torch.tensor(
+        [1.0 if (dl_vals[i] is not None and dw_vals[i] is not None) else 0.0
+         for i in range(bsz)],
+        device=device,
+        dtype=torch.float32,
+    )
     return {
         "imgs": imgs,
         "cls": cls,
@@ -346,6 +402,11 @@ def collate_batch(
         "teacher_valid": teacher_v,
         "loss_scale": ls,
         "review_uncertainty": ru,
+        "wake_visible": wake_vis_t,
+        "wake_visible_mask": wake_vis_mask,
+        "dim_length_norm": dim_len_t,
+        "dim_width_norm": dim_wid_t,
+        "dim_mask": dim_mask,
     }
 
 
@@ -488,6 +549,9 @@ def build_training_row(
         float(sample.teacher_valid),
         1.0,
         float(getattr(sample, "review_uncertainty", 0.0)),
+        sample.wake_visible,  # index 13: None | 0.0 | 1.0
+        sample.dim_length_m,  # index 14: metres | None
+        sample.dim_width_m,   # index 15: metres | None
     )
 
 
@@ -590,7 +654,7 @@ def prepare_pseudo_self_training_batch(
                 continue
             img = chip_bgr_to_tensor(bgr, imgsz)
             x = torch.from_numpy(img).float().unsqueeze(0).to(device)
-            cls_l, seg, _kp, hdg, _wake, kp_hm = model(x)
+            cls_l, seg, _kp, hdg, _wake, kp_hm, *_xh = model(x)
             out = {
                 "cls_logit": cls_l,
                 "seg_logit": seg,

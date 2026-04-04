@@ -10,12 +10,12 @@
 #   onnx_quantize: false
 #   imgsz: 512
 #   chip_half: 320
-#   conf_threshold: 0.15
+#   conf_threshold: 0.05
 #   chip_batch_size: 6
 #   min_direct_heading_confidence: 0.35
 #   tiled_overlap_fraction: 0.5
 #   tiled_nms_iou: 0.45
-#   tiled_min_proposal_confidence: 0.08
+#   tiled_min_proposal_confidence: 0.02
 #   tiled_max_detections: 500
 
 # onnx_runtime:

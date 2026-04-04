@@ -990,6 +990,102 @@ def overlay_heading_arrow_north(
     return np.asarray(im)
 
 
+def overlay_bow_heading_arrowhead(
+    rgb_square: np.ndarray,
+    meta: LetterboxSquareMeta,
+    heading_deg_from_north: float,
+    bow_crop_xy: tuple[float, float],
+    *,
+    chip_native_w: int,
+    chip_native_h: int,
+    meters_per_native_px: float = 10.0,
+    offset_m: float = 50.0,
+    color: tuple[int, int, int] = (60, 255, 80),
+) -> np.ndarray:
+    """
+    Draw a solid arrowhead **offset_m metres ahead of the bow** along the vessel heading.
+
+    Unlike :func:`overlay_heading_arrow_north_on_letterbox` (corner arrow), this anchors the
+    arrowhead to the actual bow position so the direction symbol is spatially meaningful.
+
+    Parameters
+    ----------
+    rgb_square:
+        The letterboxed square image to annotate (as returned by
+        :func:`aquaforge.locator_coords.letterbox_rgb_to_square`).
+    meta:
+        Letterbox metadata (ox, oy, nw, nh from the same call).
+    heading_deg_from_north:
+        Compass heading (0 = north / up, clockwise).
+    bow_crop_xy:
+        Bow (x, y) in **crop-pixel** coordinates (origin = top-left of the native chip).
+    chip_native_w / chip_native_h:
+        Actual native-pixel dimensions of the chip (``scw`` / ``sch``).
+    meters_per_native_px:
+        Ground sample distance of the source raster (10 m for Sentinel-2 TCI).
+    offset_m:
+        How far ahead of the bow to place the arrowhead, in ground metres.
+    color:
+        RGB colour of the arrowhead (default bright green).
+    """
+    from PIL import Image, ImageDraw
+
+    h, w = int(rgb_square.shape[0]), int(rgb_square.shape[1])
+    ox, oy = int(meta.ox), int(meta.oy)
+    nw, nh = int(meta.nw), int(meta.nh)
+    if w < 8 or h < 8 or nw < 8 or nh < 8 or chip_native_w < 1 or chip_native_h < 1:
+        return rgb_square
+
+    # Scale factors: native chip pixels → letterbox display pixels
+    sx = float(nw) / float(chip_native_w)
+    sy = float(nh) / float(chip_native_h)
+
+    # Bow display position
+    bx_d = float(ox) + float(bow_crop_xy[0]) * sx
+    by_d = float(oy) + float(bow_crop_xy[1]) * sy
+
+    # Heading vector (compass: 0=north/up, 90=east/right)
+    rad = float(heading_deg_from_north) * (np.pi / 180.0)
+    dx = float(np.sin(rad))
+    dy = float(-np.cos(rad))  # screen y is flipped vs geographic y
+
+    # Offset in display pixels
+    display_px_per_m = sx / float(meters_per_native_px)
+    offset_px = float(offset_m) * display_px_per_m
+
+    # Tip of arrowhead
+    tip_x = float(np.clip(bx_d + dx * offset_px, 0, w - 1))
+    tip_y = float(np.clip(by_d + dy * offset_px, 0, h - 1))
+
+    # Arrow body: draw a short stem from bow to just before the tip
+    im = Image.fromarray(rgb_square.copy())
+    dr = ImageDraw.Draw(im)
+
+    stem_end_x = float(np.clip(bx_d + dx * offset_px * 0.6, 0, w - 1))
+    stem_end_y = float(np.clip(by_d + dy * offset_px * 0.6, 0, h - 1))
+    lw = max(2, int(min(nw, nh) / 60))
+    outline_rgb = (20, 20, 24)
+    if lw >= 2:
+        dr.line([(bx_d, by_d), (stem_end_x, stem_end_y)], fill=outline_rgb, width=lw + 2)
+    dr.line([(bx_d, by_d), (stem_end_x, stem_end_y)], fill=color, width=lw)
+
+    # Arrowhead
+    ah = max(5.0, offset_px * 0.4)
+    base_x = tip_x - dx * ah
+    base_y = tip_y - dy * ah
+    perp_x, perp_y = -dy, dx
+    spread = ah * 0.55
+    p1 = (base_x + perp_x * spread, base_y + perp_y * spread)
+    p2 = (base_x - perp_x * spread, base_y - perp_y * spread)
+    ow = max(1, lw // 2)
+    try:
+        dr.polygon([(tip_x, tip_y), p1, p2], fill=color, outline=outline_rgb, width=ow)
+    except TypeError:
+        dr.polygon([(tip_x, tip_y), p1, p2], fill=color)
+
+    return np.asarray(im)
+
+
 def overlay_heading_arrow_north_on_letterbox(
     rgb_square: np.ndarray,
     meta: LetterboxSquareMeta,
