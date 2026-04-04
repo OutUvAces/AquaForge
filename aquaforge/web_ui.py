@@ -196,6 +196,7 @@ from aquaforge.vessel_markers import (
     draw_markers_on_rgb,
     marker_hull_index,
     metrics_from_markers,
+    paired_wake_marker_dicts,
     quad_crop_from_dimension_markers,
     serialize_markers_for_json,
 )
@@ -1692,9 +1693,15 @@ def main() -> None:
                         f"proposal floor {det_cfg.aquaforge.tiled_min_proposal_confidence:.2f})…"
                     )
                     raw, meta = run_aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
-                    _skipped = meta.get("land_tiles_skipped", 0)
-                    if _skipped:
-                        st.write(f"🌍 Land masking skipped **{_skipped:,}** land tiles")
+                    _skipped_land = meta.get("land_tiles_skipped", 0)
+                    _skipped_cloud = meta.get("cloud_tiles_skipped", 0)
+                    if _skipped_land or _skipped_cloud:
+                        _skip_parts = []
+                        if _skipped_land:
+                            _skip_parts.append(f"**{_skipped_land:,}** land")
+                        if _skipped_cloud:
+                            _skip_parts.append(f"**{_skipped_cloud:,}** 100%-cloud")
+                        st.write(f"🌍 Skipped {' + '.join(_skip_parts)} tile(s)")
                     if meta.get("error") == "aquaforge_weights_missing":
                         try:
                             _af_rel = expected_aquaforge_checkpoint_path(
@@ -2617,6 +2624,15 @@ def _render_review_deck(
             if isinstance(raw_wk, list) and len(raw_wk) == 2:
                 w0, w1 = raw_wk[0], raw_wk[1]
                 _wk = ((float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1])))
+        # Manual two-point wake override: prefer markers if the user drew a wake line
+        _mk_for_wake = st.session_state.get(dim_key, [])
+        if isinstance(_mk_for_wake, list):
+            _wp = paired_wake_marker_dicts(_mk_for_wake, hull_index=1)
+            if _wp is not None:
+                _wk = (
+                    (float(_wp[0]["x"]), float(_wp[0]["y"])),
+                    (float(_wp[1]["x"]), float(_wp[1]["y"])),
+                )
         if _poly or _kxc or _kpc or _bs or _wk:
             spot_vis = overlay_aquaforge_on_spot_rgb(
                 spot_vis,
@@ -3495,6 +3511,16 @@ def _commit_review_label(
     _af_conf_save = af_spot_save.get("aquaforge_confidence")
     if _af_conf_save is None:
         _af_conf_save = float(sv_comb)
+
+    # --- Wake line segment from two-point manual markers ---
+    _mk_wake = st.session_state.get(dim_key, [])
+    if isinstance(_mk_wake, list):
+        _wp2 = paired_wake_marker_dicts(_mk_wake, hull_index=1)
+        if _wp2 is not None:
+            extra["wake_manual_segment_crop"] = [
+                [float(_wp2[0]["x"]), float(_wp2[0]["y"])],
+                [float(_wp2[1]["x"]), float(_wp2[1]["y"])],
+            ]
 
     # --- Hull polygon (full-res) — computed by model, not yet persisted ---
     _hull_poly_save = af_spot_save.get("aquaforge_hull_polygon_fullres")

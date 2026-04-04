@@ -17,7 +17,7 @@ from aquaforge.pixels import distance_meters
 
 # Point roles in the review UI (wake is an image-level checkbox in the UI, not a dropped point).
 # ``end``: two hull endpoints when bow vs stern is unknown (keel length + ambiguous heading ±180°).
-MARKER_ROLES: tuple[str, ...] = ("bow", "stern", "end", "side", "bridge")
+MARKER_ROLES: tuple[str, ...] = ("bow", "stern", "end", "side", "bridge", "wake")
 
 # Stored labels may use port / starboard / wake as point roles (same geometry as side / image wake flag).
 MARKER_ROLES_EXTENDED_STORAGE: frozenset[str] = frozenset(
@@ -81,6 +81,27 @@ def paired_end_marker_dicts(
     ends_only = [m for m in sub if m.get("role") == "end"]
     if len(ends_only) >= 2:
         return (ends_only[-2], ends_only[-1])
+    return None
+
+
+def paired_wake_marker_dicts(
+    markers: list[dict[str, Any]] | None,
+    hull_index: int = 1,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Two **wake** points (newest pair) — defines the visible wake line.
+
+    First point = wake start (near the vessel stern).
+    Second point = wake end (farthest visible extent in the chip).
+
+    The bearing from start → end is the *astern* direction; vessel heading is
+    ``(bearing + 180) % 360``.
+
+    Returns ``None`` when fewer than two wake markers exist.
+    """
+    sub = markers_for_hull(markers, hull_index)
+    wake_only = [m for m in sub if m.get("role") == "wake"]
+    if len(wake_only) >= 2:
+        return (wake_only[-2], wake_only[-1])
     return None
 
 
@@ -481,6 +502,26 @@ def metrics_from_markers(
             out["notes"].append(f"wake_stern_heading_deg:{h_wake:.1f}")
         except Exception as e:
             out["notes"].append(f"wake_heading_failed:{e}")
+
+    # Two-point wake line: start (near stern) → end (farthest visible wake).
+    # Provides wake direction independent of whether stern is marked, and gives
+    # a crop-space segment for the overlay renderer.
+    wp = paired_wake_marker_dicts(markers, hull_index)
+    if wp is not None:
+        try:
+            wa = crop_xy_to_full_xy(float(wp[0]["x"]), float(wp[0]["y"]), col_off, row_off)
+            wb = crop_xy_to_full_xy(float(wp[1]["x"]), float(wp[1]["y"]), col_off, row_off)
+            astern_2pt = geodesic_bearing_deg(path, wa[0], wa[1], wb[0], wb[1])
+            h_wake_2pt = (astern_2pt + 180.0) % 360.0
+            out["wake_direction_manual_deg"] = round(h_wake_2pt, 1)
+            out["wake_start_crop_xy"] = [float(wp[0]["x"]), float(wp[0]["y"])]
+            out["wake_end_crop_xy"] = [float(wp[1]["x"]), float(wp[1]["y"])]
+            out["notes"].append(f"wake_2pt_heading_deg:{h_wake_2pt:.1f}")
+            if heading_deg is None:
+                heading_deg = h_wake_2pt
+                heading_src = "wake_2pt"
+        except Exception as e:
+            out["notes"].append(f"wake_2pt_failed:{e}")
 
     if bridge is not None and bow is not None and heading_deg is None:
         try:

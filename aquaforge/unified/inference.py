@@ -559,6 +559,7 @@ class AquaForgePredictor:
         """
         from aquaforge.raster_rgb import raster_dimensions
         from aquaforge.land_mask import tile_is_water
+        from aquaforge.cloud_mask import tile_is_not_all_cloud_rgb
 
         if self._sess is None and self._torch is None:
             return []
@@ -579,14 +580,19 @@ class AquaForgePredictor:
         col_starts = _tile_axis_starts(W, tile, stride)
         chips: list[tuple[np.ndarray, int, int, int, int]] = []
         skipped_land = 0
+        skipped_cloud = 0
         for r0 in row_starts:
             for c0 in col_starts:
                 if not tile_is_water(land_mask, r0, c0, tile, tile):
                     skipped_land += 1
                     continue
                 chip = _read_padded_chip_bgr(path, c0, r0, tile, tile, W, H)
-                if chip is not None:
-                    chips.append(chip)
+                if chip is None:
+                    continue
+                if not tile_is_not_all_cloud_rgb(chip):
+                    skipped_cloud += 1
+                    continue
+                chips.append(chip)
 
         mb = self._effective_minibatch_size()
         raw_dets: list[AquaForgeSpotResult] = []
@@ -615,7 +621,7 @@ class AquaForgePredictor:
                 cx = float(d.chip_col_off) + float(d.chip_w) * 0.5
                 cy = float(d.chip_row_off) + float(d.chip_h) * 0.5
             triples.append((cx, cy, float(d.confidence)))
-        return triples, skipped_land
+        return triples, skipped_land, skipped_cloud
 
 
 def build_aquaforge_predictor(
@@ -680,6 +686,7 @@ def run_aquaforge_tiled_scene_triples(
         "scl_warped_to_tci_grid": False,
         "land_mask_applied": False,
         "land_tiles_skipped": 0,
+        "cloud_tiles_skipped": 0,
     }
     pred = get_cached_aquaforge_predictor(project_root, settings)
     if pred is None:
@@ -698,8 +705,9 @@ def run_aquaforge_tiled_scene_triples(
             meta["land_mask_applied"] = True
             meta["water_fraction"] = round(water_px / total_px, 3) if total_px else None
 
-        triples, _skipped = pred.run_tiled_scene_candidates(tci_path, land_mask=land_mask)
-        meta["land_tiles_skipped"] = _skipped
+        triples, _skipped_land, _skipped_cloud = pred.run_tiled_scene_candidates(tci_path, land_mask=land_mask)
+        meta["land_tiles_skipped"] = _skipped_land
+        meta["cloud_tiles_skipped"] = _skipped_cloud
         return triples, meta
     except Exception as e:
         meta["error"] = str(e)
