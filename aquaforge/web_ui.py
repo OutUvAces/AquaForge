@@ -945,7 +945,7 @@ def _explain_aquaforge_train_failure(code: int, stderr_txt: str, stdout_txt: str
     if code == 12 or "AQUAFORGE_EXIT:insufficient_rows" in blob:
         return (
             "**Not enough training rows.** Save at least **two** **Ship** reviews with hull/dimension markers, "
-            "or add **vessel_size_feedback** rows with a valid scene path — see the trainer message below for counts."
+            "or add **vessel_size_feedback** rows with a valid image path — see the trainer message below for counts."
         )
     return None
 
@@ -1196,7 +1196,7 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
     elif _n_af < 2:
         st.warning(
             f"**{_n_af}** AquaForge training row(s) in your labels file — need **≥2**. "
-            "Use **Ship** and place hull markers, or ensure **vessel_size_feedback** rows reference an existing scene."
+            "Use **Ship** and place hull markers, or ensure **vessel_size_feedback** rows reference an existing image."
         )
     if st.button(
         "Run quick first training (≈4 epochs)",
@@ -1246,9 +1246,9 @@ def _sidebar_spot_finding_settings() -> None:
     Detector queue limits and mask path — lives in the sidebar so the main column stays calm.
     Widget keys must stay stable for ``Refresh`` / overview logic.
     """
-    with st.expander("Scene overview & spot list", expanded=False):
+    with st.expander("Image overview & spot list", expanded=False):
         st.caption(
-            "**Refresh** runs AquaForge tiled detection on the full scene. "
+            "**Refresh** runs AquaForge tiled detection on the full image. "
             "These sliders only affect the **overview map** resolution and how many hits you see in the queue."
         )
         st.slider(
@@ -1441,11 +1441,11 @@ def main() -> None:
         if not tci_list:
             st.caption("Add an image to start.")
         else:
-            st.markdown("##### Scene")
-            file_help = "Which satellite scene you are working on."
+            st.markdown("##### Image")
+            file_help = "Which satellite image you are working on."
             if len(tci_list) <= 12:
                 pick_i = st.radio(
-                    "Scene",
+                    "Image",
                     options=list(range(len(tci_list))),
                     format_func=lambda i: tci_list[i].name,
                     help=file_help,
@@ -1455,7 +1455,7 @@ def main() -> None:
                 choice = tci_list[int(pick_i)]
             else:
                 choice = st.selectbox(
-                    "Scene",
+                    "Image",
                     options=tci_list,
                     format_func=lambda p: p.name,
                     help=file_help,
@@ -1508,7 +1508,7 @@ def main() -> None:
                 os._exit(0)
 
             if tci_loaded_sidebar:
-                with st.expander("Whole-scene map", expanded=False):
+                with st.expander("Whole-image map", expanded=False):
                     _render_hundred_cell_overview(
                         tci_loaded=tci_loaded_sidebar,
                         labels_path=labels_path,
@@ -1528,11 +1528,11 @@ def main() -> None:
                 _cog_exists = _cog_path.exists()
                 _ovr_exists = _ovr_path.exists()
                 if _cog_exists:
-                    st.caption("⚡ Scene optimized (COG active — all reads fast)")
+                    st.caption("⚡ Image optimized (COG active — all reads fast)")
                 elif _ovr_exists:
-                    st.caption("⚙️ Optimizing scene in background (overviews ready, COG building…)")
+                    st.caption("⚙️ Optimizing image in background (overviews ready, COG building…)")
                 else:
-                    st.caption("⚙️ Optimizing scene in background (first chip may be slow)…")
+                    st.caption("⚙️ Optimizing image in background (first chip may be slow)…")
 
             # Auto-convert ALL scenes to COG GeoTIFF in the background.
             # COG is the definitive fix: it speeds up inference chips (640 px),
@@ -1609,23 +1609,7 @@ def main() -> None:
     ready_dl, _ = cdse_download_ready()
 
     if scl_found is None:
-        st.caption(
-            "**SCL** beside the TCI is optional for vessel detection; it only improves **whole-scene map** land dimming. "
-            "You can add it for clearer coastlines."
-        )
-        if ready_dl:
-            if st.button("Download mask for this scene", key="workbench_dl_scl"):
-                with st.spinner("Downloading mask…"):
-                    try:
-                        tok = get_access_token()
-                        download_scl_for_local_tci(tci_path_sel, tci_path_sel.parent, tok)
-                        st.success("Mask saved. Press **Refresh spot list** in the left panel.")
-                        st.session_state.last_scene_key = ""
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-        else:
-            st.caption("Sign in via **.env** (see **.env.example**) or copy the mask JP2 next to your image.")
+        pass  # SCL is optional (land dimming only); no message needed
 
     tci_path = Path(choice)
     ds_factor = int(st.session_state.get("webui_ds_factor", 4))
@@ -1655,7 +1639,7 @@ def main() -> None:
                     det_cfg.aquaforge.tiled_min_proposal_confidence = float(_prop_ov)
                 pool = _detector_fetch_pool_size(max_k)
                 with st.spinner(
-                    "AquaForge full-scene tiled detection: overlapping windows, NMS merge, "
+                    "AquaForge full-image tiled detection: overlapping windows, NMS merge, "
                     "confidence filter. Large JP2s can take several minutes — the app is still working."
                 ):
                     raw, meta = run_aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
@@ -1667,7 +1651,7 @@ def main() -> None:
                         except ValueError:
                             _af_rel = expected_aquaforge_checkpoint_path(ROOT)
                         st.error(
-                            "Full-scene detection needs a trained AquaForge checkpoint. "
+                            "Full-image detection needs a trained AquaForge checkpoint. "
                             f"Expected e.g. `{_af_rel}` — save reviews then **Advanced → Train first AquaForge model**, "
                             "or set `aquaforge.weights_path` in `detection.yaml`."
                         )
@@ -1691,7 +1675,7 @@ def main() -> None:
                 if not cands:
                     if raw:
                         st.warning(
-                            "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another scene."
+                            "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another image."
                         )
                     elif isinstance(meta, dict) and meta.get(
                         "detection_source"
@@ -1707,7 +1691,7 @@ def main() -> None:
                             )
                     else:
                         st.warning(
-                            "No candidates: try another scene or adjust `detection.yaml` thresholds."
+                            "No candidates: try another image or adjust `detection.yaml` thresholds."
                         )
             except Exception as e:
                 st.error(str(e))
@@ -1730,11 +1714,11 @@ def main() -> None:
     if not candidates_ready(cands, tci_loaded):
         if tci_loaded:
             st.info(
-                "Nothing to review — **Refresh spot list** in the left panel, or **Advanced → Whole-scene map** to add a spot."
+                "Nothing to review — **Refresh spot list** in the left panel, or **Advanced → Whole-image map** to add a spot."
             )
         else:
             st.info(
-                "**No spot list yet.** Open the **←** sidebar, pick a **Scene**, then press "
+                "**No spot list yet.** Open the **←** sidebar, pick an **Image**, then press "
                 "**Refresh spot list**. The main area stays empty until that scan finishes "
                 "(large JP2s can take a minute or two — you will see a progress message then)."
             )
@@ -1758,7 +1742,7 @@ def _render_hundred_cell_overview(
     labels_path: Path,
     meta: dict,
     wrap_expander: bool = True,
-    expander_title: str = "Scene map",
+    expander_title: str = "Image map",
 ) -> None:
     """
     ``wrap_expander=False`` lets the caller place the same UI inside the sidebar (or another expander)
@@ -1794,7 +1778,7 @@ def _render_hundred_cell_overview(
 
         cb1, cb2 = st.columns(2)
         with cb1:
-            st.caption("Uses **Scene overview & spot list** settings and the same optional SCL path as **Refresh**.")
+            st.caption("Uses **Image overview & spot list** settings and the same optional SCL path as **Refresh**.")
         with cb2:
             if st.button(
                 "Clear overview cache",
