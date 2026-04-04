@@ -88,21 +88,28 @@ def paired_wake_marker_dicts(
     markers: list[dict[str, Any]] | None,
     hull_index: int = 1,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Two **wake** points (newest pair) — defines the visible wake line.
+    """Two **wake** points (first and last of any polyline) for backward-compat callers."""
+    pl = wake_polyline_marker_dicts(markers, hull_index)
+    if pl is None:
+        return None
+    return (pl[0], pl[-1])
 
-    First point = wake start (near the vessel stern).
-    Second point = wake end (farthest visible extent in the chip).
 
-    The bearing from start → end is the *astern* direction; vessel heading is
-    ``(bearing + 180) % 360``.
+def wake_polyline_marker_dicts(
+    markers: list[dict[str, Any]] | None,
+    hull_index: int = 1,
+) -> list[dict[str, Any]] | None:
+    """All **wake** markers in insertion order — defines a curved wake polyline.
+
+    The first point should be placed nearest the vessel stern; subsequent points
+    trace the visible wake arc.  Callers draw connected line segments through
+    each consecutive pair, allowing curved / turning wakes.
 
     Returns ``None`` when fewer than two wake markers exist.
     """
     sub = markers_for_hull(markers, hull_index)
     wake_only = [m for m in sub if m.get("role") == "wake"]
-    if len(wake_only) >= 2:
-        return (wake_only[-2], wake_only[-1])
-    return None
+    return wake_only if len(wake_only) >= 2 else None
 
 
 MARKER_ROLE_LABELS: dict[str, str] = {
@@ -503,23 +510,25 @@ def metrics_from_markers(
         except Exception as e:
             out["notes"].append(f"wake_heading_failed:{e}")
 
-    # Two-point wake line: start (near stern) → end (farthest visible wake).
-    # Provides wake direction independent of whether stern is marked, and gives
-    # a crop-space segment for the overlay renderer.
-    wp = paired_wake_marker_dicts(markers, hull_index)
-    if wp is not None:
+    # Curved wake polyline: any number of wake markers in insertion order.
+    # Direction is computed from first → last point; all intermediate points are
+    # saved so the overlay can draw the full arc.
+    wp_list = wake_polyline_marker_dicts(markers, hull_index)
+    if wp_list is not None:
         try:
-            wa = crop_xy_to_full_xy(float(wp[0]["x"]), float(wp[0]["y"]), col_off, row_off)
-            wb = crop_xy_to_full_xy(float(wp[1]["x"]), float(wp[1]["y"]), col_off, row_off)
+            wa = crop_xy_to_full_xy(float(wp_list[0]["x"]), float(wp_list[0]["y"]), col_off, row_off)
+            wb = crop_xy_to_full_xy(float(wp_list[-1]["x"]), float(wp_list[-1]["y"]), col_off, row_off)
             astern_2pt = geodesic_bearing_deg(path, wa[0], wa[1], wb[0], wb[1])
             h_wake_2pt = (astern_2pt + 180.0) % 360.0
             out["wake_direction_manual_deg"] = round(h_wake_2pt, 1)
-            out["wake_start_crop_xy"] = [float(wp[0]["x"]), float(wp[0]["y"])]
-            out["wake_end_crop_xy"] = [float(wp[1]["x"]), float(wp[1]["y"])]
+            # Save full polyline (all points) and keep start/end for backward compat
+            out["wake_polyline_crop_xy"] = [[float(m["x"]), float(m["y"])] for m in wp_list]
+            out["wake_start_crop_xy"] = [float(wp_list[0]["x"]), float(wp_list[0]["y"])]
+            out["wake_end_crop_xy"] = [float(wp_list[-1]["x"]), float(wp_list[-1]["y"])]
             out["notes"].append(f"wake_2pt_heading_deg:{h_wake_2pt:.1f}")
             if heading_deg is None:
                 heading_deg = h_wake_2pt
-                heading_src = "wake_2pt"
+                heading_src = "wake_polyline"
         except Exception as e:
             out["notes"].append(f"wake_2pt_failed:{e}")
 

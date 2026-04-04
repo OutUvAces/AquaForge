@@ -37,6 +37,49 @@ CLOUD_VARIANCE_THRESHOLD: float = 400.0    # pixel luminance variance; very unif
 # Public API
 # ---------------------------------------------------------------------------
 
+def cloud_tile_stats(
+    chip_bgr: "np.ndarray | None",
+    *,
+    brightness_threshold: float = CLOUD_BRIGHTNESS_THRESHOLD,
+    variance_threshold: float = CLOUD_VARIANCE_THRESHOLD,
+) -> "dict[str, float | bool]":
+    """Return diagnostic statistics for a tile chip.
+
+    Returns a dict with keys:
+      ``brightness_mean``  – mean BT.601 luminance (0-255)
+      ``pixel_variance``   – pixel luminance variance
+      ``would_skip``       – True if tile_is_not_all_cloud_rgb would SKIP this tile
+      ``margin_brightness``– how far mean is from threshold (positive = over)
+      ``margin_variance``  – how far variance is from threshold (positive = under)
+    """
+    import numpy as np
+
+    empty: "dict[str, float | bool]" = {
+        "brightness_mean": 0.0,
+        "pixel_variance": 0.0,
+        "would_skip": False,
+        "margin_brightness": 0.0,
+        "margin_variance": 0.0,
+    }
+    if chip_bgr is None:
+        return empty
+    try:
+        arr = chip_bgr.astype(np.float32)
+        gray = 0.114 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.299 * arr[:, :, 2]
+        bm = float(gray.mean())
+        pv = float(gray.var())
+        would_skip = bm > brightness_threshold and pv < variance_threshold
+        return {
+            "brightness_mean": round(bm, 1),
+            "pixel_variance": round(pv, 1),
+            "would_skip": would_skip,
+            "margin_brightness": round(bm - brightness_threshold, 1),
+            "margin_variance": round(variance_threshold - pv, 1),
+        }
+    except Exception:
+        return empty
+
+
 def tile_is_not_all_cloud_rgb(
     chip_bgr: "np.ndarray | None",
     *,

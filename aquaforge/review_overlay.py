@@ -2,7 +2,7 @@
 Spot-review visuals: contrast-stretched crops with optional detection overlays (PIL).
 
 The web UI turns layers on/off via ``draw_*`` flags on :func:`overlay_aquaforge_on_spot_rgb`; default layers
-are all on (outline, direction, keypoints, wake) under **On image**.
+are all on (outline, direction, structures, wake) under **On image**.
 """
 
 from __future__ import annotations
@@ -843,7 +843,7 @@ def overlay_aquaforge_on_spot_rgb(
     bow_stern_segment_crop: tuple[tuple[float, float], tuple[float, float]]
     | None = None,
     bow_stern_min_confidence: float | None = None,
-    wake_segment_crop: tuple[tuple[float, float], tuple[float, float]] | None = None,
+    wake_polyline_crop: list[tuple[float, float]] | None = None,
     draw_hull_outline: bool = True,
     draw_keypoints: bool = True,
     draw_bow_stern: bool = True,
@@ -851,7 +851,7 @@ def overlay_aquaforge_on_spot_rgb(
 ) -> np.ndarray:
     """
     Draw ship chip overlays (crop pixels): hull outline, dots for hull points, bow-to-stern line,
-    wake line. Uses plain PIL drawing — no UI text here.
+    wake polyline. Uses plain PIL drawing — no UI text here.
     """
     from PIL import Image, ImageDraw
 
@@ -918,11 +918,13 @@ def overlay_aquaforge_on_spot_rgb(
             line_col = bow_stern_base
         draw.line([a, b], fill=line_col, width=bs_lw)
 
-    if draw_wake and wake_segment_crop is not None:
-        p0, p1 = wake_segment_crop
-        a = (float(np.clip(p0[0], 0, w - 1)), float(np.clip(p0[1], 0, h - 1)))
-        b = (float(np.clip(p1[0], 0, w - 1)), float(np.clip(p1[1], 0, h - 1)))
-        draw.line([a, b], fill=(255, 200, 60), width=max(1, lw - 1))
+    if draw_wake and wake_polyline_crop is not None and len(wake_polyline_crop) >= 2:
+        pts = [
+            (float(np.clip(p[0], 0, w - 1)), float(np.clip(p[1], 0, h - 1)))
+            for p in wake_polyline_crop
+        ]
+        for i in range(len(pts) - 1):
+            draw.line([pts[i], pts[i + 1]], fill=(255, 200, 60), width=max(1, lw - 1))
 
     return np.asarray(im)
 

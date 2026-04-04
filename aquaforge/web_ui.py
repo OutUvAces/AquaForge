@@ -5,7 +5,7 @@ Streamlit UI: pick a scene, refresh, review spots.
 **Advanced** (retrain AquaForge, finding spots, download, label agreement check, exports, duplicates, label fixer,
 whole-scene map, optional heavy-inference consent).
 
-**Main:** large close-up, **On image** toggles (defaults: outline, direction, keypoints, wake on), optional readouts
+**Main:** large close-up, **On image** toggles (defaults: outline, direction, structures, wake on), optional readouts
 after the image, then **Back / Next** and **Ship / Not a ship / Unsure**.
 """
 
@@ -197,6 +197,7 @@ from aquaforge.vessel_markers import (
     marker_hull_index,
     metrics_from_markers,
     paired_wake_marker_dicts,
+    wake_polyline_marker_dicts,
     quad_crop_from_dimension_markers,
     serialize_markers_for_json,
 )
@@ -1487,6 +1488,45 @@ def main() -> None:
                     help="When off, the app skips heavy model work until you enable this.",
                 )
             _sidebar_spot_finding_settings()
+            # Cloud mask QC and threshold tuning
+            with st.expander("☁ Cloud mask QC", expanded=False):
+                from aquaforge.cloud_mask import (
+                    CLOUD_BRIGHTNESS_THRESHOLD as _CM_BT,
+                    CLOUD_VARIANCE_THRESHOLD as _CM_VT,
+                )
+                st.caption(
+                    "Tiles are skipped **only** when both conditions are true: "
+                    "mean luminance > brightness threshold AND pixel variance < variance threshold. "
+                    "Adjust here to tune which tiles get skipped."
+                )
+                _cm_bt = st.slider(
+                    "Brightness threshold (0–255)",
+                    min_value=180,
+                    max_value=255,
+                    value=int(st.session_state.get("vd_cloud_brightness_threshold", int(_CM_BT))),
+                    step=1,
+                    key="vd_cloud_brightness_threshold",
+                    help="Tiles with mean luminance above this are considered cloud-bright. "
+                         "Lower = skip fewer tiles; higher = skip more.",
+                )
+                _cm_vt = st.slider(
+                    "Variance threshold",
+                    min_value=50,
+                    max_value=2000,
+                    value=int(st.session_state.get("vd_cloud_variance_threshold", int(_CM_VT))),
+                    step=10,
+                    key="vd_cloud_variance_threshold",
+                    help="Tiles with pixel variance below this are considered uniform (cloud-like). "
+                         "Lower = skip fewer tiles; higher = skip more.",
+                )
+                st.caption(
+                    f"Current: skip if brightness > **{_cm_bt}** AND variance < **{_cm_vt}**"
+                )
+                if tci_loaded_sidebar:
+                    st.info(
+                        "The stats for the **current review chip** are shown in "
+                        "**Advanced (this spot)** beneath the review chip."
+                    )
             with st.expander("Download satellite image", expanded=False):
                 _render_catalog_panel()
             _aquaforge_vs_labels_expander(labels_path)
@@ -1620,7 +1660,7 @@ def main() -> None:
         except ValueError:
             _af_rel = expected_aquaforge_checkpoint_path(ROOT)
         st.info(
-            "**AquaForge** will show masks, keypoints, and headings once a trained checkpoint "
+            "**AquaForge** will show masks, structures, and headings once a trained checkpoint "
             "exists. Save **at least two** vessel reviews, then open **← Advanced** and run "
             "**Train first AquaForge model** (short run). Default weights file: "
             f"`{_af_rel}`."
@@ -1692,7 +1732,13 @@ def main() -> None:
                         f"(conf ≥ {det_cfg.aquaforge.conf_threshold:.2f}, "
                         f"proposal floor {det_cfg.aquaforge.tiled_min_proposal_confidence:.2f})…"
                     )
-                    raw, meta = run_aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
+                    raw, meta = run_aquaforge_tiled_scene_triples(
+                        ROOT,
+                        tci_path,
+                        det_cfg,
+                        cloud_brightness_threshold=float(st.session_state.get("vd_cloud_brightness_threshold", 235)),
+                        cloud_variance_threshold=float(st.session_state.get("vd_cloud_variance_threshold", 400)),
+                    )
                     _skipped_land = meta.get("land_tiles_skipped", 0)
                     _skipped_cloud = meta.get("cloud_tiles_skipped", 0)
                     if _skipped_land or _skipped_cloud:
@@ -2156,12 +2202,12 @@ def _render_spot_measurements_panel(
                 _ins_parts: list[str] = []
                 if ek is not None:
                     _ins_parts.append(
-                        f"- Keypoint heading vs your heading: **{int(round(ek))}°** off"
+                        f"- Structure heading vs your heading: **{int(round(ek))}°** off"
                     )
                 if ef is not None:
                     if fused_meaningful and delta_improve is not None:
                         _ins_parts.append(
-                            f"- Shown heading: **{int(round(ef))}°** off (~**{int(round(delta_improve))}°** closer than keypoint alone)"
+                            f"- Shown heading: **{int(round(ef))}°** off (~**{int(round(delta_improve))}°** closer than structures alone)"
                         )
                     else:
                         _ins_parts.append(
@@ -2186,7 +2232,7 @@ def _render_spot_measurements_panel(
             )
         if af_spot.get("aquaforge_heading_keypoint_deg") is not None:
             st.caption(
-                f"Keypoint heading: **{int(round(float(af_spot['aquaforge_heading_keypoint_deg'])))}°**"
+                f"Structure heading: **{int(round(float(af_spot['aquaforge_heading_keypoint_deg'])))}°**"
             )
         if af_spot.get("aquaforge_landmark_bow_confidence") is not None:
             _bc = float(af_spot["aquaforge_landmark_bow_confidence"])
@@ -2605,9 +2651,9 @@ def _render_review_deck(
             if isinstance(raw_bs, list) and len(raw_bs) == 2:
                 a0, a1 = raw_bs[0], raw_bs[1]
                 _bs = ((float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1])))
-        _wk = None
+        _wk: list[tuple[float, float]] | None = None
         wk_full = af_spot.get("aquaforge_wake_segment_fullres")
-        if isinstance(wk_full, list) and len(wk_full) == 2:
+        if isinstance(wk_full, list) and len(wk_full) >= 2:
             w0, w1 = wk_full[0], wk_full[1]
             if (
                 isinstance(w0, (list, tuple))
@@ -2615,24 +2661,21 @@ def _render_review_deck(
                 and len(w0) >= 2
                 and len(w1) >= 2
             ):
-                _wk = (
+                _wk = [
                     (float(w0[0]) - sc0, float(w0[1]) - sr0),
                     (float(w1[0]) - sc0, float(w1[1]) - sr0),
-                )
+                ]
         if _wk is None:
             raw_wk = af_spot.get("aquaforge_wake_segment_crop")
-            if isinstance(raw_wk, list) and len(raw_wk) == 2:
+            if isinstance(raw_wk, list) and len(raw_wk) >= 2:
                 w0, w1 = raw_wk[0], raw_wk[1]
-                _wk = ((float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1])))
-        # Manual two-point wake override: prefer markers if the user drew a wake line
+                _wk = [(float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1]))]
+        # Manual curved wake override: use the full polyline from session markers
         _mk_for_wake = st.session_state.get(dim_key, [])
         if isinstance(_mk_for_wake, list):
-            _wp = paired_wake_marker_dicts(_mk_for_wake, hull_index=1)
-            if _wp is not None:
-                _wk = (
-                    (float(_wp[0]["x"]), float(_wp[0]["y"])),
-                    (float(_wp[1]["x"]), float(_wp[1]["y"])),
-                )
+            _wp_list = wake_polyline_marker_dicts(_mk_for_wake, hull_index=1)
+            if _wp_list is not None:
+                _wk = [(float(m["x"]), float(m["y"])) for m in _wp_list]
         if _poly or _kxc or _kpc or _bs or _wk:
             spot_vis = overlay_aquaforge_on_spot_rgb(
                 spot_vis,
@@ -2641,7 +2684,7 @@ def _render_review_deck(
                 keypoints_xy_conf=_kxc,
                 bow_stern_segment_crop=_bs,
                 bow_stern_min_confidence=_bs_conf,
-                wake_segment_crop=_wk,
+                wake_polyline_crop=_wk,
                 draw_hull_outline=_show_hull,
                 draw_keypoints=_show_mark,
                 draw_bow_stern=_show_mark,
@@ -2767,7 +2810,7 @@ def _render_review_deck(
         with _ov2:
             st.checkbox("Direction", key="vd_ov_dir")
         with _ov3:
-            st.checkbox("Keypoints", key="vd_ov_mark")
+            st.checkbox("Structures", key="vd_ov_mark")
         with _ov4:
             st.checkbox("Wake", key="vd_ov_wake")
     with _cside:
@@ -3221,6 +3264,57 @@ def _render_review_deck(
 
     with st.expander("Advanced (this spot)", expanded=False):
         st.caption("Cloud, land, confidence — **Skip** is on the main bar above.")
+
+        # ── Cloud mask QC for this chip ──────────────────────────────────────
+        try:
+            from aquaforge.cloud_mask import cloud_tile_stats as _cloud_stats_fn
+            _cm_bt_qc = int(st.session_state.get("vd_cloud_brightness_threshold", 235))
+            _cm_vt_qc = int(st.session_state.get("vd_cloud_variance_threshold", 400))
+            # Use the cached spot chip (already read for display above)
+            _qc_chip_bgr: object = None
+            try:
+                # spot_rgb is the HxWx3 RGB chip read earlier in this function
+                _qc_chip_bgr = spot_rgb[:, :, ::-1]  # RGB → BGR
+            except Exception:
+                _qc_chip_bgr = None
+            if _qc_chip_bgr is not None:
+                _cm_stats = _cloud_stats_fn(
+                    _qc_chip_bgr,
+                    brightness_threshold=float(_cm_bt_qc),
+                    variance_threshold=float(_cm_vt_qc),
+                )
+                _cm_label = "🔴 **Would skip** (classified as 100% cloud)" if _cm_stats["would_skip"] else "🟢 **Would process** (not 100% cloud)"
+                st.markdown(f"**Cloud mask result:** {_cm_label}")
+                _cm_c1, _cm_c2 = st.columns(2)
+                with _cm_c1:
+                    _bm_margin = _cm_stats["margin_brightness"]
+                    _bm_color = "🔴" if _bm_margin > 0 else "🟢"
+                    st.metric(
+                        "Brightness (mean)",
+                        f"{_cm_stats['brightness_mean']:.0f}",
+                        delta=f"{_bm_margin:+.0f} vs threshold",
+                        delta_color="inverse",
+                        help="Mean BT.601 luminance (0–255). Threshold set in ☁ Cloud mask QC.",
+                    )
+                with _cm_c2:
+                    _pv_margin = _cm_stats["margin_variance"]
+                    st.metric(
+                        "Pixel variance",
+                        f"{_cm_stats['pixel_variance']:.0f}",
+                        delta=f"{_pv_margin:+.0f} vs threshold",
+                        delta_color="normal",
+                        help="Variance of luminance. Low = uniform (cloud-like). Threshold set in ☁ Cloud mask QC.",
+                    )
+                if _cm_stats["would_skip"]:
+                    st.warning(
+                        "⚠️ With current thresholds this chip would have been **skipped** "
+                        "during tile inference. If this is wrong, raise the brightness "
+                        "threshold or lower the variance threshold in **☁ Cloud mask QC**."
+                    )
+        except Exception as _cm_qc_err:
+            st.caption(f"Cloud QC unavailable: {_cm_qc_err}")
+
+        st.markdown("---")
         mx1, mx2 = st.columns(2)
         with mx1:
             if st.button(
@@ -3512,14 +3606,18 @@ def _commit_review_label(
     if _af_conf_save is None:
         _af_conf_save = float(sv_comb)
 
-    # --- Wake line segment from two-point manual markers ---
+    # --- Wake polyline from manual markers (supports curved/turning wakes) ---
     _mk_wake = st.session_state.get(dim_key, [])
     if isinstance(_mk_wake, list):
-        _wp2 = paired_wake_marker_dicts(_mk_wake, hull_index=1)
-        if _wp2 is not None:
+        _wp_list_save = wake_polyline_marker_dicts(_mk_wake, hull_index=1)
+        if _wp_list_save is not None:
+            extra["wake_polyline_crop_xy"] = [
+                [float(m["x"]), float(m["y"])] for m in _wp_list_save
+            ]
+            # Keep legacy 2-point keys for any downstream reader
             extra["wake_manual_segment_crop"] = [
-                [float(_wp2[0]["x"]), float(_wp2[0]["y"])],
-                [float(_wp2[1]["x"]), float(_wp2[1]["y"])],
+                [float(_wp_list_save[0]["x"]), float(_wp_list_save[0]["y"])],
+                [float(_wp_list_save[-1]["x"]), float(_wp_list_save[-1]["y"])],
             ]
 
     # --- Hull polygon (full-res) — computed by model, not yet persisted ---

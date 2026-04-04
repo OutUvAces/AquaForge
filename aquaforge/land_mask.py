@@ -111,14 +111,22 @@ def get_land_mask(
     # --- fast path: load from cache ---
     if cache.is_file():
         try:
-            return np.load(cache)
+            arr = np.load(cache)
+            # Sanity check: if the mask is 100% land AND the image has non-trivial
+            # extent, it was almost certainly built from a bad reprojection.  Delete
+            # and rebuild.
+            if arr.size > 0 and float(arr.mean()) >= 1.0:
+                cache.unlink(missing_ok=True)
+            else:
+                return arr
         except Exception:
             cache.unlink(missing_ok=True)
 
     try:
         import rasterio
         from rasterio.features import rasterize as rio_rasterize
-        from rasterio.warp import transform_geom
+        from rasterio.warp import transform_bounds, transform_geom
+        from shapely.geometry import box as sh_box, mapping as sh_mapping, shape as sh_shape
 
         geojson_path = ensure_ne_land_geojson(root)
         with open(geojson_path, "r", encoding="utf-8") as f:
@@ -128,15 +136,34 @@ def get_land_mask(
             W, H = ds.width, ds.height
             tf = ds.transform
             crs = ds.crs
+            native_bounds = ds.bounds  # in the raster's own CRS
 
-        # Reproject each NE land polygon from WGS-84 into the image CRS
+        # Convert scene bounds to WGS-84 so we can clip NE polygons before reprojection.
+        # Clipping first prevents large continental polygons from producing inverted
+        # winding orders when reprojected to UTM — which would mark the entire scene as land.
+        margin_deg = 1.0  # extra padding around scene bbox to avoid edge clipping artefacts
+        lng0, lat0, lng1, lat1 = transform_bounds(crs, "EPSG:4326", *native_bounds)
+        scene_bb_wgs84 = sh_box(
+            lng0 - margin_deg, lat0 - margin_deg,
+            lng1 + margin_deg, lat1 + margin_deg,
+        )
+
         shapes_px: list[tuple] = []
         for feat in gj.get("features", []):
             try:
-                rg = transform_geom("EPSG:4326", crs, feat["geometry"])
+                geom_wgs84 = sh_shape(feat["geometry"])
+                # Skip features entirely outside the scene bbox
+                if not geom_wgs84.intersects(scene_bb_wgs84):
+                    continue
+                # Clip to scene bbox BEFORE reprojecting to avoid winding-order issues
+                # on large continental polygons
+                clipped = geom_wgs84.intersection(scene_bb_wgs84)
+                if clipped.is_empty:
+                    continue
+                rg = transform_geom("EPSG:4326", crs, sh_mapping(clipped))
                 shapes_px.append((rg, 1))
             except Exception:
-                continue  # skip polygons that fail reprojection (e.g., antimeridian issues)
+                continue  # skip polygons that fail reprojection
 
         if not shapes_px:
             # Image is entirely over open ocean — no land polygons intersect

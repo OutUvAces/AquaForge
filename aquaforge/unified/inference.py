@@ -542,6 +542,8 @@ class AquaForgePredictor:
         self,
         tci_path: str | Path,
         land_mask: "np.ndarray | None" = None,
+        cloud_brightness_threshold: float | None = None,
+        cloud_variance_threshold: float | None = None,
     ) -> list[tuple[float, float, float]]:
         """
         Full-raster sliding-window AquaForge (overlap + NMS). Returns ``(cx, cy, confidence)``
@@ -559,7 +561,7 @@ class AquaForgePredictor:
         """
         from aquaforge.raster_rgb import raster_dimensions
         from aquaforge.land_mask import tile_is_water
-        from aquaforge.cloud_mask import tile_is_not_all_cloud_rgb
+        from aquaforge.cloud_mask import tile_is_not_all_cloud_rgb, CLOUD_BRIGHTNESS_THRESHOLD, CLOUD_VARIANCE_THRESHOLD
 
         if self._sess is None and self._torch is None:
             return []
@@ -589,7 +591,11 @@ class AquaForgePredictor:
                 chip = _read_padded_chip_bgr(path, c0, r0, tile, tile, W, H)
                 if chip is None:
                     continue
-                if not tile_is_not_all_cloud_rgb(chip):
+                if not tile_is_not_all_cloud_rgb(
+                    chip,
+                    brightness_threshold=cloud_brightness_threshold if cloud_brightness_threshold is not None else CLOUD_BRIGHTNESS_THRESHOLD,
+                    variance_threshold=cloud_variance_threshold if cloud_variance_threshold is not None else CLOUD_VARIANCE_THRESHOLD,
+                ):
                     skipped_cloud += 1
                     continue
                 chips.append(chip)
@@ -666,6 +672,9 @@ def run_aquaforge_tiled_scene_triples(
     project_root: Path,
     tci_path: Path,
     settings: AquaForgeSettings,
+    *,
+    cloud_brightness_threshold: float | None = None,
+    cloud_variance_threshold: float | None = None,
 ) -> tuple[list[tuple[float, float, float]], dict[str, Any]]:
     """
     Sole full-scene vessel detection: overlapping tiles, batched forward, NMS on decoded masks.
@@ -705,7 +714,12 @@ def run_aquaforge_tiled_scene_triples(
             meta["land_mask_applied"] = True
             meta["water_fraction"] = round(water_px / total_px, 3) if total_px else None
 
-        triples, _skipped_land, _skipped_cloud = pred.run_tiled_scene_candidates(tci_path, land_mask=land_mask)
+        triples, _skipped_land, _skipped_cloud = pred.run_tiled_scene_candidates(
+            tci_path,
+            land_mask=land_mask,
+            cloud_brightness_threshold=cloud_brightness_threshold,
+            cloud_variance_threshold=cloud_variance_threshold,
+        )
         meta["land_tiles_skipped"] = _skipped_land
         meta["cloud_tiles_skipped"] = _skipped_cloud
         return triples, meta
