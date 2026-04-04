@@ -2781,7 +2781,7 @@ def _render_review_deck(
     # Header — spot counter. Overlay defaults set here; checkboxes rendered below the review chip.
     _sc_prev_hdr = cands[idx][2]
     _hint_hdr = " · map" if _sc_prev_hdr == LOCATOR_MANUAL_SCORE else ""
-    st.caption(f"**{idx + 1}** / **{n}**{_hint_hdr}")
+    # Detection ID is drawn directly onto the chip image (top-left corner).
     # Default overlays (all on). Checkboxes below update these on the next rerun.
     for _xk, _dv in (
         ("vd_ov_hull", True),
@@ -3266,6 +3266,26 @@ def _render_review_deck(
                 meters_per_native_px=float(gavg) if gavg else 10.0,
                 offset_m=80.0,
             )
+    # Draw detection ID in the top-left corner of the chip image.
+    try:
+        from PIL import Image as _PILImage, ImageDraw as _PILDraw, ImageFont as _PILFont
+        _id_img = _PILImage.fromarray(spot_sq)
+        _id_draw = _PILDraw.Draw(_id_img)
+        _id_text = f"{idx + 1} / {n}"
+        _fsize = max(16, main_px // 42)
+        try:
+            _font = _PILFont.truetype("arial.ttf", _fsize)
+        except Exception:
+            _font = _PILFont.load_default()
+        _pad = max(4, _fsize // 4)
+        _bbox = _id_draw.textbbox((0, 0), _id_text, font=_font)
+        _tw, _th = _bbox[2] - _bbox[0], _bbox[3] - _bbox[1]
+        _id_draw.rectangle([_pad - 2, _pad - 2, _pad + _tw + 4, _pad + _th + 4],
+                           fill=(0, 0, 0, 160))
+        _id_draw.text((_pad, _pad), _id_text, font=_font, fill=(255, 255, 255))
+        spot_sq = np.asarray(_id_img)
+    except Exception:
+        pass
     loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, side_px)
 
     wake_vis_k = f"wake_vis_{spot_k}"
