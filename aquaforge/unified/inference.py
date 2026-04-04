@@ -59,7 +59,16 @@ def _mask_to_polygon_fullres(
     cw: int,
     ch: int,
     conf_thr: float = 0.45,
+    gsd_m: float = 10.0,
+    max_vessel_m: float = 500.0,
 ) -> list[tuple[float, float]] | None:
+    """Convert a segmentation mask to a rectangular hull polygon in full-res coordinates.
+
+    Uses ``cv2.minAreaRect`` to force a rotated-rectangle output — vessels are
+    rectangular/pill-shaped, not arbitrary polygons.  Polygons whose longest
+    dimension exceeds *max_vessel_m* metres are discarded (physically impossible
+    hull sizes from an immature model).
+    """
     import cv2
 
     m = (mask >= conf_thr).astype(np.uint8) * 255
@@ -71,15 +80,28 @@ def _mask_to_polygon_fullres(
     c = max(cnts, key=cv2.contourArea)
     if cv2.contourArea(c) < 4:
         return None
-    eps = 0.002 * cv2.arcLength(c, True)
-    ap = cv2.approxPolyDP(c, eps, True)
+
+    # Fit minimum-area rotated rectangle — always gives a clean rectangular hull.
+    rect = cv2.minAreaRect(c)          # ((cx, cy), (w, h), angle_deg) in chip px
+    (_, _), (rw, rh), _ = rect
+
+    # Size gate: convert chip-pixel dimensions to metres and reject oversized boxes.
+    # Scale from chip pixels → full-res pixels → metres.
+    scale_x = float(cw) / float(imgsz)
+    scale_y = float(ch) / float(imgsz)
+    rw_m = rw * scale_x * gsd_m
+    rh_m = rh * scale_y * gsd_m
+    if max(rw_m, rh_m) > max_vessel_m:
+        return None
+
+    box = cv2.boxPoints(rect)          # 4 corner points in chip pixel space
     poly: list[tuple[float, float]] = []
-    for p in ap.reshape(-1, 2):
+    for p in box:
         u, v = float(p[0]), float(p[1])
         fx = c0 + (u / float(imgsz)) * float(cw)
         fy = r0 + (v / float(imgsz)) * float(ch)
         poly.append((fx, fy))
-    return poly if len(poly) >= 3 else None
+    return poly
 
 
 def _landmarks_full_from_normalized(

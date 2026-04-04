@@ -911,6 +911,57 @@ def _joint_batch_context_floats(
     }
 
 
+def hull_compactness_loss(seg_logit: "torch.Tensor") -> "torch.Tensor":
+    """Penalise hull masks that are non-rectangular or physically oversized.
+
+    Two terms, both fully differentiable:
+
+    **Fill ratio** — for each sample, compute the predicted mask's soft area and
+    its axis-aligned bounding-box area.  A rectangle fills its own bounding box
+    perfectly (ratio → 1).  Crazy, jagged, or L-shaped masks score much lower.
+    Penalises ``relu(target_fill − fill_ratio)`` with *target_fill = 0.65*.
+
+    **Aspect ratio** — ships are elongated (3:1 to 15:1).  Penalise masks that
+    are near-square (aspect < 2:1) or impossibly thin (aspect > 20:1) when the
+    mask is large enough to be a real detection.
+    """
+    import torch.nn.functional as F
+
+    prob = torch.sigmoid(seg_logit)
+    if prob.dim() == 4:
+        prob = prob.squeeze(1)              # (B, H, W)
+
+    total = prob.new_zeros(())
+    n_valid = 0
+
+    for b in range(prob.shape[0]):
+        p = prob[b]                         # (H, W)
+        mask_area = p.sum()
+        if mask_area < 4.0:                 # skip near-empty predictions
+            continue
+
+        # Soft axis-aligned bounding box via marginal projections
+        row_proj = p.max(dim=1).values      # (H,) — 1 if any col in row is active
+        col_proj = p.max(dim=0).values      # (W,)
+        bbox_h = row_proj.sum().clamp_min(1.0)
+        bbox_w = col_proj.sum().clamp_min(1.0)
+        bbox_area = bbox_h * bbox_w
+
+        # Fill ratio penalty — target ≥ 0.65 (rectangle fills its bbox)
+        fill = mask_area / (bbox_area + 1e-4)
+        total = total + F.relu(torch.tensor(0.65, device=p.device) - fill)
+
+        # Aspect ratio penalty — penalise near-square or impossibly thin shapes
+        aspect = bbox_h / (bbox_w + 1e-4)
+        aspect = torch.max(aspect, 1.0 / (aspect + 1e-4))   # always ≥ 1
+        total = total + F.relu(torch.tensor(2.0, device=p.device) - aspect) * 0.3
+        total = total + F.relu(aspect - torch.tensor(20.0, device=p.device)) * 0.3
+
+        n_valid += 1
+
+    return total / max(n_valid, 1)
+
+
 def aquaforge_joint_loss(
     out: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
@@ -1006,6 +1057,11 @@ def aquaforge_joint_loss(
         dice_s = dice_loss_per_sample(sl, seg_gt)
         iou_s = soft_iou_per_sample(sl, seg_gt)
         seg_loss = ((dice_s + iou_s) * small_weight).mean()
+        # Hull compactness regularisation: vessels are rectangular, not crazy polygons.
+        # Weight 0.15 keeps it subordinate to dice+iou but meaningful from the first epoch.
+        compact_loss = hull_compactness_loss(sl)
+        seg_loss = seg_loss + 0.15 * compact_loss
+        logs["loss_hull_compact"] = float(compact_loss.detach())
     logs["loss_seg"] = float(seg_loss.detach())
 
     kp_loss = torch.zeros((), device=dev, dtype=dt)
