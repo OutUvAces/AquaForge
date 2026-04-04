@@ -1469,6 +1469,91 @@ def _render_af_branding_header(brand_dir: Path | None) -> None:
     st.markdown("---")
 
 
+# ---------------------------------------------------------------------------
+# Scan result disk cache (avoids re-running full tiled inference on restart)
+# ---------------------------------------------------------------------------
+
+def _scan_cache_path(tci_path: Path, project_root: Path) -> Path:
+    """Return the path for the scan-result JSON cache file."""
+    cache_dir = project_root / "data" / "scan_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / (tci_path.stem + "_scan.json")
+
+
+def _scan_cache_fingerprint(
+    tci_path: Path,
+    project_root: Path,
+    conf: float,
+    proposal: float,
+    cloud_brightness: float,
+    cloud_variance: float,
+) -> dict:
+    """Build a dict of all values that, if changed, should invalidate the cache."""
+    from aquaforge.unified.settings import resolve_aquaforge_checkpoint_path, load_aquaforge_settings
+    try:
+        cfg = load_aquaforge_settings(project_root)
+        ckpt = resolve_aquaforge_checkpoint_path(project_root, cfg.aquaforge)
+        model_mtime = int(ckpt.stat().st_mtime) if (ckpt and ckpt.is_file()) else 0
+    except Exception:
+        model_mtime = 0
+    land_npy = Path(str(tci_path) + ".land.npy")
+    return {
+        "tci": str(tci_path.resolve()),
+        "model_mtime": model_mtime,
+        "conf": round(conf, 4),
+        "proposal": round(proposal, 4),
+        "cloud_brightness": round(cloud_brightness, 1),
+        "cloud_variance": round(cloud_variance, 1),
+        "land_mask_present": land_npy.is_file(),
+    }
+
+
+def _load_scan_cache(
+    cache_path: Path,
+    fingerprint: dict,
+) -> tuple[list, dict] | None:
+    """Return (raw_triples, meta) from disk cache if fingerprint matches, else None."""
+    import json
+    if not cache_path.is_file():
+        return None
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if data.get("fingerprint") != fingerprint:
+            return None
+        raw = [tuple(t) for t in data["raw"]]
+        meta = data["meta"]
+        return raw, meta
+    except Exception:
+        return None
+
+
+def _save_scan_cache(
+    cache_path: Path,
+    fingerprint: dict,
+    raw: list,
+    meta: dict,
+) -> None:
+    """Save scan results to disk."""
+    import json
+
+    def _jsonable(v):
+        if isinstance(v, (list, tuple)):
+            return [_jsonable(i) for i in v]
+        if isinstance(v, dict):
+            return {k: _jsonable(vv) for k, vv in v.items()}
+        if isinstance(v, (int, float, str, bool)) or v is None:
+            return v
+        return str(v)
+
+    try:
+        cache_path.write_text(
+            json.dumps({"fingerprint": fingerprint, "raw": _jsonable(raw), "meta": _jsonable(meta)}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass  # cache write failure is non-fatal
+
+
 def main() -> None:
     brand_dir = _resolve_af_brand_dir()
     p_small = brand_dir / "AquaForge_small.jpg" if brand_dir is not None else None
@@ -1960,39 +2045,24 @@ def main() -> None:
                     _lm_note = "🌍 Land mask active — skipping land tiles"
                 else:
                     _lm_note = "🌍 Building land mask in background (first scan includes all tiles)"
-                with st.status(
-                    "Scanning image for vessels…",
-                    expanded=True,
-                ) as _det_status:
-                    st.write(f"📂 Image: `{tci_path.name}`")
-                    st.write(f"🗺️ Grid: {_img_desc}")
-                    st.write(_lm_note)
-                    st.write(
-                        f"⚙️ Running AquaForge model on each tile "
-                        f"(conf ≥ {det_cfg.aquaforge.conf_threshold:.2f}, "
-                        f"proposal floor {det_cfg.aquaforge.tiled_min_proposal_confidence:.2f})…"
-                    )
-                    raw, meta = run_aquaforge_tiled_scene_triples(
-                        ROOT,
-                        tci_path,
-                        det_cfg,
-                        cloud_brightness_threshold=float(st.session_state.get("vd_cloud_brightness_threshold", 235)),
-                        cloud_variance_threshold=float(st.session_state.get("vd_cloud_variance_threshold", 400)),
-                    )
-                    _skipped_land = meta.get("land_tiles_skipped", 0)
-                    _skipped_cloud = meta.get("cloud_tiles_skipped", 0)
-                    if _skipped_land or _skipped_cloud:
-                        _skip_parts = []
-                        if _skipped_land:
-                            _skip_parts.append(f"**{_skipped_land:,}** land")
-                        if _skipped_cloud:
-                            _skip_parts.append(f"**{_skipped_cloud:,}** 100%-cloud")
-                        st.write(f"🌍 Skipped {' + '.join(_skip_parts)} tile(s)")
+
+                # --- Check scan cache ---
+                _cb_thresh = float(st.session_state.get("vd_cloud_brightness_threshold", 235))
+                _cv_thresh = float(st.session_state.get("vd_cloud_variance_threshold", 400))
+                _scan_fp = _scan_cache_fingerprint(
+                    tci_path, ROOT,
+                    det_cfg.aquaforge.conf_threshold,
+                    det_cfg.aquaforge.tiled_min_proposal_confidence,
+                    _cb_thresh, _cv_thresh,
+                )
+                _scan_cache_file = _scan_cache_path(tci_path, ROOT)
+                _cached = _load_scan_cache(_scan_cache_file, _scan_fp)
+
+                if _cached is not None:
+                    raw, meta = _cached
                     if meta.get("error") == "aquaforge_weights_missing":
                         try:
-                            _af_rel = expected_aquaforge_checkpoint_path(
-                                ROOT
-                            ).relative_to(ROOT)
+                            _af_rel = expected_aquaforge_checkpoint_path(ROOT).relative_to(ROOT)
                         except ValueError:
                             _af_rel = expected_aquaforge_checkpoint_path(ROOT)
                         st.error(
@@ -2001,14 +2071,65 @@ def main() -> None:
                             "or set `aquaforge.weights_path` in `detection.yaml`."
                         )
                         raw = []
-                        _det_status.update(label="No model checkpoint found", state="error", expanded=True)
                     elif raw:
                         raw = raw[:pool]
-                        st.write(f"✅ Merging overlapping detections → **{len(raw)}** unique vessel candidate(s) above threshold")
-                        _det_status.update(label=f"Found {len(raw)} vessel candidate(s) — loading review queue…", state="complete", expanded=False)
+                        st.info(
+                            f"⚡ Loaded **{len(raw)}** vessel candidate(s) from scan cache "
+                            f"(model + thresholds unchanged) — skipped full re-scan."
+                        )
                     else:
-                        st.write("⚠️ No detections passed the confidence threshold")
-                        _det_status.update(label="No detections above threshold", state="error", expanded=True)
+                        st.info("⚡ Loaded scan result from cache — no detections found previously.")
+                else:
+                    with st.status(
+                        "Scanning image for vessels…",
+                        expanded=True,
+                    ) as _det_status:
+                        st.write(f"📂 Image: `{tci_path.name}`")
+                        st.write(f"🗺️ Grid: {_img_desc}")
+                        st.write(_lm_note)
+                        st.write(
+                            f"⚙️ Running AquaForge model on each tile "
+                            f"(conf ≥ {det_cfg.aquaforge.conf_threshold:.2f}, "
+                            f"proposal floor {det_cfg.aquaforge.tiled_min_proposal_confidence:.2f})…"
+                        )
+                        raw, meta = run_aquaforge_tiled_scene_triples(
+                            ROOT,
+                            tci_path,
+                            det_cfg,
+                            cloud_brightness_threshold=_cb_thresh,
+                            cloud_variance_threshold=_cv_thresh,
+                        )
+                        _skipped_land = meta.get("land_tiles_skipped", 0)
+                        _skipped_cloud = meta.get("cloud_tiles_skipped", 0)
+                        if _skipped_land or _skipped_cloud:
+                            _skip_parts = []
+                            if _skipped_land:
+                                _skip_parts.append(f"**{_skipped_land:,}** land")
+                            if _skipped_cloud:
+                                _skip_parts.append(f"**{_skipped_cloud:,}** 100%-cloud")
+                            st.write(f"🌍 Skipped {' + '.join(_skip_parts)} tile(s)")
+                        if meta.get("error") == "aquaforge_weights_missing":
+                            try:
+                                _af_rel = expected_aquaforge_checkpoint_path(ROOT).relative_to(ROOT)
+                            except ValueError:
+                                _af_rel = expected_aquaforge_checkpoint_path(ROOT)
+                            st.error(
+                                "Full-image detection needs a trained AquaForge checkpoint. "
+                                f"Expected e.g. `{_af_rel}` — save reviews then **Advanced → Train first AquaForge model**, "
+                                "or set `aquaforge.weights_path` in `detection.yaml`."
+                            )
+                            raw = []
+                            _det_status.update(label="No model checkpoint found", state="error", expanded=True)
+                        elif raw:
+                            raw = raw[:pool]
+                            st.write(f"✅ Merging overlapping detections → **{len(raw)}** unique vessel candidate(s) above threshold")
+                            _det_status.update(label=f"Found {len(raw)} vessel candidate(s) — loading review queue…", state="complete", expanded=False)
+                        else:
+                            st.write("⚠️ No detections passed the confidence threshold")
+                            _det_status.update(label="No detections above threshold", state="error", expanded=True)
+                        # Save successful (non-error) scans to disk cache
+                        if not meta.get("error"):
+                            _save_scan_cache(_scan_cache_file, _scan_fp, raw, meta)
                 cands = filter_unlabeled_candidates(
                     raw,
                     labels_path,
