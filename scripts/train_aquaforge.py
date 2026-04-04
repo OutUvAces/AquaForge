@@ -373,7 +373,6 @@ def main() -> None:
             _ckpt_model, _ckpt_meta = _load_ckpt(
                 str(ckpt_path),
                 device=str(device),
-                in_channels=_in_channels,
             )
             model.load_state_dict(_ckpt_model.state_dict(), strict=False)
             _resumed = True
