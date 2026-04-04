@@ -284,26 +284,7 @@ def main() -> None:
     except Exception as _e:
         print(f"  spectral band check skipped ({_e}); using in_channels=3", flush=True)
 
-    # Warm-start from existing checkpoint when available.
-    # load_checkpoint handles in_channels expansion automatically: RGB weights are
-    # preserved and new spectral channels are initialised to 5% of the mean RGB weight.
-    if ckpt_path.is_file():
-        try:
-            from aquaforge.unified.model import load_checkpoint as _load_ckpt
-            model, _warm_meta = _load_ckpt(
-                ckpt_path, device, override_in_channels=_in_channels
-            )
-            _saved_ch = _warm_meta.get("in_channels", 3)
-            print(
-                f"  warm-start: {ckpt_path.name}  "
-                f"(saved in_channels={_saved_ch} -> training in_channels={_in_channels})",
-                flush=True,
-            )
-        except Exception as _we:
-            print(f"  warm-start failed ({_we}) - starting from scratch", flush=True)
-            model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS, in_channels=_in_channels).to(device)
-    else:
-        model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS, in_channels=_in_channels).to(device)
+    model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS, in_channels=_in_channels).to(device)
 
     lr_head = float(args.lr)
     opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
