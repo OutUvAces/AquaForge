@@ -1497,7 +1497,8 @@ def _render_af_branding_header(brand_dir: Path | None) -> None:
     except Exception:
         st.image(str(p_text), width=400)
     st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown("---")
+
+
 
 
 # ---------------------------------------------------------------------------
