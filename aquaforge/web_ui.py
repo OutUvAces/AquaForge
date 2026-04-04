@@ -1017,12 +1017,23 @@ def _subprocess_train_aquaforge(
     log_path = project_root / "data" / "train_log.txt"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Ensure PROCESSOR_ARCHITECTURE is set in the child environment.
+    # Python 3.14 on Windows calls WMI during platform.machine() (invoked by
+    # torch.__init__) to detect CPU arch.  WMI can hang or raise
+    # KeyboardInterrupt on some machines.  Setting this env var beforehand
+    # causes platform.uname() to read it directly and skip the WMI query.
+    import os as _os
+    _child_env = dict(_os.environ)
+    if "PROCESSOR_ARCHITECTURE" not in _child_env:
+        _child_env["PROCESSOR_ARCHITECTURE"] = "AMD64"
+
     with open(log_path, "w", encoding="utf-8", errors="replace") as _lf:
         proc = subprocess.Popen(
             cmd,
             cwd=str(project_root.resolve()),
             stdout=_lf,
             stderr=subprocess.STDOUT,
+            env=_child_env,
         )
     pid_file.write_text(str(proc.pid))
 

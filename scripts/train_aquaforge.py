@@ -37,6 +37,7 @@ from __future__ import annotations
 # Pure AquaForge trainer: in-repo CNN only (``model_arch`` is always ``cnn``).
 
 import argparse
+import os
 import random
 import subprocess
 import sys
@@ -45,6 +46,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# Python 3.14 on Windows calls WMI (via platform._get_machine_win32) to
+# detect CPU architecture during torch.__init__.  When WMI is slow or the
+# service is unhealthy the query hangs and eventually raises KeyboardInterrupt,
+# killing the training process before it starts.
+# Setting PROCESSOR_ARCHITECTURE in the environment beforehand causes
+# platform.uname() to use the env value directly and skip the WMI call.
+if sys.platform == "win32" and not os.environ.get("PROCESSOR_ARCHITECTURE"):
+    os.environ["PROCESSOR_ARCHITECTURE"] = "AMD64"
 
 # Module-level dataset class — must NOT be a local/nested class.
 # Python 3.14 uses the 'spawn' multiprocessing start method on Windows,
