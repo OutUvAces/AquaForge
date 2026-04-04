@@ -3106,6 +3106,29 @@ def _render_review_deck(
             if isinstance(raw_wk, list) and len(raw_wk) >= 2:
                 w0, w1 = raw_wk[0], raw_wk[1]
                 _wk = [(float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1]))]
+        # ── Proximity gate: suppress model-predicted wake if far from hull ──────
+        # A wake start must be near the hull (stern).  If both endpoints are far
+        # from the hull centroid, the prediction is a spurious outlier.
+        # User-drawn wakes (the manual override below) are never suppressed.
+        if _wk is not None and _poly:
+            _hcx_crop = sum(p[0] for p in _poly) / len(_poly)
+            _hcy_crop = sum(p[1] for p in _poly) / len(_poly)
+            _hull_xs_w = [p[0] for p in _poly]
+            _hull_ys_w = [p[1] for p in _poly]
+            _hull_half_diag = math.sqrt(
+                (max(_hull_xs_w) - min(_hull_xs_w)) ** 2
+                + (max(_hull_ys_w) - min(_hull_ys_w)) ** 2
+            ) / 2.0
+            # Threshold: 2× hull half-diagonal + 100 m minimum.
+            # The nearest wake endpoint must be within this distance of the centroid.
+            _w_thresh = max(
+                _hull_half_diag * 2.0,
+                int(round(100.0 / max(gavg, 1.0))),
+            )
+            _wd0 = math.sqrt((_wk[0][0] - _hcx_crop) ** 2 + (_wk[0][1] - _hcy_crop) ** 2)
+            _wd1 = math.sqrt((_wk[1][0] - _hcx_crop) ** 2 + (_wk[1][1] - _hcy_crop) ** 2)
+            if min(_wd0, _wd1) > _w_thresh:
+                _wk = None
         # Manual curved wake override: use the full polyline from session markers
         _mk_for_wake = st.session_state.get(dim_key, [])
         if isinstance(_mk_for_wake, list):
