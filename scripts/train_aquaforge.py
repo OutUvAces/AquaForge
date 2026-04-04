@@ -220,6 +220,14 @@ def main() -> None:
             return row
 
     use_sampler = not bool(args.no_priority_sampling)
+    # ── DataLoader workers ─────────────────────────────────────────────────
+    # On Windows with small datasets, 0 workers avoids spawn overhead.
+    # Once dataset grows beyond ~200 chips, parallel loading is worth it.
+    import os as _os
+    _n_workers = 0
+    if len(rows) > 200:
+        _n_workers = min(4, max(1, (_os.cpu_count() or 2) // 2))
+    _persistent = _n_workers > 0
     if use_sampler:
         wts = torch.tensor(
             [
@@ -242,7 +250,8 @@ def main() -> None:
             sampler=sampler,
             shuffle=False,
             drop_last=False,
-            num_workers=0,  # 0 avoids Windows spawn overhead for small datasets
+            num_workers=_n_workers,
+            persistent_workers=_persistent,
             pin_memory=torch.cuda.is_available(),
             collate_fn=lambda b: list(b),
         )
@@ -253,13 +262,26 @@ def main() -> None:
             batch_size=int(args.batch_size),
             shuffle=True,
             drop_last=False,
-            num_workers=0,
+            num_workers=_n_workers,
+            persistent_workers=_persistent,
             pin_memory=torch.cuda.is_available(),
             collate_fn=lambda b: list(b),
         )
+    print(f"  dataloader num_workers={_n_workers}", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _use_gpu = device.type == "cuda"
+
+    # ── GPU performance flags ──────────────────────────────────────────────
+    if _use_gpu:
+        # benchmark=True: cuDNN auto-tunes conv algorithms on first run.
+        # Fixed input size (imgsz is constant) → ~10% speedup after warmup.
+        torch.backends.cudnn.benchmark = True
+        # TF32: Ampere+ GPUs (RTX 30xx, A100, etc.) can run matrix-multiplies
+        # at TF32 precision — ~3× faster than FP32 with negligible accuracy loss.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     # Mixed-precision scaler: ~2× faster on GPU with minimal accuracy cost.
     # AMP is a no-op on CPU (scaler.scale(loss) == loss, no float16 cast).
     _amp_enabled = _use_gpu
@@ -308,6 +330,24 @@ def main() -> None:
 
     model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS, in_channels=_in_channels).to(device)
 
+    # ── torch.compile (PyTorch 2.0+) ──────────────────────────────────────
+    # Compiles the model graph with Triton kernels when available; gives
+    # 10–30% throughput improvement with no code changes at call sites.
+    # Falls back silently on older PyTorch or non-CUDA setups.
+    _compiled_ok = False
+    if _use_gpu:
+        try:
+            _compiled = torch.compile(model, mode="reduce-overhead")
+            # Warm-start compile with a single dummy forward to catch errors early
+            with torch.no_grad():
+                _dummy = torch.zeros(1, _in_channels, int(args.imgsz), int(args.imgsz), device=device)
+                _ = _compiled(_dummy)
+            model = _compiled
+            _compiled_ok = True
+        except Exception as _ce:
+            print(f"  torch.compile skipped ({type(_ce).__name__}: {_ce}); using eager mode", flush=True)
+    print(f"  torch.compile={'on' if _compiled_ok else 'off'}", flush=True)
+
     lr_head = float(args.lr)
     opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
     teacher_budget = int(args.teacher_per_epoch)
@@ -350,6 +390,7 @@ def main() -> None:
                 )
                 type_l = _xh[0] if len(_xh) >= 1 else None
                 dim_p  = _xh[1] if len(_xh) >= 2 else None
+                spec_p = _xh[2] if len(_xh) >= 3 else None
                 pred = {
                     "cls_logit": cls_l,
                     "seg_logit": seg,
@@ -359,15 +400,20 @@ def main() -> None:
                     "kp_hm": kp_hm,
                     "type_logit": type_l,
                     "dim_pred": dim_p,
+                    "spec_pred": spec_p,
                 }
                 loss, logs = aquaforge_joint_loss(pred, batch_dict, sw_eff)
             opt.zero_grad()
             if _scaler is not None:
                 _scaler.scale(loss).backward()
+                # Unscale before clip so the clip threshold is in the original scale
+                _scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 _scaler.step(opt)
                 _scaler.update()
             else:
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 opt.step()
             total_loss += float(logs.get("loss_total", 0.0))
             n_batches += 1

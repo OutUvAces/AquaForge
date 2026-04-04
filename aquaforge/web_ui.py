@@ -2515,6 +2515,25 @@ def _render_spot_measurements_panel(
             )
         elif af_spot.get("aquaforge_chroma_speed_ms") is None:
             st.caption("Chromatic velocity: *B02/B04 bands not yet downloaded*")
+
+        # Spectral signature display
+        _spec_meas = af_spot.get("aquaforge_spectral_measured")
+        _spec_pred = af_spot.get("aquaforge_spectral_pred")
+        _mat_hint = af_spot.get("aquaforge_material_hint")
+        if _spec_meas is not None or _spec_pred is not None:
+            from aquaforge.spectral_extractor import BAND_LABELS as _SLABELS, BAND_COLOURS as _SCOLS
+            import pandas as _spd
+            st.caption("**Spectral signature** (hull reflectance by band):")
+            _rows = []
+            for i, lbl in enumerate(_SLABELS):
+                _m = float(_spec_meas[i]) if _spec_meas is not None and i < len(_spec_meas) else None
+                _p = float(_spec_pred[i]) if _spec_pred is not None and i < len(_spec_pred) else None
+                _rows.append({"Band": lbl, "Measured": _m, "Predicted": _p})
+            _df = _spd.DataFrame(_rows).set_index("Band")
+            # Show as Streamlit bar chart (auto-resizes)
+            st.bar_chart(_df.dropna(how="all"), height=160)
+            if _mat_hint:
+                st.caption(f"Material hint: **{_mat_hint}**")
         sw = af_spot.get("aquaforge_warnings") or []
         if isinstance(sw, list):
             sw = [x for x in sw if str(x) != "aquaforge_weights_missing"]
@@ -3982,6 +4001,14 @@ def _commit_review_label(
         aquaforge_chroma_pnr=af_spot_save.get("aquaforge_chroma_pnr"),
         aquaforge_chroma_agrees_with_model=af_spot_save.get("aquaforge_chroma_agrees_with_model"),
     )
+    # Persist spectral signature directly into extra (not via enrich_extra_with_predictions
+    # since it's a list, not a scalar).
+    if af_spot_save.get("aquaforge_spectral_measured") is not None:
+        extra["aquaforge_spectral_measured"] = af_spot_save["aquaforge_spectral_measured"]
+    if af_spot_save.get("aquaforge_spectral_pred") is not None:
+        extra["aquaforge_spectral_pred"] = af_spot_save["aquaforge_spectral_pred"]
+    if af_spot_save.get("aquaforge_material_hint") is not None:
+        extra["aquaforge_material_hint"] = af_spot_save["aquaforge_material_hint"]
     append_review(
         labels_path,
         tci_path=tci_loaded,

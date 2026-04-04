@@ -29,6 +29,19 @@ ARCH_CNN = "cnn"
 VESSEL_TYPE_NAMES = ["cargo", "tanker", "fishing", "container", "military", "other"]
 NUM_VESSEL_TYPES = len(VESSEL_TYPE_NAMES)  # 6
 
+# Spectral band labels in the order they appear in the 12-channel input tensor.
+# Channels 0-2 are TCI RGB; channels 3-11 are the extra S-2 bands.
+SPECTRAL_BAND_LABELS = [
+    "R (B04)", "G (B03)", "B (B02)",   # ch 0-2: TCI
+    "B08 NIR",                          # ch 3
+    "B05 RE1", "B06 RE2", "B07 RE3",   # ch 4-6: red edge
+    "B8A NIR-n",                        # ch 7: NIR narrow
+    "B11 SWIR1", "B12 SWIR2",          # ch 8-9: SWIR
+    "B01 CoAer",                        # ch 10: coastal aerosol
+    "B09 WV",                           # ch 11: water vapour
+]
+N_SPECTRAL_CHANNELS: int = len(SPECTRAL_BAND_LABELS)  # 12
+
 
 def canonical_model_arch(name: str) -> str:
     """Return ``cnn``; reject anything else."""
@@ -219,6 +232,11 @@ class AquaForgeCnn(nn.Module):
         self.type_head = nn.Linear(c4, NUM_VESSEL_TYPES)
         # Dimension regression: (length_norm, width_norm) in units of chip ground size.
         self.dim_head = nn.Linear(c4, 2)
+        # Spectral reconstruction: predict mean per-band reflectance [0,1] of the
+        # detected vessel pixels.  Self-supervised from 12-ch input; forces the model
+        # to encode material/spectral information in the bottleneck.
+        # N_SPECTRAL_CHANNELS = 12; works in both 3-ch (partial) and 12-ch modes.
+        self.mat_head = nn.Linear(c4, N_SPECTRAL_CHANNELS)
 
     def forward(
         self,
@@ -228,6 +246,7 @@ class AquaForgeCnn(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor,
     ]:
         p3, p4, p5 = self.encoder(x)
         z = F.relu(self.p3_sv_boost_1x1(p3), inplace=True)
@@ -255,7 +274,8 @@ class AquaForgeCnn(nn.Module):
         wake = self.wake_head(g)          # (B, 3): dx, dy, conf_logit
         type_logit = self.type_head(g)   # (B, NUM_VESSEL_TYPES)
         dim_pred = self.dim_head(g)      # (B, 2): length_norm, width_norm
-        return cls_logit, seg, kp, hdg, wake, kp_hm, type_logit, dim_pred
+        spec_pred = torch.sigmoid(self.mat_head(g))  # (B, 12): predicted per-band mean in [0,1]
+        return cls_logit, seg, kp, hdg, wake, kp_hm, type_logit, dim_pred, spec_pred
 
 
 def build_model(

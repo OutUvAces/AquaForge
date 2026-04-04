@@ -601,6 +601,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.0,
                 "dim": 0.0,
                 "vessel_type": 0.0,
+                "spec_recon": 0.0,
                 "chroma_hdg": 0.0,
                 "distill": 0.0,
             },
@@ -617,6 +618,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.0,
                 "dim": 0.0,
                 "vessel_type": 0.0,
+                "spec_recon": 0.0,
                 "chroma_hdg": 0.0,
                 "distill": 0.0,
             },
@@ -633,6 +635,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.0,
                 "dim": 0.0,
                 "vessel_type": 0.0,
+                "spec_recon": 0.0,
                 "chroma_hdg": 0.0,
                 "distill": 0.0,
             },
@@ -649,6 +652,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.15,
                 "dim": 0.1,
                 "vessel_type": 0.0,
+                "spec_recon": 0.18,
                 "chroma_hdg": 0.12,
                 "distill": 0.0,
             },
@@ -665,6 +669,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.28,
                 "dim": 0.3,
                 "vessel_type": 0.15,
+                "spec_recon": 0.30,
                 "chroma_hdg": 0.22,
                 "distill": 0.0,
             },
@@ -681,6 +686,7 @@ class CurriculumSchedule:
                 "wake_conf": 0.38,
                 "dim": 0.45,
                 "vessel_type": 0.28,
+                "spec_recon": 0.38,
                 "chroma_hdg": 0.28,
                 "distill": 0.0,
             },
@@ -1128,6 +1134,25 @@ def aquaforge_joint_loss(
                 )
     logs["loss_chroma_hdg"] = float(chroma_loss.detach())
 
+    # Spectral reconstruction loss: L1 between mat_head predicted per-band
+    # reflectance and the actual hull-masked spectral mean.  Self-supervised
+    # when 12-ch bands are present; zero otherwise.  Forces the model to encode
+    # material/spectral information in the bottleneck — without any manual labels.
+    w_spec = float(sw.get("spec_recon", 0.35))
+    spec_loss = torch.zeros((), device=dev, dtype=dt)
+    spec_pred_t = out.get("spec_pred")
+    if w_spec > 0 and spec_pred_t is not None:
+        spec_tgt = batch.get("spectral_mean")
+        spec_valid = batch.get("spectral_valid")
+        if spec_tgt is not None and spec_valid is not None:
+            valid_mask = spec_valid > 0
+            if valid_mask.any():
+                spec_loss = F.l1_loss(
+                    spec_pred_t[valid_mask],
+                    spec_tgt.to(device=dev)[valid_mask],
+                )
+    logs["loss_spec_recon"] = float(spec_loss.detach())
+
     # Normalized weights (sum=1) already embed curriculum via base_stage; multiply losses only.
     total = total + float(weights["seg"]) * seg_loss
     total = total + float(weights["kp"]) * kp_loss
@@ -1137,6 +1162,7 @@ def aquaforge_joint_loss(
     total = total + w_dim * dim_loss
     total = total + w_type * type_loss
     total = total + w_chroma * chroma_loss
+    total = total + w_spec * spec_loss
 
     w = sw.get("kp", 1.0)
     if w > 0:

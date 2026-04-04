@@ -48,6 +48,7 @@ class AquaForgeSpotResult:
     chroma_speed_kn: float | None = None   # chromatic fringe ground speed (knots)
     chroma_heading_deg: float | None = None  # chromatic fringe motion heading
     chroma_pnr: float | None = None        # phase-correlation peak-to-noise ratio
+    spectral_pred: list[float] | None = None  # mat_head: predicted 12-band hull reflectance
 
 
 def _mask_to_polygon_fullres(
@@ -372,7 +373,7 @@ class AquaForgePredictor:
 
     def _network_forward_numpy_batch(self, arr_bchw: np.ndarray) -> tuple[
         np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None,
-        np.ndarray | None, np.ndarray | None,
+        np.ndarray | None, np.ndarray | None, np.ndarray | None,
     ]:
         """Run AquaForge for batch ``arr_bchw`` float32 NCHW [0,1]. Returns numpy outputs."""
         import torch
@@ -384,7 +385,8 @@ class AquaForgePredictor:
             kp_hm = np.asarray(outs[5], dtype=np.float32) if len(outs) > 5 else None
             type_l = np.asarray(outs[6], dtype=np.float32) if len(outs) > 6 else None
             dim_p = np.asarray(outs[7], dtype=np.float32) if len(outs) > 7 else None
-            return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p
+            spec_p = np.asarray(outs[8], dtype=np.float32) if len(outs) > 8 else None
+            return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p
         if self._torch is None:
             raise RuntimeError("no aquaforge runtime")
         x = torch.from_numpy(arr_bchw.astype(np.float32))
@@ -401,7 +403,8 @@ class AquaForgePredictor:
         kp_hm = raw[5].cpu().numpy() if len(raw) > 5 else None
         type_l = raw[6].cpu().numpy() if len(raw) > 6 else None
         dim_p = raw[7].cpu().numpy() if len(raw) > 7 else None
-        return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p
+        spec_p = raw[8].cpu().numpy() if len(raw) > 8 else None
+        return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p
 
     def _decode_batch_index(
         self,
@@ -420,6 +423,7 @@ class AquaForgePredictor:
         proposal_floor: float | None,
         type_l: np.ndarray | None = None,
         dim_p: np.ndarray | None = None,
+        spec_p: np.ndarray | None = None,
     ) -> AquaForgeSpotResult | None:
         """Decode one sample from batched raw outputs."""
         imgsz = int(self._af.imgsz)
@@ -490,6 +494,10 @@ class AquaForgePredictor:
             if len(dp) >= 2:
                 length_norm = float(dp[0])
                 width_norm = float(dp[1])
+        # Spectral reconstruction head (mat_head): predicted per-band hull reflectance
+        spectral_pred_list = None
+        if spec_p is not None:
+            spectral_pred_list = [float(v) for v in np.asarray(spec_p[bi]).reshape(-1)[:12]]
 
         return AquaForgeSpotResult(
             confidence=p_vessel,
@@ -506,6 +514,7 @@ class AquaForgePredictor:
             vessel_type_logits=type_logits_list,
             length_norm=length_norm,
             width_norm=width_norm,
+            spectral_pred=spectral_pred_list,
         )
 
     def _forward_bgr_minibatch(
@@ -543,7 +552,7 @@ class AquaForgePredictor:
                 extra = load_extra_bands_chip(tci_path, cx_chip, cy_chip, half, imgsz)
                 if extra is not None:
                     arrs[i, 3:3 + extra.shape[0]] = extra
-        cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p = self._network_forward_numpy_batch(arrs)
+        cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p = self._network_forward_numpy_batch(arrs)
         out: list[AquaForgeSpotResult | None] = []
         for i in range(batch):
             bgr, c0, r0, cw, ch = meta[i]
@@ -563,6 +572,7 @@ class AquaForgePredictor:
                     proposal_floor=proposal_floor,
                     type_l=type_l,
                     dim_p=dim_p,
+                    spec_p=spec_p,
                 )
             )
         return out
@@ -851,6 +861,9 @@ def _aquaforge_spot_to_overlay_dict(
         "aquaforge_chroma_heading_deg": None,     # chromatic fringe motion heading
         "aquaforge_chroma_pnr": None,             # phase-correlation confidence
         "aquaforge_chroma_agrees_with_model": None,  # heading cross-validation flag
+        "aquaforge_spectral_pred": None,          # mat_head: predicted 12-band hull reflectance
+        "aquaforge_spectral_measured": None,      # hull-masked spectral mean from raw bands
+        "aquaforge_material_hint": None,          # heuristic material label string
         "aquaforge_keypoints_xy_conf_crop": None,
         "aquaforge_warnings": [],
         "aquaforge_hull_polygon_fullres": None,
@@ -1045,8 +1058,28 @@ def _aquaforge_spot_to_overlay_dict(
 
     out["aquaforge_model_ready"] = True
     out["aquaforge_warnings"] = warnings
-    return out
 
+    # Spectral signature: model prediction + measured from raw bands
+    if ar.spectral_pred is not None:
+        out["aquaforge_spectral_pred"] = ar.spectral_pred
+    try:
+        from aquaforge.spectral_extractor import (
+            extract_spectral_signature_from_disk,
+            spectral_mean_to_jsonable,
+            infer_material_hint,
+        )
+        hull_poly_crop = out.get("aquaforge_hull_polygon_crop")
+        chip_half_spec = max(20, int(max(ar.chip_w, ar.chip_h)) // 2)
+        spec_meas = extract_spectral_signature_from_disk(
+            tci_path, cx, cy, chip_half_spec, hull_poly_crop, out_size=64
+        )
+        if spec_meas is not None:
+            out["aquaforge_spectral_measured"] = spectral_mean_to_jsonable(spec_meas)
+            out["aquaforge_material_hint"] = infer_material_hint(spec_meas)
+    except Exception:
+        pass
+
+    return out
 
 def run_aquaforge_spot_decode(
     project_root: Path,

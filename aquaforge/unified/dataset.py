@@ -418,6 +418,18 @@ def collate_batch(
             chroma_valid.append(0.0)
     chroma_sc_t = torch.tensor(chroma_sc, device=device, dtype=torch.float32)
     chroma_valid_t = torch.tensor(chroma_valid, device=device, dtype=torch.float32)
+    # Spectral mean: (B, 12) target for the mat_head reconstruction loss.
+    # None entries (no bands available) are zero-padded; spectral_valid flags which are real.
+    _N_SPEC = 12
+    spec_vals = [b[18] if len(b) >= 19 else None for b in batch_items]
+    spec_arr = np.zeros((bsz, _N_SPEC), dtype=np.float32)
+    spec_valid = np.zeros(bsz, dtype=np.float32)
+    for i, sv in enumerate(spec_vals):
+        if sv is not None and len(sv) == _N_SPEC:
+            spec_arr[i] = sv
+            spec_valid[i] = 1.0
+    spectral_mean_t = torch.tensor(spec_arr, device=device, dtype=torch.float32)
+    spectral_valid_t = torch.tensor(spec_valid, device=device, dtype=torch.float32)
     return {
         "imgs": imgs,
         "cls": cls,
@@ -439,8 +451,10 @@ def collate_batch(
         "dim_length_norm": dim_len_t,
         "dim_width_norm": dim_wid_t,
         "dim_mask": dim_mask,
-        "chroma_hdg_sc": chroma_sc_t,    # (B, 2) sin/cos teacher heading from B02/B04 fringe
-        "chroma_valid": chroma_valid_t,  # (B,) 1.0 if PNR-qualified chromatic heading available
+        "chroma_hdg_sc": chroma_sc_t,
+        "chroma_valid": chroma_valid_t,
+        "spectral_mean": spectral_mean_t,    # (B, 12) measured hull spectral mean
+        "spectral_valid": spectral_valid_t,  # (B,) 1.0 when 12-ch bands were available
     }
 
 
@@ -562,6 +576,16 @@ def build_training_row(
     # Stack TCI + extra bands into one tensor (C, imgsz, imgsz)
     img = bgr_and_extra_to_tensor(bgr, extra_bands, imgsz)
     mask = rasterize_hull_mask(sample.markers, cw, ch, imgsz)
+
+    # Extract spectral signature from the hull mask pixels.
+    # Only meaningful when the model input has 12 channels (extra bands loaded).
+    spectral_mean: np.ndarray | None = None
+    if extra_bands is not None:
+        try:
+            from aquaforge.spectral_extractor import extract_masked_spectral_mean
+            spectral_mean = extract_masked_spectral_mean(img, mask)
+        except Exception:
+            pass
     kp, vis = landmarks_crop_to_normalized(sample.markers, float(cw), float(ch))
     wake = np.array([1.0, 0.0], dtype=np.float32)
     wake_valid = 0.0
@@ -588,8 +612,8 @@ def build_training_row(
         sample.dim_width_m,   # index 15: metres | None
         sample.chroma_heading_deg,   # index 16: degrees from north | None
         sample.chroma_pnr,           # index 17: PNR quality | None
+        spectral_mean,               # index 18: np.ndarray (12,) | None
     )
-
 
 @dataclass
 class PseudoChipCandidate:
