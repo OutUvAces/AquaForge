@@ -1034,6 +1034,12 @@ def _subprocess_train_aquaforge(
             stdout=_lf,
             stderr=subprocess.STDOUT,
             env=_child_env,
+            # Isolate the training process into its own process group so that
+            # CTRL_C / CTRL_BREAK signals from the Streamlit parent (e.g. on
+            # browser disconnect) are not propagated into the training child.
+            # On Windows this sets CREATE_NEW_PROCESS_GROUP; on POSIX it calls
+            # os.setsid() in the child, achieving the same isolation.
+            start_new_session=True,
         )
     pid_file.write_text(str(proc.pid))
 
