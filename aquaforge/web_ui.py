@@ -1840,7 +1840,7 @@ def main() -> None:
                 st.session_state[_band_dl_key] = _band_pending
                 def _auto_download_bands(paths=list(_scenes_needing_bands)):
                     try:
-                        from aquaforge.s2_download import download_extra_bands_for_tci as _dl_bands, download_chroma_bands_for_tci as _dl_chroma
+                        from aquaforge.s2_download import download_extra_bands_for_tci as _dl_bands
                         from aquaforge.cdse import get_access_token as _get_tok
                         _tok = _get_tok()
                         for _p in paths:
@@ -1848,10 +1848,35 @@ def main() -> None:
                                 _dl_bands(Path(_p), token=_tok)
                             except Exception:
                                 pass
-                            # Also download B02/B04 for chromatic velocity
+                    except Exception:
+                        pass
+                _band_t = _ovr_threading.Thread(target=_auto_download_bands, daemon=True)
+                _band_t.start()
+
+            # Chromatic velocity bands (B02/B04) — separate trigger so they download
+            # even when all 9 extra spectral bands are already present.
+            _chroma_dl_key = "_vd_chroma_dl_queue"
+            _scenes_needing_chroma: list[Path] = []
+            try:
+                from aquaforge.chromatic_velocity import chroma_band_paths_for_download as _chroma_check
+                _scenes_needing_chroma = [
+                    p for p in tci_list
+                    if _chroma_check(Path(p))
+                ]
+            except Exception:
+                pass
+            _chroma_pending = frozenset(str(p) for p in _scenes_needing_chroma)
+            if _chroma_pending and st.session_state.get(_chroma_dl_key) != _chroma_pending:
+                st.session_state[_chroma_dl_key] = _chroma_pending
+                def _auto_download_chroma(paths=list(_scenes_needing_chroma)):
+                    try:
+                        from aquaforge.s2_download import download_chroma_bands_for_tci as _dl_chroma
+                        from aquaforge.chromatic_velocity import chroma_band_paths_for_download as _cv_check
+                        from aquaforge.cdse import get_access_token as _get_tok
+                        _tok = _get_tok()
+                        for _p in paths:
                             try:
-                                from aquaforge.chromatic_velocity import chroma_band_paths_for_download
-                                _missing_cv = chroma_band_paths_for_download(Path(_p))
+                                _missing_cv = _cv_check(Path(_p))
                                 if _missing_cv:
                                     _cv_bands = [s.replace("_10m", "") for s in _missing_cv]
                                     _dl_chroma(Path(_p), _cv_bands, token=_tok)
@@ -1859,8 +1884,8 @@ def main() -> None:
                                 pass
                     except Exception:
                         pass
-                _band_t = _ovr_threading.Thread(target=_auto_download_bands, daemon=True)
-                _band_t.start()
+                _chroma_t = _ovr_threading.Thread(target=_auto_download_chroma, daemon=True)
+                _chroma_t.start()
 
     if not tci_list:
         st.info("Add a satellite image: open **← Advanced → Download**, or drop a file under **data/**.")
