@@ -491,18 +491,36 @@ class AquaForgePredictor:
         chips: list[tuple[np.ndarray, int, int, int, int]],
         *,
         proposal_floor: float | None,
+        tci_path: "Path | None" = None,
+        chip_positions: "list[tuple[float, float]] | None" = None,
     ) -> list[AquaForgeSpotResult | None]:
+        """Run a mini-batch of BGR chips through the model.
+
+        When *tci_path* and *chip_positions* are provided, extra spectral bands
+        are loaded and stacked so the full multi-channel input reaches the model.
+        Missing band files are silently replaced with zero channels.
+        """
         import cv2
 
         if not chips or (self._sess is None and self._torch is None):
             return [None] * len(chips)
         imgsz = int(self._af.imgsz)
+        in_ch = int(self._af.in_channels)
         batch = len(chips)
-        arrs = np.zeros((batch, 3, imgsz, imgsz), dtype=np.float32)
+        arrs = np.zeros((batch, in_ch, imgsz, imgsz), dtype=np.float32)
         meta = list(chips)
         for i, (bgr, _c0, _r0, _cw, _ch) in enumerate(meta):
             img = cv2.resize(bgr, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
-            arrs[i] = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)
+            # Channels 0-2: TCI RGB [0,1]
+            arrs[i, :3] = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)
+            # Channels 3+: extra spectral bands (loaded from co-located band files)
+            if in_ch > 3 and tci_path is not None and chip_positions is not None:
+                from aquaforge.spectral_bands import load_extra_bands_chip
+                cx_chip, cy_chip = chip_positions[i]
+                half = int(self._af.chip_half)
+                extra = load_extra_bands_chip(tci_path, cx_chip, cy_chip, half, imgsz)
+                if extra is not None:
+                    arrs[i, 3:3 + extra.shape[0]] = extra
         cls_l, seg, kp, hdg, wake, kp_hm = self._network_forward_numpy_batch(arrs)
         out: list[AquaForgeSpotResult | None] = []
         for i in range(batch):
@@ -581,6 +599,7 @@ class AquaForgePredictor:
         row_starts = _tile_axis_starts(H, tile, stride)
         col_starts = _tile_axis_starts(W, tile, stride)
         chips: list[tuple[np.ndarray, int, int, int, int]] = []
+        chip_centers: list[tuple[float, float]] = []  # (cx, cy) for extra band loading
         skipped_land = 0
         skipped_cloud = 0
         for r0 in row_starts:
@@ -599,12 +618,19 @@ class AquaForgePredictor:
                     skipped_cloud += 1
                     continue
                 chips.append(chip)
+                # Centre of this tile in TCI pixel coordinates (used for extra-band loading)
+                chip_centers.append((float(c0 + tile // 2), float(r0 + tile // 2)))
 
         mb = self._effective_minibatch_size()
         raw_dets: list[AquaForgeSpotResult] = []
         for k in range(0, len(chips), mb):
             chunk = chips[k : k + mb]
-            part = self._forward_bgr_minibatch(chunk, proposal_floor=proposal_min)
+            part = self._forward_bgr_minibatch(
+                chunk,
+                proposal_floor=proposal_min,
+                tci_path=path,
+                chip_positions=chip_centers[k : k + mb],
+            )
             for det in part:
                 if det is None:
                     continue
@@ -654,6 +680,11 @@ def build_aquaforge_predictor(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model, _meta = load_checkpoint(w, device)
         model.to(device)
+        # Sync in_channels from checkpoint meta → settings so _forward_bgr_minibatch allocates correctly
+        ckpt_in_ch = int(_meta.get("in_channels", getattr(model, "in_channels", 3)))
+        if af.in_channels != ckpt_in_ch:
+            from dataclasses import replace as _dc_replace
+            af = _dc_replace(af, in_channels=ckpt_in_ch)
         return AquaForgePredictor(
             torch_model=model,
             onnx_path=onnx_p,

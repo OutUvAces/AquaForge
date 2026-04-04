@@ -52,12 +52,13 @@ class AquaForgeSection:
     onnx_quantize: bool = False
     imgsz: int = 512
     chip_half: int = 320
-    conf_threshold: float = 0.15
+    in_channels: int = 3   # 3 = TCI only; 12 = TCI + all S2 extra bands (B08,B05-B07,B8A,B11,B12,B01,B10)
+    conf_threshold: float = 0.05
     chip_batch_size: int = 6
     min_direct_heading_confidence: float = 0.35
     tiled_overlap_fraction: float = 0.5
     tiled_nms_iou: float = 0.45
-    tiled_min_proposal_confidence: float = 0.08
+    tiled_min_proposal_confidence: float = 0.02
     tiled_max_detections: int = 500
 
 
@@ -133,6 +134,7 @@ def _parse_aquaforge(d: dict[str, Any] | None) -> AquaForgeSection:
         onnx_quantize=bool(d.get("onnx_quantize", False)),
         imgsz=int(d.get("imgsz", AquaForgeSection.imgsz)),
         chip_half=int(d.get("chip_half", AquaForgeSection.chip_half)),
+        in_channels=int(d.get("in_channels", AquaForgeSection.in_channels)),
         conf_threshold=float(d.get("conf_threshold", AquaForgeSection.conf_threshold)),
         chip_batch_size=max(
             1,

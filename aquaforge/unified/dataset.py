@@ -226,6 +226,24 @@ def iter_aquaforge_samples(
             )
             continue
 
+        # Negative examples: not_vessel, cloud, land — essential for calibrated classification
+        _NEGATIVE_CATS = {"not_vessel", "cloud", "land", "not_a_ship"}
+        if cat in _NEGATIVE_CATS:
+            yield AquaForgeSample(
+                Path(path),
+                cx,
+                cy,
+                cls=0.0,
+                heading_deg=None,
+                markers=None,
+                record_id=rid,
+                al_priority=0.5,
+                review_uncertainty=0.0,
+                coastal_hint=coastal_scene_hint(extra),
+                small_vessel_hint=0.0,
+            )
+            continue
+
         if cat != "vessel":
             continue
         cls = 1.0
@@ -331,8 +349,49 @@ def collate_batch(
     }
 
 
+def augment_bgr(bgr: np.ndarray, is_vessel: bool) -> np.ndarray:
+    """
+    Random augmentation for training chips:
+    - Horizontal/vertical flip
+    - 90-degree rotation (any multiple)
+    - Brightness/contrast jitter
+    - Small Gaussian noise
+    Applied to both vessel and negative chips so the model sees diverse examples.
+    """
+    import cv2
+    import random
+
+    out = bgr.copy()
+
+    # Random horizontal flip
+    if random.random() < 0.5:
+        out = cv2.flip(out, 1)
+
+    # Random vertical flip
+    if random.random() < 0.5:
+        out = cv2.flip(out, 0)
+
+    # Random 90-degree rotation
+    k = random.randint(0, 3)
+    if k > 0:
+        for _ in range(k):
+            out = cv2.rotate(out, cv2.ROTATE_90_CLOCKWISE)
+
+    # Brightness jitter ±20%
+    if random.random() < 0.7:
+        factor = random.uniform(0.8, 1.2)
+        out = np.clip(out.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+
+    # Gaussian noise (small)
+    if random.random() < 0.4:
+        noise = np.random.normal(0, random.uniform(2, 8), out.shape).astype(np.float32)
+        out = np.clip(out.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+    return out
+
+
 def chip_bgr_to_tensor(bgr: np.ndarray, imgsz: int) -> np.ndarray:
-    """HWC BGR uint8 → CHW float32 [0,1]."""
+    """HWC BGR uint8 → CHW float32 [0,1].  3-channel TCI-only path (backward-compat)."""
     import cv2
 
     r = cv2.resize(bgr, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
@@ -363,13 +422,50 @@ def build_training_row(
     | None
 ):
     from aquaforge.chip_io import read_chip_bgr_centered
+    from aquaforge.chip_cache import chip_npz_path, save_chip_npz
+    from aquaforge.spectral_bands import load_extra_bands_chip, bgr_and_extra_to_tensor
 
-    bgr, c0, r0, cw, ch = read_chip_bgr_centered(
-        sample.tci_path, sample.cx, sample.cy, chip_half
+    # Use chip cache to avoid re-reading from slow JP2 on every epoch
+    # dataset.py lives at aquaforge/unified/dataset.py → 3 levels up = project root
+    _proj_root = Path(__file__).resolve().parent.parent.parent
+    _cache_p = chip_npz_path(
+        _proj_root, sample.tci_path, sample.cx, sample.cy,
+        model_side=imgsz, src_half=chip_half,
     )
+    if _cache_p.is_file():
+        try:
+            _d = np.load(str(_cache_p))
+            bgr = _d["rgb"]
+            cw, ch = int(_d.get("cw", imgsz)), int(_d.get("ch", imgsz))
+        except Exception:
+            bgr = None
+    else:
+        bgr = None
+
+    if bgr is None:
+        bgr_raw, c0, r0, cw, ch = read_chip_bgr_centered(
+            sample.tci_path, sample.cx, sample.cy, chip_half
+        )
+        if bgr_raw.size == 0 or cw < 8 or ch < 8:
+            return None
+        bgr = bgr_raw
+        # Save to cache for fast future reads
+        try:
+            save_chip_npz(_cache_p, bgr, {"cw": cw, "ch": ch})
+        except Exception:
+            pass
+    else:
+        c0 = r0 = 0
+
     if bgr.size == 0 or cw < 8 or ch < 8:
         return None
-    img = chip_bgr_to_tensor(bgr, imgsz)
+    bgr = augment_bgr(bgr, is_vessel=sample.cls > 0.5)
+
+    # Load extra spectral bands if available alongside TCI
+    extra_bands = load_extra_bands_chip(sample.tci_path, sample.cx, sample.cy, chip_half, imgsz)
+
+    # Stack TCI + extra bands into one tensor (C, imgsz, imgsz)
+    img = bgr_and_extra_to_tensor(bgr, extra_bands, imgsz)
     mask = rasterize_hull_mask(sample.markers, cw, ch, imgsz)
     kp, vis = landmarks_crop_to_normalized(sample.markers, float(cw), float(ch))
     wake = np.array([1.0, 0.0], dtype=np.float32)

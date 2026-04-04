@@ -40,14 +40,25 @@ class _EncoderTriScale(nn.Module):
     """
     Stride-8 **p3**, stride-16 **p4**, stride-32 **p5** feature maps (Sentinel-2 chip → hull / wake cues).
     Channel plan matches the legacy single-tower widths so heads stay parameter-efficient.
+
+    ``in_channels`` may be 3 (TCI only) or up to 12 (TCI + all S2 extra bands from
+    ``aquaforge.spectral_bands``).  The first 7×7 stem automatically adapts.
     """
 
-    def __init__(self, c1: int = 32, c2: int = 64, c3: int = 128, c4: int = 256) -> None:
+    def __init__(
+        self,
+        in_channels: int = 3,
+        c1: int = 32,
+        c2: int = 64,
+        c3: int = 128,
+        c4: int = 256,
+    ) -> None:
         super().__init__()
+        self.in_channels = in_channels
         self.c3 = c3
         self.c4 = c4
         self.block01 = nn.Sequential(
-            nn.Conv2d(3, c1, 7, 2, 3),
+            nn.Conv2d(in_channels, c1, 7, 2, 3),
             nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True),
             nn.Conv2d(c1, c1, 3, 1, 1),
@@ -156,14 +167,23 @@ class AquaForgeCnn(nn.Module):
     In-repo encoder: vessel logit, dense seg logits, landmarks, heading, wake.
 
     Output contract (ONNX): ``cls_logit, seg_logit, kp, hdg, wake, kp_hm`` — sixth is landmark heatmap logits (stride ~8).
+
+    ``in_channels``: 3 for TCI-only (backward-compatible), 12 for full multispectral
+    (TCI RGB + B08 NIR + B05/B06/B07/B8A red-edge + B11/B12 SWIR + B01/B10).
     """
 
-    def __init__(self, imgsz: int = 512, n_landmarks: int = NUM_LANDMARKS) -> None:
+    def __init__(
+        self,
+        imgsz: int = 512,
+        n_landmarks: int = NUM_LANDMARKS,
+        in_channels: int = 3,
+    ) -> None:
         super().__init__()
         self.model_arch = ARCH_CNN
         self.imgsz = int(imgsz)
         self.n_landmarks = int(n_landmarks)
-        self.encoder = _EncoderTriScale()
+        self.in_channels = int(in_channels)
+        self.encoder = _EncoderTriScale(in_channels=self.in_channels)
         c3, c4 = self.encoder.c3, self.encoder.c4
         # **Original AquaForge:** fine-scale boost gated by small GT hull area (training). 1×1 on p3
         # → GAP → scalar; multiply p3 when exp(−mask_area/6000) is large (small vessels). At inference
@@ -226,13 +246,21 @@ class AquaForgeCnn(nn.Module):
 def build_model(
     imgsz: int = 512,
     n_landmarks: int = NUM_LANDMARKS,
+    in_channels: int = 3,
 ) -> AquaForgeCnn:
-    """Construct the default AquaForge CNN (``model_arch`` is always ``cnn``)."""
-    return AquaForgeCnn(imgsz=imgsz, n_landmarks=n_landmarks)
+    """Construct the default AquaForge CNN.  ``in_channels`` 3 = TCI only, 12 = full multispectral."""
+    return AquaForgeCnn(imgsz=imgsz, n_landmarks=n_landmarks, in_channels=in_channels)
 
 
 def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[str, Any]]:
-    """Load ``.pt`` with ``state_dict`` + ``meta`` (``model_arch``, ``imgsz``, ``n_landmarks``, …)."""
+    """Load ``.pt`` with ``state_dict`` + ``meta`` (``model_arch``, ``imgsz``, ``n_landmarks``, ``in_channels``, …).
+
+    **Warm-start across channel counts**: if the checkpoint has a 3-channel first conv
+    (``encoder.block01.0.weight`` shape ``(c1, 3, 7, 7)``) but the stored ``in_channels``
+    meta requests more channels, the extra channels are initialised to a small fraction of
+    the mean RGB weight so the RGB features are preserved while spectral channels start
+    from near-zero.  This avoids training from scratch when adding new S2 bands.
+    """
     import torch as T
 
     try:
@@ -246,6 +274,7 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
     meta = dict(ckpt.get("meta") or {})
     imgsz = int(meta.get("imgsz", 512))
     nl = int(meta.get("n_landmarks", NUM_LANDMARKS))
+    in_ch_meta = int(meta.get("in_channels", 3))
     arch_raw = str(meta.get("model_arch", ARCH_CNN)).strip().lower()
     if arch_raw != ARCH_CNN:
         raise ValueError(
@@ -253,9 +282,31 @@ def load_checkpoint(path: Any, device: torch.device) -> tuple[nn.Module, dict[st
             "Retrain with scripts/train_aquaforge.py."
         )
     meta["model_arch"] = ARCH_CNN
-    m = AquaForgeCnn(imgsz=imgsz, n_landmarks=nl)
+
+    # Determine actual checkpoint channel count from the first conv weight shape
+    sd = ckpt["state_dict"]
+    first_w_key = "encoder.block01.0.weight"
+    ckpt_in_ch = 3
+    if first_w_key in sd:
+        ckpt_in_ch = int(sd[first_w_key].shape[1])
+
+    m = AquaForgeCnn(imgsz=imgsz, n_landmarks=nl, in_channels=in_ch_meta)
     fv = int(meta.get("format_version", 1))
     # format_version >= 7: Delta-Fuse + p3 small-vessel boost. 6: Delta-Fuse only. Older: loose load.
-    strict = fv >= 7
-    m.load_state_dict(ckpt["state_dict"], strict=strict)
+    strict = fv >= 7 and ckpt_in_ch == in_ch_meta
+
+    if not strict and ckpt_in_ch != in_ch_meta and first_w_key in sd:
+        # Warm-start: expand RGB checkpoint weight to in_ch_meta channels
+        old_w = sd[first_w_key].to(device)  # (c1, ckpt_in_ch, 7, 7)
+        c1 = old_w.shape[0]
+        new_w = T.zeros(c1, in_ch_meta, 7, 7, device=device, dtype=old_w.dtype)
+        new_w[:, :ckpt_in_ch, :, :] = old_w
+        # Initialise extra channels to a small fraction of the mean RGB weight
+        mean_rgb = old_w.mean(dim=1, keepdim=True)  # (c1, 1, 7, 7)
+        n_extra = in_ch_meta - ckpt_in_ch
+        new_w[:, ckpt_in_ch:, :, :] = mean_rgb.expand(-1, n_extra, -1, -1) * 0.05
+        sd = dict(sd)
+        sd[first_w_key] = new_w
+
+    m.load_state_dict(sd, strict=strict)
     return m, meta

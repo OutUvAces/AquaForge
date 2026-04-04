@@ -385,3 +385,76 @@ def cdse_download_ready() -> tuple[bool, str]:
     if not ak or not sk:
         return False, "Set COPERNICUS_S3_ACCESS_KEY and COPERNICUS_S3_SECRET_KEY in .env (required for full JP2 downloads)"
     return True, ""
+
+
+def download_extra_bands_for_tci(
+    tci_path: "Path | str",
+    out_dir: "Path | None" = None,
+    token: str = "",
+) -> dict[str, "Path | None"]:
+    """Download all S2 spectral bands (B08, B05-B07, B8A, B11, B12, B01, B10) for a TCI file.
+
+    Uses the STAC item id parsed from the TCI filename to fetch all co-located band assets
+    from CDSE.  Each band is saved in *out_dir* (defaults to same directory as TCI).
+
+    Returns a dict {band_name: path_or_None} for each band.
+
+    Skips bands already present on disk.
+    """
+    from pathlib import Path as _Path
+    from aquaforge.spectral_bands import EXTRA_BANDS, derive_band_path, available_band_paths
+
+    tci_p = _Path(tci_path)
+    dest_dir = _Path(out_dir) if out_dir else tci_p.parent
+    result: dict[str, "_Path | None"] = {}
+
+    # First check which bands are already present
+    already = available_band_paths(tci_p)
+    for bd in EXTRA_BANDS:
+        if bd.name in already:
+            result[bd.name] = already[bd.name]
+
+    missing = [bd for bd in EXTRA_BANDS if bd.name not in result]
+    if not missing:
+        return result
+
+    # Find STAC item id from TCI filename
+    item_id = parse_stac_item_id_from_tci_filename(tci_p.name)
+    if not item_id:
+        for bd in missing:
+            result[bd.name] = None
+        return result
+
+    try:
+        item = stac_get_item_by_id(token, item_id)
+    except Exception:
+        for bd in missing:
+            result[bd.name] = None
+        return result
+
+    assets = item.get("assets") or {}
+    for bd in missing:
+        # Try asset key patterns: "B08_10m", "B08", etc.
+        asset_key = None
+        for candidate in (bd.suffix, bd.name):
+            if candidate in assets:
+                asset_key = candidate
+                break
+        # Also try with just the band number (CDSE sometimes uses short keys)
+        if asset_key is None:
+            short = bd.name  # e.g. "B08"
+            for k in assets:
+                if k.startswith(short) or k == short:
+                    asset_key = k
+                    break
+
+        if asset_key is None:
+            result[bd.name] = None
+            continue
+        try:
+            dest, _ = download_item_asset(item, asset_key, dest_dir, token, skip_if_exists=True)
+            result[bd.name] = dest
+        except Exception:
+            result[bd.name] = None
+
+    return result

@@ -15,6 +15,7 @@ import base64
 import contextlib
 import hashlib
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1547,7 +1548,7 @@ def main() -> None:
                 key="stop_server_btn",
             ):
                 st.error("Server stopping...")
-                import os, time
+                import time
                 time.sleep(0.5)
                 os._exit(0)
 
@@ -1577,6 +1578,65 @@ def main() -> None:
                     st.caption("⚙️ Optimizing image in background (overviews ready, COG building…)")
                 else:
                     st.caption("⚙️ Optimizing image in background (first chip may be slow)…")
+
+                # Spectral band availability display + download trigger
+                with st.expander("🛰 Spectral bands", expanded=False):
+                    from aquaforge.spectral_bands import (
+                        EXTRA_BANDS,
+                        band_availability_summary,
+                        count_available_bands,
+                        N_EXTRA_BANDS,
+                    )
+                    _n_avail = count_available_bands(Path(tci_loaded_sidebar))
+                    if _n_avail == N_EXTRA_BANDS:
+                        st.success(f"All {N_EXTRA_BANDS} extra bands present — 12-channel model ready.")
+                    elif _n_avail > 0:
+                        st.warning(
+                            f"{_n_avail}/{N_EXTRA_BANDS} extra bands present. "
+                            "Model falls back to available channels (zeros for missing bands)."
+                        )
+                    else:
+                        st.info(
+                            "No extra spectral bands found. Model running in 3-channel (TCI only) mode. "
+                            "Download extra bands below to enable full multispectral detection."
+                        )
+                    st.code(band_availability_summary(Path(tci_loaded_sidebar)), language=None)
+                    st.caption(
+                        "Extra bands: B08 NIR (10m) · B05-B07 B8A red-edge (20m) · "
+                        "B11 B12 SWIR (20m) · B01 coastal aerosol (60m) · B10 SWIR cirrus (60m)"
+                    )
+                    if st.button(
+                        "⬇ Download missing spectral bands from CDSE",
+                        key="vd_dl_extra_bands_btn",
+                        disabled=_n_avail == N_EXTRA_BANDS,
+                        help="Uses COPERNICUS_S3_ACCESS_KEY / SECRET_KEY from .env",
+                    ):
+                        try:
+                            from aquaforge.s2_download import (
+                                download_extra_bands_for_tci,
+                                cdse_download_ready,
+                            )
+                            from aquaforge.cdse import get_access_token
+
+                            _ok, _msg = cdse_download_ready()
+                            if not _ok:
+                                st.error(f"CDSE credentials missing: {_msg}")
+                            else:
+                                _tok = get_access_token(
+                                    os.environ.get("COPERNICUS_USERNAME", ""),
+                                    os.environ.get("COPERNICUS_PASSWORD", ""),
+                                )
+                                with st.spinner("Downloading spectral bands from CDSE…"):
+                                    _res = download_extra_bands_for_tci(
+                                        tci_loaded_sidebar, token=_tok
+                                    )
+                                _ok_count = sum(1 for v in _res.values() if v is not None)
+                                st.success(
+                                    f"Downloaded {_ok_count}/{N_EXTRA_BANDS} extra bands. "
+                                    "Refresh the page to use them."
+                                )
+                        except Exception as _bdl_err:
+                            st.error(f"Band download failed: {_bdl_err}")
 
             # Auto-convert ALL scenes to COG GeoTIFF in the background.
             # COG is the definitive fix: it speeds up inference chips (640 px),
