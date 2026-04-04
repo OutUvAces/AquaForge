@@ -291,8 +291,9 @@ def get_land_mask(
 ) -> Optional[np.ndarray]:
     """Return a (H, W) uint8 array — 1 = land, 0 = water — aligned to *tci_path*.
 
-    Tries JRC Global Surface Water first (30 m, accurate for archipelagos);
-    falls back to Natural Earth 110 m polygons when JRC tiles cannot be downloaded.
+    Uses JRC Global Surface Water (GSW) v1.4 2021 (30 m), which is accurate for
+    archipelagos and straits.  If JRC tiles cannot be downloaded, returns ``None``
+    so that *no* tiles are skipped (safer than an inaccurate 110 m polygon fallback).
 
     The result is cached as ``<tci_path>.land.npy`` for instant subsequent calls.
     A cached mask that is entirely land (100 %) is detected as corrupt and rebuilt.
@@ -312,12 +313,12 @@ def get_land_mask(
         except Exception:
             cache.unlink(missing_ok=True)
 
-    # Primary: JRC Global Surface Water
+    # Primary (and only): JRC Global Surface Water.
+    # No NE 110m fallback — 110m polygons are dangerously inaccurate in
+    # archipelagic / strait areas and would cause vessels to be missed.
+    # If JRC download fails, return None → tile_is_water returns True for
+    # every tile so nothing is incorrectly skipped.
     mask = _build_land_mask_jrc(tci_path, root)
-
-    # Fallback: Natural Earth 110m
-    if mask is None:
-        mask = _build_land_mask_ne(tci_path, root)
 
     if mask is not None:
         # Final sanity check before caching

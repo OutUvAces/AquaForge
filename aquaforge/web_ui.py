@@ -1612,20 +1612,14 @@ def main() -> None:
                         help="Uses COPERNICUS_S3_ACCESS_KEY / SECRET_KEY from .env",
                     ):
                         try:
-                            from aquaforge.s2_download import (
-                                download_extra_bands_for_tci,
-                                cdse_download_ready,
-                            )
+                            from aquaforge.s2_download import download_extra_bands_for_tci
                             from aquaforge.cdse import get_access_token
 
                             _ok, _msg = cdse_download_ready()
                             if not _ok:
                                 st.error(f"CDSE credentials missing: {_msg}")
                             else:
-                                _tok = get_access_token(
-                                    os.environ.get("COPERNICUS_USERNAME", ""),
-                                    os.environ.get("COPERNICUS_PASSWORD", ""),
-                                )
+                                _tok = get_access_token()
                                 with st.spinner("Downloading spectral bands from CDSE…"):
                                     _res = download_extra_bands_for_tci(
                                         tci_loaded_sidebar, token=_tok
@@ -1706,6 +1700,37 @@ def main() -> None:
                         _build_land_mask(_p, root)
                 _lm_t = _ovr_threading.Thread(target=_auto_build_landmasks, daemon=True)
                 _lm_t.start()
+
+            # Auto-download missing spectral bands from CDSE for every loaded image.
+            # Runs entirely in the background — no user action needed.
+            # Credentials come from COPERNICUS_USERNAME / COPERNICUS_PASSWORD in .env.
+            _band_dl_key = "_vd_band_dl_queue"
+            _scenes_needing_bands: list[Path] = []
+            try:
+                from aquaforge.spectral_bands import count_available_bands as _count_bands, N_EXTRA_BANDS as _N_EXTRA
+                _scenes_needing_bands = [
+                    p for p in tci_list
+                    if _count_bands(Path(p)) < _N_EXTRA
+                ]
+            except Exception:
+                pass
+            _band_pending = frozenset(str(p) for p in _scenes_needing_bands)
+            if _band_pending and st.session_state.get(_band_dl_key) != _band_pending:
+                st.session_state[_band_dl_key] = _band_pending
+                def _auto_download_bands(paths=list(_scenes_needing_bands)):
+                    try:
+                        from aquaforge.s2_download import download_extra_bands_for_tci as _dl_bands
+                        from aquaforge.cdse import get_access_token as _get_tok
+                        _tok = _get_tok()
+                        for _p in paths:
+                            try:
+                                _dl_bands(Path(_p), token=_tok)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                _band_t = _ovr_threading.Thread(target=_auto_download_bands, daemon=True)
+                _band_t.start()
 
     if not tci_list:
         st.info("Add a satellite image: open **← Advanced → Download**, or drop a file under **data/**.")

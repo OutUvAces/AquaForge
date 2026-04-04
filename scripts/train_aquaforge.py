@@ -255,7 +255,36 @@ def main() -> None:
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS).to(device)
+
+    # Auto-detect in_channels from band availability in training data.
+    # Check up to 10 distinct TCI files from the labeled rows; if any extra
+    # spectral bands are present, train a 12-channel model (missing bands fill
+    # with zeros per chip — the model learns to handle partial availability).
+    _in_channels = 3  # default: TCI only
+    try:
+        from aquaforge.spectral_bands import count_available_bands as _count_ab, N_EXTRA_BANDS as _N_E, N_TOTAL_CHANNELS as _N_TOT
+        _seen_tci: set = set()
+        _max_bands = 0
+        for _s in rows:
+            _tp = getattr(_s, "tci_path", None)
+            if _tp and str(_tp) not in _seen_tci:
+                _seen_tci.add(str(_tp))
+                _nb = _count_ab(Path(_tp))
+                if _nb > _max_bands:
+                    _max_bands = _nb
+            if len(_seen_tci) >= 10:
+                break
+        if _max_bands > 0:
+            _in_channels = _N_TOT  # 12
+        print(
+            f"  spectral bands: {_max_bands}/{_N_E} extra found → "
+            f"in_channels={_in_channels} ({'12-ch multispectral' if _in_channels == _N_TOT else '3-ch TCI only'})",
+            flush=True,
+        )
+    except Exception as _e:
+        print(f"  spectral band check skipped ({_e}); using in_channels=3", flush=True)
+
+    model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS, in_channels=_in_channels).to(device)
 
     lr_head = float(args.lr)
     opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
@@ -371,6 +400,32 @@ def main() -> None:
             f"curriculum={base_sw} model_arch={ARCH_CNN} balance={'on' if use_balance else 'off'}",
             flush=True,
         )
+
+        # Save checkpoint after every epoch so detections can be tested immediately
+        _meta_mid: dict[str, object] = {
+            "format_version": AQUAFORGE_FORMAT_VERSION,
+            "imgsz": int(args.imgsz),
+            "n_landmarks": NUM_LANDMARKS,
+            "chip_half": int(args.chip_half),
+            "jsonl": str(jp),
+            "model_arch": ARCH_CNN,
+            "epoch": epoch + 1,
+            "train_aquaforge": {
+                "dynamic_balance": use_balance,
+                "priority_sampling": use_sampler,
+                "teacher_per_epoch": teacher_budget,
+                "teacher_distill_weight": distill_w,
+                "pseudo_jsonl": str(args.pseudo_jsonl) if args.pseudo_jsonl else None,
+                "pseudo_per_epoch": pseudo_n,
+                "pseudo_mix_weight": pseudo_w,
+                "pseudo_scan_max": int(args.pseudo_scan_max),
+                "auto_export_onnx": not bool(args.no_export_onnx),
+            },
+        }
+        _ckpt_mid = {"meta": _meta_mid, "state_dict": model.state_dict()}
+        with open(ckpt_path, "wb") as _fp:
+            torch.save(_ckpt_mid, _fp)
+        print(f"  checkpoint saved (epoch {epoch + 1})", flush=True)
 
     meta: dict[str, object] = {
         "format_version": AQUAFORGE_FORMAT_VERSION,
