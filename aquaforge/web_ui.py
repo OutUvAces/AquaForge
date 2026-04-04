@@ -210,6 +210,7 @@ from aquaforge.static_sea_witness import (
     summarize_static_sea_cells,
 )
 from aquaforge.raster_gsd import build_jp2_overviews, convert_jp2_to_cog
+from aquaforge.raster_rgb import raster_dimensions as _raster_dimensions
 
 SAMPLES_DIR = ROOT / "data" / "samples"
 PREVIEW_THUMB_DIR = SAMPLES_DIR / ".preview_thumbnails"
@@ -1638,10 +1639,31 @@ def main() -> None:
                 if _prop_ov is not None:
                     det_cfg.aquaforge.tiled_min_proposal_confidence = float(_prop_ov)
                 pool = _detector_fetch_pool_size(max_k)
-                with st.spinner(
-                    "AquaForge full-image tiled detection: overlapping windows, NMS merge, "
-                    "confidence filter. Large JP2s can take several minutes — the app is still working."
-                ):
+                # --- Compute tile-grid stats for informative status messages ---
+                try:
+                    _img_w, _img_h = _raster_dimensions(tci_path)
+                    _chip_half = getattr(det_cfg.aquaforge, "chip_half", 320)
+                    _tile = max(16, 2 * int(_chip_half))
+                    _ov_frac = getattr(det_cfg.aquaforge, "tiled_overlap_fraction", 0.5)
+                    _stride = max(8, int(round(_tile * (1.0 - float(_ov_frac)))))
+                    import math as _math
+                    _n_cols = _math.ceil(max(1, _img_w - _tile) / _stride) + 1
+                    _n_rows = _math.ceil(max(1, _img_h - _tile) / _stride) + 1
+                    _n_tiles = _n_cols * _n_rows
+                    _img_desc = f"{_img_w:,} × {_img_h:,} px  ({_n_tiles:,} tiles, {_tile}px each)"
+                except Exception:
+                    _img_desc = str(tci_path.name)
+                with st.status(
+                    "Scanning image for vessels…",
+                    expanded=True,
+                ) as _det_status:
+                    st.write(f"📂 Image: `{tci_path.name}`")
+                    st.write(f"🗺️ Grid: {_img_desc}")
+                    st.write(
+                        f"⚙️ Running AquaForge model on each tile "
+                        f"(conf ≥ {det_cfg.aquaforge.conf_threshold:.2f}, "
+                        f"proposal floor {det_cfg.aquaforge.tiled_min_proposal_confidence:.2f})…"
+                    )
                     raw, meta = run_aquaforge_tiled_scene_triples(ROOT, tci_path, det_cfg)
                     if meta.get("error") == "aquaforge_weights_missing":
                         try:
@@ -1656,8 +1678,14 @@ def main() -> None:
                             "or set `aquaforge.weights_path` in `detection.yaml`."
                         )
                         raw = []
+                        _det_status.update(label="No model checkpoint found", state="error", expanded=True)
                     elif raw:
                         raw = raw[:pool]
+                        st.write(f"✅ Merging overlapping detections → **{len(raw)}** unique vessel candidate(s) above threshold")
+                        _det_status.update(label=f"Found {len(raw)} vessel candidate(s) — loading review queue…", state="complete", expanded=False)
+                    else:
+                        st.write("⚠️ No detections passed the confidence threshold")
+                        _det_status.update(label="No detections above threshold", state="error", expanded=True)
                 cands = filter_unlabeled_candidates(
                     raw,
                     labels_path,
@@ -2707,10 +2735,10 @@ def _render_review_deck(
         )
         st.markdown(
             '<p class="vd-deck-foot">'
-            "<span style='color:#ff6600'>●</span>&nbsp;suggestions&emsp;"
-            "<span style='color:#22cc55'>●</span>&nbsp;queued&emsp;"
-            "<span style='color:#9944ff'>●</span>&nbsp;saved&emsp;"
-            "<span style='color:#ffdd00'>■</span>&nbsp;here"
+            "<span style='color:#ff6600'>●</span>&nbsp;model detected&emsp;"
+            "<span style='color:#22cc55'>●</span>&nbsp;manually queued&emsp;"
+            "<span style='color:#9944ff'>●</span>&nbsp;manually evaluated&emsp;"
+            "<span style='color:#ffdd00'>■</span>&nbsp;current detection"
             "</p>",
             unsafe_allow_html=True,
         )
