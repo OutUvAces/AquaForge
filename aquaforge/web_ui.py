@@ -2713,7 +2713,6 @@ def _render_review_deck(
         with _ov4:
             st.checkbox("Wake", key="vd_ov_wake")
     with _cside:
-        st.caption("Locator")
         click_loc = streamlit_image_coordinates(
             loc_sq,
             key=f"loc_vessel_{spot_k}",
@@ -2727,18 +2726,18 @@ def _render_review_deck(
             "<span style='color:#ff6600'>●</span>&nbsp;suggestions&emsp;"
             "<span style='color:#22cc55'>●</span>&nbsp;queued&emsp;"
             "<span style='color:#9944ff'>●</span>&nbsp;saved&emsp;"
-            "<span style='color:#ffdd00'>●</span>&nbsp;here"
+            "<span style='color:#ffdd00'>■</span>&nbsp;here"
             "</p>",
             unsafe_allow_html=True,
         )
         st.markdown(
-            '<p class="vd-deck-foot">'
-            "<span style='color:#00ffdc'>▬</span>&nbsp;hull boundary&emsp;"
-            "<span style='color:#ffe040'>↑</span>&nbsp;heading&emsp;"
-            "<span style='color:#ff00c8'>●</span>&nbsp;structures&emsp;"
-            "<span style='color:#ff9b00'>─</span>&nbsp;Wake&emsp;"
+            "<div style='font-size:0.82rem;color:#c8cdd8;line-height:1.8;margin-top:0.4rem'>"
+            "<span style='color:#00ffdc'>▬</span>&nbsp;hull boundary<br/>"
+            "<span style='color:#ffe040'>↑</span>&nbsp;heading<br/>"
+            "<span style='color:#ff00c8'>●</span>&nbsp;structures<br/>"
+            "<span style='color:#ff9b00'>─</span>&nbsp;Wake<br/>"
             "<span style='color:#78ff50'>─</span>&nbsp;Keel"
-            "</p>",
+            "</div>",
             unsafe_allow_html=True,
         )
         if af_spot:
@@ -3063,7 +3062,7 @@ def _render_review_deck(
 
     st.markdown('<div class="vd-review-footer-anchor"></div>', unsafe_allow_html=True)
     st.markdown("---")
-    fb1, fb2, fb3, fb4, fb5, fb6 = st.columns([0.5, 0.5, 0.5, 1.05, 1.05, 1.05])
+    fb1, fb2, fb3, fb4, fb5, fb6, fb7 = st.columns([0.5, 0.4, 0.5, 0.5, 1.05, 1.05, 1.05])
     with fb1:
         st.button(
             "← Back",
@@ -3073,6 +3072,12 @@ def _render_review_deck(
             on_click=_vd_review_go_prev,
         )
     with fb2:
+        st.markdown(
+            f"<div style='text-align:center;line-height:2.4;font-size:0.9rem;color:#888'>"
+            f"{idx + 1} / {n}</div>",
+            unsafe_allow_html=True,
+        )
+    with fb3:
         st.button(
             "Next →",
             disabled=idx >= n - 1,
@@ -3080,7 +3085,7 @@ def _render_review_deck(
             key="vd_review_spot_next",
             on_click=_vd_review_go_next,
         )
-    with fb3:
+    with fb4:
         st.button(
             "Skip",
             use_container_width=True,
@@ -3088,7 +3093,7 @@ def _render_review_deck(
             help="Next spot without saving (works on the last spot too — ends the batch).",
             on_click=_vd_review_go_skip,
         )
-    with fb4:
+    with fb5:
         if st.button(
             "Ship",
             key=f"lbl_vessel_{idx}",
@@ -3111,7 +3116,7 @@ def _render_review_deck(
                 sr0=sr0,
                 fp=fp,
             )
-    with fb5:
+    with fb6:
         if st.button(
             "Not a ship",
             key=f"lbl_not_vessel_{idx}",
@@ -3133,7 +3138,7 @@ def _render_review_deck(
                 sr0=sr0,
                 fp=fp,
             )
-    with fb6:
+    with fb7:
         if st.button(
             "Unsure",
             key=f"lbl_ambiguous_{idx}",
