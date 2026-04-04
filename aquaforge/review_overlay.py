@@ -212,13 +212,23 @@ def read_locator_and_spot_rgb_matching_stretch(
     cy: float,
     spot_size: int,
     locator_size: int,
+    *,
+    locator_out_px: int | None = None,
 ) -> tuple[np.ndarray, int, int, int, int, np.ndarray, int, int, int, int]:
     """
     Read the locator crop once (2–98% stretch on the whole locator window), then
     extract the spot sub-window so the spot chip matches how that area looks inside
     the locator (same radiometry — avoids a separate per-spot stretch that looks harsher).
+
+    When *locator_out_px* is given the locator is decoded at that output pixel size using
+    rasterio's ``out_shape`` parameter.  JPEG2000 wavelet decoders can stop at a lower
+    decomposition level, giving a 4–8× speedup on the JP2 read.  The spot window is then
+    read separately at full resolution in the same ``rasterio.open()`` call so only one
+    file-open overhead is incurred.  The same 2–98% stretch parameters are applied to
+    both arrays so their radiometry stays consistent.
     """
     import rasterio
+    from rasterio.enums import Resampling
     from rasterio.windows import Window
 
     with rasterio.open(tci_path) as ds:
@@ -229,8 +239,24 @@ def read_locator_and_spot_rgb_matching_stretch(
         sc0, sr0, scw, sch = square_crop_window(
             cx, cy, spot_size, full_height=img_h, full_width=img_w
         )
-        win = Window(lc0, lr0, lcw, lch)
-        arr = ds.read((1, 2, 3), window=win)
+        loc_win = Window(lc0, lr0, lcw, lch)
+
+        if locator_out_px is not None and lcw > 0 and lch > 0:
+            out_h = max(1, min(locator_out_px, lch))
+            out_w = max(1, min(locator_out_px, lcw))
+            arr = ds.read(
+                (1, 2, 3),
+                window=loc_win,
+                out_shape=(3, out_h, out_w),
+                resampling=Resampling.average,
+            )
+            # Spot is small — read at full resolution sharing the same open() overhead.
+            spot_arr = ds.read((1, 2, 3), window=Window(sc0, sr0, scw, sch))
+            use_fast_path = True
+        else:
+            arr = ds.read((1, 2, 3), window=loc_win)
+            use_fast_path = False
+
     loc_rgb = np.transpose(arr, (1, 2, 0)).astype(np.float32)
     if loc_rgb.size == 0:
         return (
@@ -250,6 +276,17 @@ def read_locator_and_spot_rgb_matching_stretch(
     loc_rgb = (loc_rgb - lo) / (hi - lo + 1e-9)
     loc_rgb = np.clip(loc_rgb, 0.0, 1.0)
     loc_u8 = (loc_rgb * 255.0).astype(np.uint8)
+
+    if use_fast_path:
+        # Apply same stretch to spot (matching radiometry).
+        if spot_arr.size == 0:
+            spot_u8 = np.zeros((1, 1, 3), dtype=np.uint8)
+        else:
+            spot_f = np.transpose(spot_arr, (1, 2, 0)).astype(np.float32)
+            spot_f = (spot_f - lo) / (hi - lo + 1e-9)
+            spot_f = np.clip(spot_f, 0.0, 1.0)
+            spot_u8 = (spot_f * 255.0).astype(np.uint8)
+        return loc_u8, lc0, lr0, lcw, lch, spot_u8, sc0, sr0, scw, sch
 
     x0 = sc0 - lc0
     y0 = sr0 - lr0
@@ -668,12 +705,18 @@ def annotate_locator_spot_outline(
     lw = max(2, min(h, w) // 128)
     ring_r = max(3, min(h, w) // 90)
 
+    # Scale factors: the loc_rgb array may be downsampled (e.g. 288px) while loc_cw/loc_ch
+    # are the full-resolution window extents (e.g. 1000px).  All full-res coordinates must
+    # be multiplied by these factors before drawing.
+    _sx = float(w) / float(loc_cw) if loc_cw > 0 else 1.0
+    _sy = float(h) / float(loc_ch) if loc_ch > 0 else 1.0
+
     def _fr_to_loc(
         cx_f: float, cy_f: float
     ) -> tuple[float, float] | None:
-        lx = float(cx_f) - float(loc_col_off)
-        ly = float(cy_f) - float(loc_row_off)
-        if lx < -near_px or ly < -near_px or lx > float(loc_cw) + near_px or ly > float(loc_ch) + near_px:
+        lx = (float(cx_f) - float(loc_col_off)) * _sx
+        ly = (float(cy_f) - float(loc_row_off)) * _sy
+        if lx < -near_px or ly < -near_px or lx > float(w) + near_px or ly > float(h) + near_px:
             return None
         return lx, ly
 
@@ -751,6 +794,11 @@ def annotate_locator_spot_outline(
     )
     if foot is not None:
         x0, y0, x1, y1 = foot
+        # Scale from full-res locator space to array space
+        x0 = int(round(x0 * _sx))
+        y0 = int(round(y0 * _sy))
+        x1 = int(round(x1 * _sx))
+        y1 = int(round(y1 * _sy))
         x0 = max(0, min(x0, w - 1))
         x1 = max(0, min(x1, w - 1))
         y0 = max(0, min(y0, h - 1))

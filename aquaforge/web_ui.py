@@ -217,7 +217,7 @@ DEFAULT_BBOX = "103.6,1.05,104.2,1.45"
 DEFAULT_DATETIME = "2024-06-01T00:00:00Z/2024-06-15T23:59:59Z"
 MIN_OPEN_WATER_FRACTION = 0.01
 REVIEW_CHIP_TARGET_SIDE_M = 500.0
-REVIEW_LOCATOR_TARGET_SIDE_M = 10000.0
+REVIEW_LOCATOR_TARGET_SIDE_M = 5000.0
 # Close-up (main focus) — single large square in the calm review layout.
 CHIP_DISPLAY_MAIN = 1000
 CHIP_DISPLAY_SIDE = 288
@@ -2249,13 +2249,36 @@ def _render_review_deck(
     _chip_cache_key = (str(tci_p.resolve()), round(display_cx, 2), round(display_cy, 2), spot_px_read, locator_px, mt)
     if _chip_cache_key not in _CHIP_READ_CACHE:
         _CHIP_READ_CACHE[_chip_cache_key] = read_locator_and_spot_rgb_matching_stretch(
-            tci_p, display_cx, display_cy, spot_px_read, locator_px
+            tci_p, display_cx, display_cy, spot_px_read, locator_px,
+            locator_out_px=CHIP_DISPLAY_SIDE,
         )
-        # Evict old entries if cache grows too large (keep last 64 chips ≈ ~50 MB at 400m/10m GSD).
+        # Evict old entries if cache grows too large (keep last 64 chips).
         if len(_CHIP_READ_CACHE) > 64:
             _oldest = next(iter(_CHIP_READ_CACHE))
             del _CHIP_READ_CACHE[_oldest]
     loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = _CHIP_READ_CACHE[_chip_cache_key]
+
+    # --- Background prefetch: read the next spot's chip while the user reviews this one ---
+    _tci_str = str(tci_p.resolve())
+    for _pi in range(1, 4):  # prefetch next 3 spots
+        if idx + _pi >= n:
+            break
+        _p_cx, _p_cy = float(cands[idx + _pi][0]), float(cands[idx + _pi][1])
+        _p_key = (_tci_str, round(_p_cx, 2), round(_p_cy, 2), spot_px_read, locator_px, mt)
+        if _p_key not in _CHIP_READ_CACHE:
+            import threading as _threading
+            def _bg_read(key=_p_key, tcip=tci_p, ncx=_p_cx, ncy=_p_cy,
+                         spx=spot_px_read, lpx=locator_px) -> None:
+                try:
+                    result = read_locator_and_spot_rgb_matching_stretch(
+                        tcip, ncx, ncy, spx, lpx,
+                        locator_out_px=CHIP_DISPLAY_SIDE,
+                    )
+                    _CHIP_READ_CACHE[key] = result
+                except Exception:
+                    pass
+            _t = _threading.Thread(target=_bg_read, daemon=True)
+            _t.start()
 
     pool = st.session_state.get("detector_unlabeled_pool_all") or []
     qset = [(float(c[0]), float(c[1])) for c in cands]
