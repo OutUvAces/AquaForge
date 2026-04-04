@@ -3118,25 +3118,19 @@ def _render_review_deck(
         extent_sq2 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
     spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
     # Compute heading value for both the arrow overlay and the legend presence indicator.
+    # Only use aquaforge_heading_fused_deg — it is already suppressed to None by the
+    # dependency chain in inference.py when hull/structures are absent.
+    # Wake-derived heading keys (aquaforge_wake_aux_deg etc.) are intentionally excluded
+    # here because heading display requires structures; wake is independent.
     if isinstance(af_spot, dict) and af_spot:
-        for _hk in (
-            "aquaforge_heading_fused_deg",
-            "aquaforge_heading_keypoint_deg",
-            "aquaforge_heading_wake_heuristic_deg",
-            "aquaforge_heading_wake_deg",
-            "aquaforge_heading_wake_model_deg",
-            "aquaforge_wake_aux_deg",
-        ):
-            _raw = af_spot.get(_hk)
-            if _raw is None:
-                continue
+        _raw = af_spot.get("aquaforge_heading_fused_deg")
+        if _raw is not None:
             try:
                 _fv = float(_raw)
+                if math.isfinite(_fv):
+                    _arrow_h = _fv
             except (TypeError, ValueError):
-                continue
-            if math.isfinite(_fv):
-                _arrow_h = _fv
-                break
+                pass
     if _show_dir and _arrow_h is not None:
         # Use bow position for a spatially grounded arrowhead 50 m off the bow.
         # Fall back to the corner arrow if bow is unknown.
