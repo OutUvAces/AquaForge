@@ -2814,19 +2814,15 @@ def _render_review_deck(
         except Exception:
             pass
 
-    # --- Step 2.5: Expand review chip so the full hull boundary + structures are visible ---
-    # Collect all annotated full-res coordinates from the inference result.
+    # --- Step 2.5: Expand review chip so the full hull boundary is visible ---
+    # Use hull polygon vertices ONLY — structures are by definition inside the hull,
+    # so an outlier keypoint prediction (common early in training) should never drive
+    # the zoom level.
     _fit_pts_x: list[float] = []
     _fit_pts_y: list[float] = []
     _hull_fit = af_spot.get("aquaforge_hull_polygon_fullres") if af_spot else None
     if isinstance(_hull_fit, list):
         for _p in _hull_fit:
-            if isinstance(_p, (list, tuple)) and len(_p) >= 2:
-                _fit_pts_x.append(float(_p[0]))
-                _fit_pts_y.append(float(_p[1]))
-    _kp_fit = af_spot.get("aquaforge_landmarks_xy_fullres") if af_spot else None
-    if isinstance(_kp_fit, list):
-        for _p in _kp_fit:
             if isinstance(_p, (list, tuple)) and len(_p) >= 2:
                 _fit_pts_x.append(float(_p[0]))
                 _fit_pts_y.append(float(_p[1]))
