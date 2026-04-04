@@ -407,8 +407,12 @@ def main() -> None:
         # Uses 100/(1+loss) so score approaches 100 as loss->0.
         # Treat anything above 90 as excellent; below 30 = still early.
         t_score = 100.0 / (1.0 + avg)
-        # Which heads are active this epoch (curriculum weight > 0)
-        active = [k for k, v in base_sw.items() if float(v) > 0 and k not in ("distill",)]
+        # Friendly display names for the active heads line
+        _head_display = {"cls": "detect", "seg": "hull", "kp": "structures",
+                         "kp_hm": "structures_hm", "hdg": "heading", "wake": "wake"}
+        active = [_head_display.get(k, k) for k, v in base_sw.items()
+                  if float(v) > 0 and k not in ("distill",)]
+        active = list(dict.fromkeys(active))  # deduplicate while preserving order
         # ASCII-only: Windows cp1252 consoles cannot print U+2248 (approx) or fancy punctuation.
         print(
             f"epoch {epoch + 1}/{args.epochs}  "
