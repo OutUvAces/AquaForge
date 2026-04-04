@@ -46,6 +46,37 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Module-level dataset class — must NOT be a local/nested class.
+# Python 3.14 uses the 'spawn' multiprocessing start method on Windows,
+# which requires all DataLoader worker arguments to be picklable.
+# Local classes defined inside functions are not picklable with spawn.
+from torch.utils.data import Dataset as _Dataset  # noqa: E402
+
+
+class _AquaForgeDS(_Dataset):
+    """Simple map-style dataset wrapping a list of AquaForgeSample rows."""
+
+    def __init__(self, samples: list, chip_half: int, imgsz: int) -> None:
+        from aquaforge.unified.dataset import build_training_row as _btr
+        self._btr = _btr
+        self.samples = samples
+        self.chip_half = chip_half
+        self.imgsz = imgsz
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, i: int) -> tuple:
+        row = self._btr(self.samples[i], self.chip_half, self.imgsz)
+        if row is None:
+            return self.__getitem__((i + 1) % len(self.samples))
+        return row
+
+
+def _collate_list(batch: list) -> list:
+    """Module-level collate: keep each item as-is in a list (picklable for spawn)."""
+    return list(batch)
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train AquaForge vessel model.")
@@ -138,7 +169,7 @@ def main() -> None:
 
     try:
         import torch
-        from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+        from torch.utils.data import DataLoader, WeightedRandomSampler
     except ImportError as e:
         # Exit 11: UI maps to "install torch for this interpreter" (same Python as Streamlit).
         print("AQUAFORGE_EXIT:missing_torch", file=sys.stderr)
@@ -205,20 +236,6 @@ def main() -> None:
         flush=True,
     )
 
-    class _DS(Dataset):  # noqa: N801
-        def __init__(self, samples: list[AquaForgeSample]) -> None:
-            self.samples = samples
-
-        def __len__(self) -> int:
-            return len(self.samples)
-
-        def __getitem__(self, i: int) -> tuple:
-            s = self.samples[i]
-            row = build_training_row(s, int(args.chip_half), int(args.imgsz))
-            if row is None:
-                return self.__getitem__((i + 1) % len(self.samples))
-            return row
-
     use_sampler = not bool(args.no_priority_sampling)
     # ── DataLoader workers ─────────────────────────────────────────────────
     # On Windows with small datasets, 0 workers avoids spawn overhead.
@@ -245,7 +262,7 @@ def main() -> None:
         )
         sampler = WeightedRandomSampler(wts, num_samples=len(rows), replacement=True)
         dl = DataLoader(
-            _DS(rows),
+            _AquaForgeDS(rows, int(args.chip_half), int(args.imgsz)),
             batch_size=int(args.batch_size),
             sampler=sampler,
             shuffle=False,
@@ -253,19 +270,19 @@ def main() -> None:
             num_workers=_n_workers,
             persistent_workers=_persistent,
             pin_memory=torch.cuda.is_available(),
-            collate_fn=lambda b: list(b),
+            collate_fn=_collate_list,
         )
     else:
         random.shuffle(rows)
         dl = DataLoader(
-            _DS(rows),
+            _AquaForgeDS(rows, int(args.chip_half), int(args.imgsz)),
             batch_size=int(args.batch_size),
             shuffle=True,
             drop_last=False,
             num_workers=_n_workers,
             persistent_workers=_persistent,
             pin_memory=torch.cuda.is_available(),
-            collate_fn=lambda b: list(b),
+            collate_fn=_collate_list,
         )
     print(f"  dataloader num_workers={_n_workers}", flush=True)
 
