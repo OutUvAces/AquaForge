@@ -1041,7 +1041,20 @@ def _training_is_active(project_root: Path) -> tuple[bool, int | None]:
         os.kill(pid, 0)  # signal 0 = existence check, does not kill
         return True, pid
     except (OSError, PermissionError):
+        # Process is gone — clean up PID file and reload model + clear scan caches.
         pid_file.unlink(missing_ok=True)
+        try:
+            from aquaforge.model_manager import clear_aquaforge_predictor_cache as _clr
+            _clr()
+        except Exception:
+            pass
+        try:
+            _scan_dir = project_root / "data" / "scan_cache"
+            if _scan_dir.is_dir():
+                for _sc in _scan_dir.glob("*_scan.json"):
+                    _sc.unlink(missing_ok=True)
+        except Exception:
+            pass
         return False, None
 
 
@@ -1056,22 +1069,20 @@ def _render_training_progress_panel(project_root: Path) -> None:
     log_path = project_root / "data" / "train_log.txt"
     is_active, pid = _training_is_active(project_root)
 
-    if not is_active and not log_path.is_file():
+    # Only show while training is actively running — never on startup or after completion.
+    if not is_active:
         return
 
     st.markdown("---")
     with st.container():
-        if is_active:
-            _hdr_col, _stop_col = st.columns([5, 1])
-            with _hdr_col:
-                st.markdown("#### Training in progress…")
-            with _stop_col:
-                if st.button("Stop training", key="vd_stop_training_panel",
-                             type="secondary", use_container_width=True):
-                    _stop_training(project_root)
-                    st.rerun()
-        else:
-            st.markdown("#### Last training run")
+        _hdr_col, _stop_col = st.columns([5, 1])
+        with _hdr_col:
+            st.markdown("#### Training in progress…")
+        with _stop_col:
+            if st.button("Stop training", key="vd_stop_training_panel",
+                         type="secondary", use_container_width=True):
+                _stop_training(project_root)
+                st.rerun()
 
         if log_path.is_file():
             try:
@@ -1083,13 +1094,9 @@ def _render_training_progress_panel(project_root: Path) -> None:
             epoch_lines = [l for l in lines if l.startswith("epoch ") and "score=" in l]
             if epoch_lines:
                 last = epoch_lines[-1]
-                # extract epoch X/Y
                 m_ep = _re.search(r"epoch (\d+)/(\d+)", last)
-                # extract score
                 m_sc = _re.search(r"score=([\d.]+)/100", last)
-                # extract cls_acc
                 m_ca = _re.search(r"cls_acc=([\d.]+)%", last)
-                # extract loss
                 m_lo = _re.search(r"loss=([\d.]+)", last)
 
                 if m_ep:
@@ -1109,23 +1116,9 @@ def _render_training_progress_panel(project_root: Path) -> None:
             tail = lines[-18:] if len(lines) > 18 else lines
             st.code("\n".join(tail), language="text")
 
-        if is_active:
-            # Auto-rerun every 4 s to poll for new output
-            _time.sleep(4)
-            st.rerun()
-        else:
-            # Training just finished — reload the model so new weights take effect
-            from aquaforge.model_manager import clear_aquaforge_predictor_cache as _clr
-            _clr()
-            # Invalidate scan cache (model changed)
-            _scan_dir = project_root / "data" / "scan_cache"
-            if _scan_dir.is_dir():
-                for _sc in _scan_dir.glob("*_scan.json"):
-                    try:
-                        _sc.unlink()
-                    except OSError:
-                        pass
-
+        # Auto-rerun every 4 s to poll for new output
+        _time.sleep(4)
+        st.rerun()
 
 
 def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None:
