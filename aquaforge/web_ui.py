@@ -3027,12 +3027,20 @@ def _render_review_deck(
                     for t in raw_kxc
                     if isinstance(t, (list, tuple)) and len(t) >= 3
                 ]
+        # ── Dependency: structures require hull detection ──────────────────
+        # If no hull polygon was decoded, suppress structures and all
+        # downstream overlays (bow-stern, heading) at the UI level too.
+        # This catches old JSONL entries and any inference edge-cases where
+        # the inference-side suppression didn't fire.
+        if not _poly:
+            _kxc = None
+            _kpc = None
         _bs_conf = None
         if af_spot.get("aquaforge_landmark_heading_trust") is not None:
             _bs_conf = float(af_spot["aquaforge_landmark_heading_trust"])
         _bs = None
         _mbs_kp = 0.2
-        if (
+        if _poly and (
             _show_mark
             and isinstance(lm_full, list)
             and len(lm_full) >= 2
@@ -3050,7 +3058,7 @@ def _render_review_deck(
                 )
                 if _bs_conf is None:
                     _bs_conf = float(max(0.0, min(1.0, min(_bc, _stc))))
-        if _bs is None:
+        if _poly and _bs is None:
             raw_bs = af_spot.get("aquaforge_bow_stern_segment_crop")
             if isinstance(raw_bs, list) and len(raw_bs) == 2:
                 a0, a1 = raw_bs[0], raw_bs[1]
