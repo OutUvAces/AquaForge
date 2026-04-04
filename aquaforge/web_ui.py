@@ -1,7 +1,7 @@
 """
 Streamlit UI: pick a scene, refresh, review spots.
 
-**Left panel (starts closed):** **Scene** + **Refresh spot list** only at top; everything else under
+**Left panel (starts closed):** **Scene** + **Refresh detection list** only at top; everything else under
 **Advanced** (retrain AquaForge, finding spots, download, label agreement check, exports, duplicates, label fixer,
 whole-scene map, optional heavy-inference consent).
 
@@ -1659,12 +1659,28 @@ def main() -> None:
                     help=file_help,
                     key="workbench_tci_select",
                 )
-            refresh = st.button(
-                "Refresh spot list",
-                type="primary",
-                use_container_width=True,
-                key="workbench_refresh",
-            )
+            _btn_col1, _btn_col2 = st.columns(2)
+            with _btn_col1:
+                refresh = st.button(
+                    "Refresh detection list",
+                    type="primary",
+                    use_container_width=True,
+                    key="workbench_refresh",
+                )
+            with _btn_col2:
+                _clear_cache = st.button(
+                    "Clear & re-scan",
+                    use_container_width=True,
+                    key="workbench_clear_cache",
+                    help="Delete the cached scan result and force a full re-detection on the next run.",
+                )
+            if _clear_cache and choice is not None:
+                _cc_file = _scan_cache_path(choice, ROOT)
+                try:
+                    _cc_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                refresh = True
         with st.expander("Advanced", expanded=False):
             if not tci_list:
                 st.info(
@@ -2146,7 +2162,7 @@ def main() -> None:
                 if not cands:
                     if raw:
                         st.warning(
-                            "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh spot list**, or pick another image."
+                            "Every spot is already saved or filtered. In the left panel, raise **How many spots to list**, then **Refresh detection list**, or pick another image."
                         )
                     elif isinstance(meta, dict) and meta.get(
                         "detection_source"
@@ -2158,7 +2174,7 @@ def main() -> None:
                             st.warning(
                                 "No vessels detected above the current confidence threshold. "
                                 "Open **← Advanced → Detection sensitivity** and click "
-                                "**🔍 Use lower thresholds** then **Refresh spot list**, or verify weights."
+                                "**🔍 Use lower thresholds** then **Refresh detection list**, or verify weights."
                             )
                     else:
                         st.warning(
@@ -2185,12 +2201,12 @@ def main() -> None:
     if not candidates_ready(cands, tci_loaded):
         if tci_loaded:
             st.info(
-                "Nothing to review — **Refresh spot list** in the left panel, or **Advanced → Whole-image map** to add a spot."
+                "Nothing to review — **Refresh detection list** in the left panel, or **Advanced → Whole-image map** to add a spot."
             )
         else:
             st.info(
                 "**No spot list yet.** Open the **←** sidebar, pick an **Image**, then press "
-                "**Refresh spot list**. The main area stays empty until that scan finishes "
+                "**Refresh detection list**. The main area stays empty until that scan finishes "
                 "(large JP2s can take a minute or two — you will see a progress message then)."
             )
         return
@@ -2683,7 +2699,7 @@ def _render_review_deck(
     n = len(cands)
     if idx >= n:
         st.success(
-            "Done with this batch. Press **Refresh spot list** in the left panel for more (some spots may already be saved)."
+            "Done with this batch. Press **Refresh detection list** in the left panel for more (some spots may already be saved)."
         )
         return
 
