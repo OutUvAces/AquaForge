@@ -1139,12 +1139,16 @@ def _render_training_progress_panel(project_root: Path) -> None:
                     _c3.metric("Loss", f"{float(m_lo.group(1)):.4f}")
 
             tail = lines[-18:] if len(lines) > 18 else lines
+            _escaped = [
+                l.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                for l in tail
+            ]
             st.markdown(
                 "<pre style='white-space:pre-wrap;"
                 "font-size:0.78rem;line-height:1.4;max-height:320px;"
                 "overflow-y:auto;background:#0e1117;color:#fafafa;"
                 "padding:0.6rem;border-radius:6px;'>"
-                + "\n".join(tail).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                + "<br>".join(_escaped)
                 + "</pre>",
                 unsafe_allow_html=True,
             )
