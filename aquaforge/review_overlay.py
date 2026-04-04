@@ -242,12 +242,16 @@ def read_locator_and_spot_rgb_matching_stretch(
         loc_win = Window(lc0, lr0, lcw, lch)
 
         if locator_out_px is not None and lcw > 0 and lch > 0:
-            out_h = max(1, min(locator_out_px, lch))
-            out_w = max(1, min(locator_out_px, lcw))
+            # Request 1/4 of the native window size so the JPEG2000 wavelet decoder can
+            # stop at the 2nd decomposition level (~16× fewer coefficients than full-res).
+            # Once a .ovr overview file exists, GDAL serves this from pre-built GeoTIFF
+            # tiles instead — essentially instant.
+            jp2_h = max(8, lch // 4)
+            jp2_w = max(8, lcw // 4)
             arr = ds.read(
                 (1, 2, 3),
                 window=loc_win,
-                out_shape=(3, out_h, out_w),
+                out_shape=(3, jp2_h, jp2_w),
                 resampling=Resampling.average,
             )
             # Spot is small — read at full resolution sharing the same open() overhead.
@@ -278,6 +282,15 @@ def read_locator_and_spot_rgb_matching_stretch(
     loc_u8 = (loc_rgb * 255.0).astype(np.uint8)
 
     if use_fast_path:
+        # Upscale the JP2-decoded locator (jp2_h×jp2_w) to the requested display size
+        # with LANCZOS — trivially fast compared to the JP2 decode savings.
+        if locator_out_px is not None:
+            _tgt = int(locator_out_px)
+            if loc_u8.shape[0] != _tgt or loc_u8.shape[1] != _tgt:
+                from PIL import Image as _PIL
+                _img = _PIL.fromarray(loc_u8)
+                _img = _img.resize((_tgt, _tgt), _PIL.LANCZOS)
+                loc_u8 = np.asarray(_img)
         # Apply same stretch to spot (matching radiometry).
         if spot_arr.size == 0:
             spot_u8 = np.zeros((1, 1, 3), dtype=np.uint8)

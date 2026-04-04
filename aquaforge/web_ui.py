@@ -209,6 +209,7 @@ from aquaforge.static_sea_witness import (
     default_static_sea_witness_path,
     summarize_static_sea_cells,
 )
+from aquaforge.raster_gsd import build_jp2_overviews
 
 SAMPLES_DIR = ROOT / "data" / "samples"
 PREVIEW_THUMB_DIR = SAMPLES_DIR / ".preview_thumbnails"
@@ -1516,6 +1517,64 @@ def main() -> None:
                         else {},
                         wrap_expander=False,
                     )
+
+            if tci_loaded_sidebar:
+                _ovr_path = Path(tci_loaded_sidebar + ".ovr")
+                _ovr_exists = _ovr_path.exists()
+                with st.expander("⚡ Optimize scene (fast reads)", expanded=not _ovr_exists):
+                    if _ovr_exists:
+                        st.success(
+                            f"Overviews built — JP2 reads are optimized. "
+                            f"(`{_ovr_path.name}`)"
+                        )
+                        if st.button("Rebuild overviews", key="vd_rebuild_ovr"):
+                            try:
+                                _ovr_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            st.session_state["_vd_ovr_status"] = None
+                            st.rerun()
+                    else:
+                        st.warning(
+                            "No overview file found. Building it once makes every JP2 "
+                            "read 10–50× faster (locator, prefetch, whole-scene map)."
+                        )
+                        if st.button(
+                            "🚀 Build overviews now",
+                            key="vd_build_ovr",
+                            type="primary",
+                        ):
+                            with st.spinner("Building GDAL overviews — this takes 1–3 min once…"):
+                                _res = build_jp2_overviews(tci_loaded_sidebar)
+                            if _res["status"] in ("built", "already_exists"):
+                                st.success("Done! Overviews written.")
+                                st.session_state["_vd_ovr_status"] = "ok"
+                                # Flush the chip read cache so next load uses overviews.
+                                _CHIP_READ_CACHE.clear()
+                                st.rerun()
+                            else:
+                                st.error(
+                                    f"Overview build failed: {_res.get('error', 'unknown error')}\n\n"
+                                    "You can also run manually:\n"
+                                    f"```\ngdaladdo -ro -r average \"{tci_loaded_sidebar}\" 2 4 8 16 32\n```"
+                                )
+
+            # Auto-build overviews in the background when a scene is first loaded
+            # (only if overviews are missing and no build is already in progress).
+            if tci_loaded_sidebar:
+                _auto_ovr = Path(tci_loaded_sidebar + ".ovr")
+                _auto_key = f"_vd_ovr_autobuild_{tci_loaded_sidebar}"
+                if not _auto_ovr.exists() and not st.session_state.get(_auto_key):
+                    st.session_state[_auto_key] = True
+                    import threading as _ovr_threading
+                    def _auto_build_ovr(p=tci_loaded_sidebar):
+                        try:
+                            build_jp2_overviews(p)
+                            _CHIP_READ_CACHE.clear()
+                        except Exception:
+                            pass
+                    _ovr_t = _ovr_threading.Thread(target=_auto_build_ovr, daemon=True)
+                    _ovr_t.start()
 
     if not tci_list:
         st.info("Add a satellite image: open **← Advanced → Download**, or drop a file under **data/**.")

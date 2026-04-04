@@ -92,3 +92,59 @@ def chip_pixels_for_ground_side_meters(
         gavg = 10.0
     chip_px = max(1, int(round(target_side_m / gavg)))
     return chip_px, gdx, gdy, gavg
+
+
+def build_jp2_overviews(tci_path: str | Path) -> dict[str, object]:
+    """Build external GDAL overview (.ovr) file for *tci_path*.
+
+    Overview files make every subsequent ``out_shape``-downsampled read (locator,
+    prefetch, etc.) read from pre-built GeoTIFF tiles instead of decompressing JP2
+    wavelet data at runtime — typically 10–50× faster for window reads.
+
+    Returns a dict with keys:
+      ``status``  : ``"already_exists"`` | ``"built"`` | ``"failed"``
+      ``ovr_path``: Path to the .ovr sidecar file
+      ``error``   : error string if ``status == "failed"``
+    """
+    import subprocess as _sp
+
+    path = Path(tci_path).resolve()
+    ovr = Path(str(path) + ".ovr")
+    if ovr.exists():
+        return {"status": "already_exists", "ovr_path": ovr, "error": None}
+
+    levels = [2, 4, 8, 16, 32]
+    error_msg: str | None = None
+
+    # --- attempt 1: osgeo.gdal Python binding ---
+    try:
+        from osgeo import gdal as _gdal  # type: ignore
+
+        _gdal.SetConfigOption("COMPRESS_OVERVIEW", "DEFLATE")
+        _gdal.SetConfigOption("GDAL_TIFF_OVR_BLOCKSIZE", "512")
+        _gdal.SetConfigOption("USE_RRD", "NO")
+        ds = _gdal.OpenEx(str(path), _gdal.GA_ReadOnly)
+        if ds is not None:
+            err = ds.BuildOverviews("AVERAGE", levels)
+            ds = None
+            if err == 0 and ovr.exists():
+                return {"status": "built", "ovr_path": ovr, "error": None}
+    except Exception as exc:
+        error_msg = str(exc)
+
+    # --- attempt 2: gdaladdo subprocess ---
+    try:
+        cmd = ["gdaladdo", "-ro", "-r", "average", str(path)] + [str(l) for l in levels]
+        result = _sp.run(cmd, capture_output=True, timeout=600)
+        if result.returncode == 0 and ovr.exists():
+            return {"status": "built", "ovr_path": ovr, "error": None}
+        error_msg = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+    except FileNotFoundError:
+        error_msg = (
+            "gdaladdo not found. Install GDAL tools (conda: `conda install -c conda-forge gdal`) "
+            "or the osgeo Python package (`pip install gdal`)."
+        )
+    except Exception as exc:
+        error_msg = str(exc)
+
+    return {"status": "failed", "ovr_path": ovr, "error": error_msg}
