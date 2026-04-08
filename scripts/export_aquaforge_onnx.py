@@ -50,13 +50,15 @@ def main() -> None:
     model, meta = load_checkpoint(ck, torch.device("cpu"))
     model.eval()
     imgsz = int(meta.get("imgsz", 512))
-    dummy = torch.randn(1, 3, imgsz, imgsz, dtype=torch.float32)
+    in_ch = int(getattr(model, "in_channels", meta.get("in_channels", 12)))
+    dummy = torch.randn(1, in_ch, imgsz, imgsz, dtype=torch.float32)
     torch.onnx.export(
         model,
         dummy,
         str(out),
         input_names=["images"],
-        output_names=["cls_logit", "seg_logits", "kp", "hdg", "wake", "kp_hm"],
+        output_names=["cls_logit", "seg_logits", "kp", "hdg", "wake", "kp_hm",
+                      "type_logit", "dim_pred", "spec_pred", "mat_cat_logit"],
         dynamic_axes={"images": {0: "batch"}},
         opset_version=int(args.opset),
     )

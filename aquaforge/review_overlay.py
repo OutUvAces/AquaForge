@@ -199,11 +199,9 @@ def read_rgb_crop_meta(
     rgb = np.transpose(arr, (1, 2, 0)).astype(np.float32)
     if rgb.size == 0:
         return np.zeros((1, 1, 3), dtype=np.uint8), col_off, row_off, cw, ch
-    lo = np.percentile(rgb, 2.0, axis=(0, 1))
-    hi = np.percentile(rgb, 98.0, axis=(0, 1))
-    rgb = (rgb - lo) / (hi - lo + 1e-9)
-    rgb = np.clip(rgb, 0.0, 1.0)
-    return (rgb * 255.0).astype(np.uint8), col_off, row_off, cw, ch
+    mx = max(float(rgb.max()), 1e-6)
+    rgb = np.clip(rgb / mx * 255.0, 0, 255)
+    return rgb.astype(np.uint8), col_off, row_off, cw, ch
 
 
 def read_locator_and_spot_rgb_matching_stretch(
@@ -275,15 +273,11 @@ def read_locator_and_spot_rgb_matching_stretch(
             scw,
             sch,
         )
-    lo = np.percentile(loc_rgb, 2.0, axis=(0, 1))
-    hi = np.percentile(loc_rgb, 98.0, axis=(0, 1))
-    loc_rgb = (loc_rgb - lo) / (hi - lo + 1e-9)
-    loc_rgb = np.clip(loc_rgb, 0.0, 1.0)
-    loc_u8 = (loc_rgb * 255.0).astype(np.uint8)
+    mx = max(float(loc_rgb.max()), 1e-6)
+    loc_rgb = np.clip(loc_rgb / mx * 255.0, 0, 255)
+    loc_u8 = loc_rgb.astype(np.uint8)
 
     if use_fast_path:
-        # Upscale the JP2-decoded locator (jp2_h×jp2_w) to the requested display size
-        # with LANCZOS — trivially fast compared to the JP2 decode savings.
         if locator_out_px is not None:
             _tgt = int(locator_out_px)
             if loc_u8.shape[0] != _tgt or loc_u8.shape[1] != _tgt:
@@ -291,14 +285,12 @@ def read_locator_and_spot_rgb_matching_stretch(
                 _img = _PIL.fromarray(loc_u8)
                 _img = _img.resize((_tgt, _tgt), _PIL.LANCZOS)
                 loc_u8 = np.asarray(_img)
-        # Apply same stretch to spot (matching radiometry).
         if spot_arr.size == 0:
             spot_u8 = np.zeros((1, 1, 3), dtype=np.uint8)
         else:
             spot_f = np.transpose(spot_arr, (1, 2, 0)).astype(np.float32)
-            spot_f = (spot_f - lo) / (hi - lo + 1e-9)
-            spot_f = np.clip(spot_f, 0.0, 1.0)
-            spot_u8 = (spot_f * 255.0).astype(np.uint8)
+            spot_f = np.clip(spot_f / mx * 255.0, 0, 255)
+            spot_u8 = spot_f.astype(np.uint8)
         return loc_u8, lc0, lr0, lcw, lch, spot_u8, sc0, sr0, scw, sch
 
     x0 = sc0 - lc0
@@ -709,7 +701,7 @@ def annotate_locator_spot_outline(
     labeled_reviewed_fullres: list[tuple[float, float]] | None = None,
     near_px: float = 4.0,
 ) -> np.ndarray:
-    """Yellow spot footprint, then rings: orange = detector but not in review batch, cyan = queued auto, green = queued manual, magenta = already in labels."""
+    """Yellow spot footprint + rings: orange = model detected, green = manually queued, purple = manually evaluated."""
     from PIL import Image, ImageDraw
 
     h, w = loc_rgb.shape[0], loc_rgb.shape[1]
@@ -768,7 +760,7 @@ def annotate_locator_spot_outline(
             continue
         if _nearxy(cx_f, cy_f, q_all):
             continue
-        _draw_ring(p[0], p[1], (255, 140, 0), max(1, lw - 1))
+        _draw_ring(p[0], p[1], (255, 102, 0), max(1, lw - 1))
 
     for cx_f, cy_f in qa:
         p = _fr_to_loc(cx_f, cy_f)
@@ -776,14 +768,14 @@ def annotate_locator_spot_outline(
             continue
         if cur and abs(cx_f - cur[0]) <= near_px and abs(cy_f - cur[1]) <= near_px:
             continue
-        _draw_ring(p[0], p[1], (0, 220, 255), lw)
+        _draw_ring(p[0], p[1], (255, 102, 0), lw)
 
     for cx_f, cy_f in qm:
         p = _fr_to_loc(cx_f, cy_f)
         if p is None:
             continue
         # Draw green for manual picks including the current detection (yellow box shows chip extent).
-        _draw_ring(p[0], p[1], (80, 255, 120), lw)
+        _draw_ring(p[0], p[1], (34, 204, 85), lw)
 
     for cx_f, cy_f in lab_done:
         p = _fr_to_loc(cx_f, cy_f)
@@ -793,7 +785,7 @@ def annotate_locator_spot_outline(
             continue
         if _nearxy(cx_f, cy_f, q_all):
             continue
-        _draw_ring(p[0], p[1], (220, 80, 255), max(1, lw))
+        _draw_ring(p[0], p[1], (153, 68, 255), max(1, lw))
 
     foot = spot_footprint_in_locator_pixels(
         spot_col_off,
@@ -816,7 +808,7 @@ def annotate_locator_spot_outline(
         x1 = max(0, min(x1, w - 1))
         y0 = max(0, min(y0, h - 1))
         y1 = max(0, min(y1, h - 1))
-        draw.rectangle([x0, y0, x1, y1], outline=(255, 255, 0), width=lw)
+        draw.rectangle([x0, y0, x1, y1], outline=(255, 221, 0), width=lw)
 
     return np.asarray(im)
 
@@ -1028,7 +1020,7 @@ def overlay_bow_heading_arrowhead(
     color:
         RGB colour of the arrowhead (default bright green).
     """
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageFont
 
     h, w = int(rgb_square.shape[0]), int(rgb_square.shape[1])
     ox, oy = int(meta.ox), int(meta.oy)
@@ -1036,54 +1028,66 @@ def overlay_bow_heading_arrowhead(
     if w < 8 or h < 8 or nw < 8 or nh < 8 or chip_native_w < 1 or chip_native_h < 1:
         return rgb_square
 
-    # Scale factors: native chip pixels → letterbox display pixels
     sx = float(nw) / float(chip_native_w)
     sy = float(nh) / float(chip_native_h)
 
-    # Bow display position
     bx_d = float(ox) + float(bow_crop_xy[0]) * sx
     by_d = float(oy) + float(bow_crop_xy[1]) * sy
 
-    # Heading vector (compass: 0=north/up, 90=east/right)
     rad = float(heading_deg_from_north) * (np.pi / 180.0)
-    dx = float(np.sin(rad))
-    dy = float(-np.cos(rad))  # screen y is flipped vs geographic y
+    fwd_dx = float(np.sin(rad))
+    fwd_dy = float(-np.cos(rad))
 
-    # Offset in display pixels
     display_px_per_m = sx / float(meters_per_native_px)
-    offset_px = float(offset_m) * display_px_per_m
+    gap_px = float(offset_m) * display_px_per_m
 
-    # Tip of arrowhead
-    tip_x = float(np.clip(bx_d + dx * offset_px, 0, w - 1))
-    tip_y = float(np.clip(by_d + dy * offset_px, 0, h - 1))
-
-    # Arrow body: draw a short stem from bow to just before the tip
-    im = Image.fromarray(rgb_square.copy())
-    dr = ImageDraw.Draw(im)
-
-    stem_end_x = float(np.clip(bx_d + dx * offset_px * 0.6, 0, w - 1))
-    stem_end_y = float(np.clip(by_d + dy * offset_px * 0.6, 0, h - 1))
-    lw = max(2, int(min(nw, nh) / 60))
-    outline_rgb = (20, 20, 24)
-    if lw >= 2:
-        dr.line([(bx_d, by_d), (stem_end_x, stem_end_y)], fill=outline_rgb, width=lw + 2)
-    dr.line([(bx_d, by_d), (stem_end_x, stem_end_y)], fill=color, width=lw)
-
-    # Arrowhead
-    ah = max(5.0, offset_px * 0.4)
-    base_x = tip_x - dx * ah
-    base_y = tip_y - dy * ah
-    perp_x, perp_y = -dy, dx
-    spread = ah * 0.55
-    p1 = (base_x + perp_x * spread, base_y + perp_y * spread)
-    p2 = (base_x - perp_x * spread, base_y - perp_y * spread)
-    ow = max(1, lw // 2)
+    # Render the ⇧ glyph into a small RGBA image, then rotate to heading
+    icon_size = max(8, int(min(nw, nh) * 0.05))
+    font_size = int(icon_size * 1.4)
     try:
-        dr.polygon([(tip_x, tip_y), p1, p2], fill=color, outline=outline_rgb, width=ow)
-    except TypeError:
-        dr.polygon([(tip_x, tip_y), p1, p2], fill=color)
+        font = ImageFont.truetype("seguisym.ttf", font_size)
+    except (OSError, IOError):
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except (OSError, IOError):
+            font = ImageFont.load_default()
 
-    return np.asarray(im)
+    glyph = "\u21e7"
+    _tmp = Image.new("RGBA", (font_size * 2, font_size * 2), (0, 0, 0, 0))
+    _td = ImageDraw.Draw(_tmp)
+    bbox = _td.textbbox((0, 0), glyph, font=font)
+    gw = bbox[2] - bbox[0]
+    gh = bbox[3] - bbox[1]
+    pad = 6
+    canvas_sz = max(gw, gh) + pad * 2
+    glyph_img = Image.new("RGBA", (canvas_sz, canvas_sz), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glyph_img)
+    gx = (canvas_sz - gw) // 2 - bbox[0]
+    gy = (canvas_sz - gh) // 2 - bbox[1]
+    # Dark outline via offsets
+    for ddx, ddy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)]:
+        gd.text((gx + ddx * 2, gy + ddy * 2), glyph, fill=(20, 20, 24, 220), font=font)
+    gd.text((gx, gy), glyph, fill=(*color, 255), font=font)
+
+    # Rotate: the glyph points up (0°), heading_deg_from_north is clockwise from north
+    rotated = glyph_img.rotate(-heading_deg_from_north, resample=Image.BICUBIC, expand=True)
+
+    # Position: base of the icon (closest edge to vessel) starts at offset_m from bow.
+    # Shift the center forward by half the pre-rotation canvas height so the
+    # trailing edge sits at exactly the gap distance.
+    half_icon = canvas_sz / 2.0
+    icon_cx = bx_d + fwd_dx * (gap_px + half_icon)
+    icon_cy = by_d + fwd_dy * (gap_px + half_icon)
+
+    rw, rh = rotated.size
+    paste_x = int(round(icon_cx - rw / 2))
+    paste_y = int(round(icon_cy - rh / 2))
+    im = Image.fromarray(rgb_square.copy()).convert("RGBA")
+    overlay = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    overlay.paste(rotated, (paste_x, paste_y))
+    im = Image.alpha_composite(im, overlay)
+
+    return np.asarray(im.convert("RGB"))
 
 
 def overlay_heading_arrow_north_on_letterbox(

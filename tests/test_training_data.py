@@ -22,7 +22,7 @@ class TestBinaryLabel(unittest.TestCase):
         self.assertEqual(_binary_training_label({"review_category": "vessel"}), 1)
 
     def test_negative_categories(self) -> None:
-        for c in ("not_vessel", "cloud", "land"):
+        for c in ("water", "not_vessel", "cloud", "land"):
             self.assertEqual(_binary_training_label({"review_category": c}), 0)
 
     def test_sun_glint_row_negative(self) -> None:

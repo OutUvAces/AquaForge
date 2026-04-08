@@ -13,6 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+
+def _safe_sigmoid(x: float) -> float:
+    """Numerically stable sigmoid that avoids OverflowError for extreme logits."""
+    x = max(-500.0, min(500.0, x))
+    if x >= 0:
+        return 1.0 / (1.0 + math.exp(-x))
+    ex = math.exp(x)
+    return ex / (1.0 + ex)
+
 import numpy as np
 
 from aquaforge.unified.constants import NUM_LANDMARKS
@@ -49,6 +58,7 @@ class AquaForgeSpotResult:
     chroma_heading_deg: float | None = None  # chromatic fringe motion heading
     chroma_pnr: float | None = None        # phase-correlation peak-to-noise ratio
     spectral_pred: list[float] | None = None  # mat_head: predicted 12-band hull reflectance
+    mat_cat_logits: list[float] | None = None  # mat_cat_head: [vessel, water, cloud] logits
 
 
 def _mask_to_polygon_fullres(
@@ -68,6 +78,11 @@ def _mask_to_polygon_fullres(
     rectangular/pill-shaped, not arbitrary polygons.  Polygons whose longest
     dimension exceeds *max_vessel_m* metres are discarded (physically impossible
     hull sizes from an immature model).
+
+    The mask may be smaller than ``imgsz`` (e.g. 256×256 when the seg head
+    upsamples only to half-resolution).  Contour coordinates live in the
+    mask's own pixel grid, so we use ``mask.shape`` — not ``imgsz`` — when
+    mapping back to full-res.
     """
     import cv2
 
@@ -81,25 +96,26 @@ def _mask_to_polygon_fullres(
     if cv2.contourArea(c) < 4:
         return None
 
+    mask_h, mask_w = int(mask.shape[0]), int(mask.shape[1])
+
     # Fit minimum-area rotated rectangle — always gives a clean rectangular hull.
-    rect = cv2.minAreaRect(c)          # ((cx, cy), (w, h), angle_deg) in chip px
+    rect = cv2.minAreaRect(c)          # ((cx, cy), (w, h), angle_deg) in mask px
     (_, _), (rw, rh), _ = rect
 
-    # Size gate: convert chip-pixel dimensions to metres and reject oversized boxes.
-    # Scale from chip pixels → full-res pixels → metres.
-    scale_x = float(cw) / float(imgsz)
-    scale_y = float(ch) / float(imgsz)
+    # Size gate: convert mask-pixel dimensions to metres and reject oversized boxes.
+    scale_x = float(cw) / float(mask_w)
+    scale_y = float(ch) / float(mask_h)
     rw_m = rw * scale_x * gsd_m
     rh_m = rh * scale_y * gsd_m
     if max(rw_m, rh_m) > max_vessel_m:
         return None
 
-    box = cv2.boxPoints(rect)          # 4 corner points in chip pixel space
+    box = cv2.boxPoints(rect)          # 4 corner points in mask pixel space
     poly: list[tuple[float, float]] = []
     for p in box:
         u, v = float(p[0]), float(p[1])
-        fx = c0 + (u / float(imgsz)) * float(cw)
-        fy = r0 + (v / float(imgsz)) * float(ch)
+        fx = c0 + (u / float(mask_w)) * float(cw)
+        fy = r0 + (v / float(mask_h)) * float(ch)
         poly.append((fx, fy))
     return poly
 
@@ -349,7 +365,10 @@ class AquaForgePredictor:
         )
         if bgr.size == 0 or cw < 8 or ch < 8:
             return None
-        return self._forward_bgr(bgr, c0, r0, cw, ch)
+        return self._forward_bgr(
+            bgr, c0, r0, cw, ch,
+            tci_path=tci_path, chip_center=(cx, cy),
+        )
 
     def predict_batch_at_candidates(
         self,
@@ -362,6 +381,7 @@ class AquaForgePredictor:
         out: list[AquaForgeSpotResult | None] = [None] * n
         half = int(self._af.chip_half)
         chips: list[tuple[np.ndarray, int, int, int, int]] = []
+        chip_centers: list[tuple[float, float]] = []
         idx_map: list[int] = []
         for i, (cx, cy) in enumerate(centers):
             bgr, c0, r0, cw, ch = read_chip_bgr_centered(tci_path, cx, cy, half)
@@ -369,12 +389,19 @@ class AquaForgePredictor:
                 continue
             idx_map.append(i)
             chips.append((bgr, c0, r0, cw, ch))
+            chip_centers.append((cx, cy))
         if not chips:
             return out
+        _tci = Path(tci_path)
         mb = self._effective_minibatch_size()
         for k in range(0, len(chips), mb):
             chunk = chips[k : k + mb]
-            decoded = self._forward_bgr_minibatch(chunk, proposal_floor=None)
+            decoded = self._forward_bgr_minibatch(
+                chunk,
+                proposal_floor=None,
+                tci_path=_tci,
+                chip_positions=chip_centers[k : k + mb],
+            )
             for j, r in enumerate(decoded):
                 out[idx_map[k + j]] = r
         return out
@@ -408,7 +435,8 @@ class AquaForgePredictor:
             type_l = np.asarray(outs[6], dtype=np.float32) if len(outs) > 6 else None
             dim_p = np.asarray(outs[7], dtype=np.float32) if len(outs) > 7 else None
             spec_p = np.asarray(outs[8], dtype=np.float32) if len(outs) > 8 else None
-            return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p
+            mc_l = np.asarray(outs[9], dtype=np.float32) if len(outs) > 9 else None
+            return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p, mc_l
         if self._torch is None:
             raise RuntimeError("no aquaforge runtime")
         x = torch.from_numpy(arr_bchw.astype(np.float32))
@@ -426,7 +454,8 @@ class AquaForgePredictor:
         type_l = raw[6].cpu().numpy() if len(raw) > 6 else None
         dim_p = raw[7].cpu().numpy() if len(raw) > 7 else None
         spec_p = raw[8].cpu().numpy() if len(raw) > 8 else None
-        return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p
+        mc_l = raw[9].cpu().numpy() if len(raw) > 9 else None
+        return cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p, mc_l
 
     def _decode_batch_index(
         self,
@@ -446,11 +475,12 @@ class AquaForgePredictor:
         type_l: np.ndarray | None = None,
         dim_p: np.ndarray | None = None,
         spec_p: np.ndarray | None = None,
+        mc_l: np.ndarray | None = None,
     ) -> AquaForgeSpotResult | None:
         """Decode one sample from batched raw outputs."""
         imgsz = int(self._af.imgsz)
         cls_slice = np.asarray(cls_l[bi]).reshape(-1)
-        p_vessel = float(1.0 / (1.0 + math.exp(-float(cls_slice[0]))))
+        p_vessel = _safe_sigmoid(float(cls_slice[0]))
         thr = float(self._af.conf_threshold)
 
         if proposal_floor is None:
@@ -496,7 +526,7 @@ class AquaForgePredictor:
         hdg_b = hdg[bi]
         hs = float(hdg_b[0])
         hc = float(hdg_b[1])
-        hconf = float(1.0 / (1.0 + math.exp(-float(hdg_b[2]))))
+        hconf = _safe_sigmoid(float(hdg_b[2]))
         nrm = max(1e-6, math.hypot(hs, hc))
         sn, cs = hs / nrm, hc / nrm
         h_deg = (math.degrees(math.atan2(sn, cs)) + 360.0) % 360.0
@@ -504,7 +534,7 @@ class AquaForgePredictor:
         w = np.asarray(wake[bi]).reshape(-1)
         wx, wy = float(w[0]), float(w[1]) if len(w) > 1 else 0.0
         wn = max(1e-6, math.hypot(wx, wy))
-        wake_conf_val = float(1.0 / (1.0 + math.exp(-float(w[2])))) if len(w) > 2 else 0.0
+        wake_conf_val = _safe_sigmoid(float(w[2])) if len(w) > 2 else 0.0
 
         # Vessel type and dimension heads (may be None for older models)
         type_logits_list = None
@@ -520,6 +550,10 @@ class AquaForgePredictor:
         spectral_pred_list = None
         if spec_p is not None:
             spectral_pred_list = [float(v) for v in np.asarray(spec_p[bi]).reshape(-1)[:12]]
+        # Material category head (mat_cat_head): vessel/water/cloud logits
+        mat_cat_logits_list = None
+        if mc_l is not None:
+            mat_cat_logits_list = [float(v) for v in np.asarray(mc_l[bi]).reshape(-1)[:3]]
 
         return AquaForgeSpotResult(
             confidence=p_vessel,
@@ -537,6 +571,7 @@ class AquaForgePredictor:
             length_norm=length_norm,
             width_norm=width_norm,
             spectral_pred=spectral_pred_list,
+            mat_cat_logits=mat_cat_logits_list,
         )
 
     def _forward_bgr_minibatch(
@@ -564,8 +599,8 @@ class AquaForgePredictor:
         meta = list(chips)
         for i, (bgr, _c0, _r0, _cw, _ch) in enumerate(meta):
             img = cv2.resize(bgr, (imgsz, imgsz), interpolation=cv2.INTER_LINEAR)
-            # Channels 0-2: TCI RGB [0,1]
-            arrs[i, :3] = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)
+            # BGR→RGB to match training (bgr_and_extra_to_tensor uses [:,:,::-1])
+            arrs[i, :3] = (img[:, :, ::-1].astype(np.float32) / 255.0).transpose(2, 0, 1)
             # Channels 3+: extra spectral bands (loaded from co-located band files)
             if in_ch > 3 and tci_path is not None and chip_positions is not None:
                 from aquaforge.spectral_bands import load_extra_bands_chip
@@ -574,7 +609,7 @@ class AquaForgePredictor:
                 extra = load_extra_bands_chip(tci_path, cx_chip, cy_chip, half, imgsz)
                 if extra is not None:
                     arrs[i, 3:3 + extra.shape[0]] = extra
-        cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p = self._network_forward_numpy_batch(arrs)
+        cls_l, seg, kp, hdg, wake, kp_hm, type_l, dim_p, spec_p, mc_l = self._network_forward_numpy_batch(arrs)
         out: list[AquaForgeSpotResult | None] = []
         for i in range(batch):
             bgr, c0, r0, cw, ch = meta[i]
@@ -595,6 +630,7 @@ class AquaForgePredictor:
                     type_l=type_l,
                     dim_p=dim_p,
                     spec_p=spec_p,
+                    mc_l=mc_l,
                 )
             )
         return out
@@ -606,9 +642,15 @@ class AquaForgePredictor:
         r0: int,
         cw: int,
         ch: int,
+        *,
+        tci_path: "Path | str | None" = None,
+        chip_center: "tuple[float, float] | None" = None,
     ) -> AquaForgeSpotResult | None:
         res = self._forward_bgr_minibatch(
-            [(bgr, c0, r0, cw, ch)], proposal_floor=None
+            [(bgr, c0, r0, cw, ch)],
+            proposal_floor=None,
+            tci_path=Path(tci_path) if tci_path is not None else None,
+            chip_positions=[chip_center] if chip_center is not None else None,
         )
         return res[0] if res else None
 
@@ -616,9 +658,10 @@ class AquaForgePredictor:
         self,
         tci_path: str | Path,
         land_mask: "np.ndarray | None" = None,
+        scl_mask: "np.ndarray | None" = None,
         cloud_brightness_threshold: float | None = None,
         cloud_variance_threshold: float | None = None,
-    ) -> list[tuple[float, float, float]]:
+    ) -> tuple[list[tuple[float, float, float]], int, int, int]:
         """
         Full-raster sliding-window AquaForge (overlap + NMS). Returns ``(cx, cy, confidence)``
         sorted by confidence descending — **vessel centers** from hull centroids (chip center fallback).
@@ -632,13 +675,17 @@ class AquaForgePredictor:
             Tiles whose land-pixel fraction exceeds ``LAND_SKIP_FRACTION`` (default
             0.85) are skipped entirely, cutting inference time by 60-80 % in
             coastal scenes.  Pass ``None`` to disable land masking.
+        scl_mask:
+            Optional int16 (H, W) SCL classification array warped to the TCI grid.
+            Tiles that are 100 % cloud (SCL classes 3, 8, 9, 10) are skipped.
+            Pass ``None`` to rely on the RGB brightness heuristic only.
         """
         from aquaforge.raster_rgb import raster_dimensions
         from aquaforge.land_mask import tile_is_water
-        from aquaforge.cloud_mask import tile_is_not_all_cloud_rgb, CLOUD_BRIGHTNESS_THRESHOLD, CLOUD_VARIANCE_THRESHOLD
+        from aquaforge.cloud_mask import tile_is_not_all_cloud_rgb, tile_is_not_all_cloud_scl, CLOUD_BRIGHTNESS_THRESHOLD, CLOUD_VARIANCE_THRESHOLD
 
         if self._sess is None and self._torch is None:
-            return []
+            return [], 0, 0
 
         path = Path(tci_path)
         W, H = raster_dimensions(path)
@@ -667,12 +714,19 @@ class AquaForgePredictor:
                 if chip is None:
                     continue
                 if not tile_is_not_all_cloud_rgb(
-                    chip,
+                    chip[0],
                     brightness_threshold=cloud_brightness_threshold if cloud_brightness_threshold is not None else CLOUD_BRIGHTNESS_THRESHOLD,
                     variance_threshold=cloud_variance_threshold if cloud_variance_threshold is not None else CLOUD_VARIANCE_THRESHOLD,
                 ):
                     skipped_cloud += 1
                     continue
+                if scl_mask is not None:
+                    r1 = min(r0 + tile, scl_mask.shape[0])
+                    c1 = min(c0 + tile, scl_mask.shape[1])
+                    scl_patch = scl_mask[r0:r1, c0:c1]
+                    if not tile_is_not_all_cloud_scl(scl_patch):
+                        skipped_cloud += 1
+                        continue
                 chips.append(chip)
                 # Centre of this tile in TCI pixel coordinates (used for extra-band loading)
                 chip_centers.append((float(c0 + tile // 2), float(r0 + tile // 2)))
@@ -699,6 +753,7 @@ class AquaForgePredictor:
         merged = merged[:cap]
 
         triples: list[tuple[float, float, float]] = []
+        land_pixel_rejected = 0
         for d in merged:
             if d.confidence < conf_final:
                 continue
@@ -708,8 +763,17 @@ class AquaForgePredictor:
             else:
                 cx = float(d.chip_col_off) + float(d.chip_w) * 0.5
                 cy = float(d.chip_row_off) + float(d.chip_h) * 0.5
+            if land_mask is not None:
+                cy_i, cx_i = int(round(cy)), int(round(cx))
+                if (
+                    0 <= cy_i < land_mask.shape[0]
+                    and 0 <= cx_i < land_mask.shape[1]
+                    and land_mask[cy_i, cx_i] == 1
+                ):
+                    land_pixel_rejected += 1
+                    continue
             triples.append((cx, cy, float(d.confidence)))
-        return triples, skipped_land, skipped_cloud
+        return triples, skipped_land, skipped_cloud, land_pixel_rejected
 
 
 def build_aquaforge_predictor(
@@ -737,7 +801,7 @@ def build_aquaforge_predictor(
         model, _meta = load_checkpoint(w, device)
         model.to(device)
         # Sync in_channels from checkpoint meta → settings so _forward_bgr_minibatch allocates correctly
-        ckpt_in_ch = int(_meta.get("in_channels", getattr(model, "in_channels", 3)))
+        ckpt_in_ch = int(_meta.get("in_channels", getattr(model, "in_channels", 12)))
         if af.in_channels != ckpt_in_ch:
             from dataclasses import replace as _dc_replace
             af = _dc_replace(af, in_channels=ckpt_in_ch)
@@ -755,6 +819,9 @@ def build_aquaforge_predictor(
         return None
 
 
+LAND_REVIEW_EXCLUSION_RADIUS_PX: int = 32
+
+
 def run_aquaforge_tiled_scene_triples(
     project_root: Path,
     tci_path: Path,
@@ -762,6 +829,7 @@ def run_aquaforge_tiled_scene_triples(
     *,
     cloud_brightness_threshold: float | None = None,
     cloud_variance_threshold: float | None = None,
+    land_exclusion_points: list[tuple[float, float]] | None = None,
 ) -> tuple[list[tuple[float, float, float]], dict[str, Any]]:
     """
     Sole full-scene vessel detection: overlapping tiles, batched forward, NMS on decoded masks.
@@ -771,6 +839,7 @@ def run_aquaforge_tiled_scene_triples(
     from aquaforge.model_manager import get_cached_aquaforge_predictor
     from aquaforge.raster_rgb import raster_dimensions
     from aquaforge.land_mask import get_land_mask
+    from aquaforge.s2_masks import find_scl_for_tci, scl_resampled_to_tci_grid
 
     meta: dict[str, Any] = {
         "detection_source": "aquaforge_tiled",
@@ -801,14 +870,46 @@ def run_aquaforge_tiled_scene_triples(
             meta["land_mask_applied"] = True
             meta["water_fraction"] = round(water_px / total_px, 3) if total_px else None
 
-        triples, _skipped_land, _skipped_cloud = pred.run_tiled_scene_candidates(
-            tci_path,
-            land_mask=land_mask,
-            cloud_brightness_threshold=cloud_brightness_threshold,
-            cloud_variance_threshold=cloud_variance_threshold,
+        scl_mask: np.ndarray | None = None
+        scl_file = find_scl_for_tci(tci_path)
+        if scl_file is not None:
+            try:
+                scl_mask = scl_resampled_to_tci_grid(scl_file, tci_path, h, w)
+                meta["scl_path"] = str(scl_file)
+                meta["scl_warped_to_tci_grid"] = True
+            except Exception:
+                scl_mask = None
+
+        triples, _skipped_land, _skipped_cloud, _land_px_rejected = (
+            pred.run_tiled_scene_candidates(
+                tci_path,
+                land_mask=land_mask,
+                scl_mask=scl_mask,
+                cloud_brightness_threshold=cloud_brightness_threshold,
+                cloud_variance_threshold=cloud_variance_threshold,
+            )
         )
         meta["land_tiles_skipped"] = _skipped_land
         meta["cloud_tiles_skipped"] = _skipped_cloud
+        meta["land_pixel_rejected"] = _land_px_rejected
+
+        land_review_rejected = 0
+        if land_exclusion_points:
+            radius_sq = float(LAND_REVIEW_EXCLUSION_RADIUS_PX ** 2)
+            filtered: list[tuple[float, float, float]] = []
+            for cx, cy, conf in triples:
+                suppressed = False
+                for ex, ey in land_exclusion_points:
+                    if (cx - ex) ** 2 + (cy - ey) ** 2 <= radius_sq:
+                        suppressed = True
+                        break
+                if suppressed:
+                    land_review_rejected += 1
+                else:
+                    filtered.append((cx, cy, conf))
+            triples = filtered
+        meta["land_review_rejected"] = land_review_rejected
+
         return triples, meta
     except Exception as e:
         meta["error"] = str(e)
@@ -839,6 +940,7 @@ def _aquaforge_spot_to_overlay_dict(
     *,
     spot_col_off: int,
     spot_row_off: int,
+    scl_path: "Path | None" = None,
 ) -> dict[str, Any]:
     """Build review/eval overlay dict from one AquaForge chip decode (single detector path)."""
     import math
@@ -863,8 +965,11 @@ def _aquaforge_spot_to_overlay_dict(
         "aquaforge_heading_wake_heuristic_deg": None,
         "aquaforge_heading_wake_model_deg": None,
         "aquaforge_wake_combine_source": None,
+        "aquaforge_hull_heading_a_deg": None,          # hull-axis candidate A (degrees from north)
+        "aquaforge_hull_heading_b_deg": None,          # hull-axis candidate B (A + 180°)
         "aquaforge_heading_fused_deg": None,
         "aquaforge_heading_fusion_source": None,
+        "aquaforge_wake_stern_indicator_deg": None,    # wake direction (stern indicator, not heading)
         "aquaforge_keypoints_json": None,
         "aquaforge_keypoints_crop": None,
         "aquaforge_landmark_bow_confidence": None,
@@ -883,9 +988,26 @@ def _aquaforge_spot_to_overlay_dict(
         "aquaforge_chroma_heading_deg": None,     # chromatic fringe motion heading
         "aquaforge_chroma_pnr": None,             # phase-correlation confidence
         "aquaforge_chroma_agrees_with_model": None,  # heading cross-validation flag
+        "aquaforge_chroma_bands_found": False,    # True when B02/B04 files exist on disk
+        "aquaforge_chroma_n_pairs": 0,            # number of band pairs used for velocity
         "aquaforge_spectral_pred": None,          # mat_head: predicted 12-band hull reflectance
         "aquaforge_spectral_measured": None,      # hull-masked spectral mean from raw bands
         "aquaforge_material_hint": None,          # heuristic material label string
+        "aquaforge_material_confidence": None,    # SAM classification confidence
+        "aquaforge_vessel_material": None,        # best vessel-only SAM match
+        "aquaforge_vessel_material_confidence": None,  # vessel-only SAM confidence
+        "aquaforge_spectral_indices": None,       # computed spectral indices dict
+        "aquaforge_spectral_anomaly_score": None, # Mahalanobis distance from water
+        "aquaforge_sun_glint_flag": None,         # True/False/None glint indicator
+        "aquaforge_atmospheric_quality": None,    # 'good'/'moderate'/'poor'/'unknown'
+        "aquaforge_spectral_consistency": None,   # SAM angle between pred and measured
+        "aquaforge_wake_nir_excess": None,        # NIR excess in wake vs water
+        "aquaforge_vegetation_flag": None,         # True if likely vegetation/sargassum FP
+        "aquaforge_spectral_quality": None,       # composite 0-1 score (1 = strong vessel evidence)
+        "aquaforge_fp_spectral_flag": None,       # True when spectral evidence strongly suggests FP
+        "aquaforge_mat_cat_label": None,          # learned material category: vessel/water/cloud
+        "aquaforge_mat_cat_confidence": None,     # softmax confidence for predicted category
+        "aquaforge_scl_chip_stats": None,         # per-detection SCL class fractions
         "aquaforge_keypoints_xy_conf_crop": None,
         "aquaforge_warnings": [],
         "aquaforge_hull_polygon_fullres": None,
@@ -901,6 +1023,29 @@ def _aquaforge_spot_to_overlay_dict(
     }
 
     warnings: list[str] = []
+
+    # Chromatic fringe velocity — multi-pair averaging across B02/B04, B08/B04,
+    # B08/B02, B02/B03.  Runs unconditionally (needs only band files, not model).
+    try:
+        from aquaforge.chromatic_velocity import (
+            estimate_chroma_velocity_multi,
+            chroma_agrees_with_model,
+            chroma_bands_available,
+        )
+        out["aquaforge_chroma_bands_found"] = chroma_bands_available(tci_path)
+        cv_result = estimate_chroma_velocity_multi(
+            tci_path, cx, cy, chip_half=32, background_half=96,
+        )
+        if cv_result is not None:
+            out["aquaforge_chroma_speed_ms"] = cv_result.speed_ms
+            out["aquaforge_chroma_speed_kn"] = cv_result.speed_kn
+            out["aquaforge_chroma_heading_deg"] = cv_result.heading_deg
+            out["aquaforge_chroma_pnr"] = cv_result.pnr
+            out["aquaforge_chroma_n_pairs"] = cv_result.n_pairs_used
+            out["aquaforge_chroma_speed_error_kn"] = cv_result.speed_error_kn
+            out["aquaforge_chroma_heading_error_deg"] = cv_result.heading_error_deg
+    except Exception:
+        pass
 
     pred = get_cached_aquaforge_predictor(project_root, settings)
     if pred is None:
@@ -953,37 +1098,6 @@ def _aquaforge_spot_to_overlay_dict(
         out["aquaforge_predicted_length_m"] = float(ar.length_norm * chip_ground_m)
         out["aquaforge_predicted_width_m"] = float(ar.width_norm * chip_ground_m)
 
-    # Chromatic fringe velocity: estimate vessel speed and motion heading from
-    # sub-pixel shift between S-2 B02 and B04 bands (~1 s apart).
-    # Runs in-process — fast (~5 ms) when bands are cached on disk; silently
-    # skipped when B02/B04 not yet downloaded.
-    try:
-        from aquaforge.chromatic_velocity import (
-            estimate_chroma_velocity,
-            chroma_agrees_with_model,
-        )
-        chip_half_cv = max(24, min(48, (int(ar.chip_w) + int(ar.chip_h)) // 4))
-        cv_result = estimate_chroma_velocity(
-            tci_path,
-            cx,
-            cy,
-            chip_half=chip_half_cv,
-            background_half=chip_half_cv * 3,
-        )
-        if cv_result is not None:
-            out["aquaforge_chroma_speed_ms"] = cv_result.speed_ms
-            out["aquaforge_chroma_speed_kn"] = cv_result.speed_kn
-            out["aquaforge_chroma_heading_deg"] = cv_result.heading_deg
-            out["aquaforge_chroma_pnr"] = cv_result.pnr
-            fused_hdg = out.get("aquaforge_heading_fused_deg")
-            if fused_hdg is not None:
-                agrees = chroma_agrees_with_model(
-                    cv_result, float(fused_hdg), tolerance_deg=45.0
-                )
-                out["aquaforge_chroma_agrees_with_model"] = agrees
-    except Exception:
-        pass
-
     # Dependent overlay chain: keypoints require hull → heading requires keypoints.
     # If no hull polygon was decoded, suppress all downstream overlays.
     _hull_present = poly_crop is not None and len(poly_crop) >= 3
@@ -1009,6 +1123,33 @@ def _aquaforge_spot_to_overlay_dict(
             [float(x) - float(ic0), float(y) - float(ir0)] for x, y in kp.xy_fullres
         ]
 
+    # ── Hull-axis heading (±180° ambiguity) ─────────────────────────────
+    # The hull polygon is always a rotated rectangle (from cv2.minAreaRect).
+    # Its long axis gives the vessel orientation, but we cannot tell bow from
+    # stern without additional information → two candidate headings 180° apart.
+    hull_axis_a: float | None = None   # one candidate (degrees from north)
+    hull_axis_b: float | None = None   # the other (hull_axis_a + 180) % 360
+    _hull_poly_fr = ar.polygon_fullres
+    if _hull_poly_fr and len(_hull_poly_fr) >= 4:
+        try:
+            from aquaforge.geodesy_bearing import geodesic_bearing_deg as _geo_brg
+            _pts = list(_hull_poly_fr)
+            _e01 = math.sqrt((_pts[1][0]-_pts[0][0])**2 + (_pts[1][1]-_pts[0][1])**2)
+            _e12 = math.sqrt((_pts[2][0]-_pts[1][0])**2 + (_pts[2][1]-_pts[1][1])**2)
+            if _e01 >= _e12:
+                _ma = ((_pts[0][0]+_pts[1][0])/2, (_pts[0][1]+_pts[1][1])/2)
+                _mb = ((_pts[2][0]+_pts[3][0])/2, (_pts[2][1]+_pts[3][1])/2)
+            else:
+                _ma = ((_pts[1][0]+_pts[2][0])/2, (_pts[1][1]+_pts[2][1])/2)
+                _mb = ((_pts[3][0]+_pts[0][0])/2, (_pts[3][1]+_pts[0][1])/2)
+            hull_axis_a = _geo_brg(Path(tci_path), _ma[0], _ma[1], _mb[0], _mb[1])
+            hull_axis_b = (hull_axis_a + 180.0) % 360.0
+            out["aquaforge_hull_heading_a_deg"] = hull_axis_a
+            out["aquaforge_hull_heading_b_deg"] = hull_axis_b
+        except Exception:
+            pass
+
+    # ── Structure heading (bow/stern keypoints → resolves ambiguity) ──────
     h_kp = None
     kp_trust = 0.0
     if kp is not None:
@@ -1039,28 +1180,12 @@ def _aquaforge_spot_to_overlay_dict(
                 [float(stern[0]) - float(ic0), float(stern[1]) - float(ir0)],
             ]
 
-    # Heading is only computed when keypoints with sufficient confidence exist.
-    # No keypoints (or hull absent) → heading is suppressed.
-    _kp_heading_available = h_kp is not None
-    h_dir = ar.heading_direct_deg
-    hconf = float(ar.heading_direct_conf)
-    fused = None
-    src = "none"
-    if _kp_heading_available:
-        # Prefer direct heading when high-confidence, otherwise use landmark heading
-        if h_dir is not None and hconf >= float(settings.aquaforge.min_direct_heading_confidence):
-            fused = float(h_dir)
-            src = "aquaforge_direct"
-        else:
-            fused = float(h_kp)
-            src = "aquaforge_landmarks"
-    out["aquaforge_heading_fused_deg"] = fused
-    out["aquaforge_heading_fusion_source"] = src
-
+    # ── Wake: stern indicator + underway flag only (never sets heading) ───
+    _wake_stern_side: float | None = None  # direction FROM hull center TOWARD wake
     if ar.wake_dxdy is not None:
         dx, dy = ar.wake_dxdy
-        aux_deg = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
-        out["aquaforge_wake_aux_deg"] = float(aux_deg)
+        _wake_stern_side = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
+        out["aquaforge_wake_stern_indicator_deg"] = float(_wake_stern_side)
         cx_full = float(ar.chip_col_off) + float(ar.chip_w) * 0.5
         cy_full = float(ar.chip_row_off) + float(ar.chip_h) * 0.5
         scale = float(max(ar.chip_w, ar.chip_h)) * 0.35
@@ -1074,30 +1199,238 @@ def _aquaforge_spot_to_overlay_dict(
             [cx_full - float(ic0), cy_full - float(ir0)],
             [x2 - float(ic0), y2 - float(ir0)],
         ]
-        out["aquaforge_heading_wake_deg"] = float(aux_deg)
-        out["aquaforge_wake_heading_confidence"] = 0.35
-        out["aquaforge_wake_combine_source"] = "aquaforge_wake_aux"
+
+    # ── Fused heading logic ──────────────────────────────────────────────
+    # Priority cascade (5 levels):
+    #   1. Structure heading (bow/stern keypoints) — definitive, no ambiguity
+    #   2. Hull axis + wake disambiguation — wake tells us which end is stern
+    #   3. Hull axis + chroma heading — phase-correlation heading disambiguates
+    #      the 180-degree hull axis ambiguity (requires PNR >= 4.0)
+    #   4. Hull axis + model direct heading — the model's hdg_head output
+    #      disambiguates when its confidence is high enough (>= 0.6)
+    #   5. Hull axis alone — ±180° ambiguous (both candidates stored)
+    fused = None
+    src = "none"
+
+    def _pick_closest_axis(axis_a: float, axis_b: float, target: float) -> float:
+        da = min(abs(axis_a - target), 360.0 - abs(axis_a - target))
+        db = min(abs(axis_b - target), 360.0 - abs(axis_b - target))
+        return axis_a if da <= db else axis_b
+
+    if h_kp is not None:
+        fused = float(h_kp)
+        src = "structures"
+    elif hull_axis_a is not None and _wake_stern_side is not None:
+        _bow_from_wake = (_wake_stern_side + 180.0) % 360.0
+        fused = _pick_closest_axis(hull_axis_a, hull_axis_b, _bow_from_wake)
+        src = "hull_wake_disambiguated"
+    elif hull_axis_a is not None and out.get("aquaforge_chroma_pnr") is not None:
+        _chroma_pnr = float(out["aquaforge_chroma_pnr"])
+        if _chroma_pnr >= 4.0 and out.get("aquaforge_chroma_heading_deg") is not None:
+            _ch = float(out["aquaforge_chroma_heading_deg"])
+            fused = _pick_closest_axis(hull_axis_a, hull_axis_b, _ch)
+            src = "hull_chroma_disambiguated"
+    if fused is None and hull_axis_a is not None and ar.heading_direct_deg is not None:
+        if ar.heading_direct_conf >= 0.6:
+            fused = _pick_closest_axis(hull_axis_a, hull_axis_b, ar.heading_direct_deg)
+            src = "hull_model_disambiguated"
+    if fused is None and hull_axis_a is not None:
+        fused = hull_axis_a
+        src = "hull_axis_ambiguous"
+    out["aquaforge_heading_fused_deg"] = fused
+    out["aquaforge_heading_fusion_source"] = src
+
+    # Chromatic fringe velocity heading cross-validation (needs fused heading).
+    try:
+        from aquaforge.chromatic_velocity import chroma_agrees_with_model, ChromaVelocityResult as _CVR
+        cv_spd = out.get("aquaforge_chroma_speed_ms")
+        fused_hdg = out.get("aquaforge_heading_fused_deg")
+        if cv_spd is not None and fused_hdg is not None:
+            _cv = _CVR(
+                speed_ms=float(cv_spd),
+                speed_kn=float(out["aquaforge_chroma_speed_kn"]),
+                heading_deg=float(out["aquaforge_chroma_heading_deg"]),
+                shift_x_px=0.0, shift_y_px=0.0,
+                pnr=float(out["aquaforge_chroma_pnr"]),
+                dt_s=1.004, band_a="B02", band_b="B04", chip_size_px=64,
+            )
+            out["aquaforge_chroma_agrees_with_model"] = chroma_agrees_with_model(
+                _cv, float(fused_hdg), tolerance_deg=45.0,
+            )
+    except Exception:
+        pass
 
     out["aquaforge_model_ready"] = True
     out["aquaforge_warnings"] = warnings
 
-    # Spectral signature: model prediction + measured from raw bands
+    # Spectral signature: model prediction + measured from raw bands + new features
     if ar.spectral_pred is not None:
         out["aquaforge_spectral_pred"] = ar.spectral_pred
     try:
         from aquaforge.spectral_extractor import (
             extract_spectral_signature_from_disk,
             spectral_mean_to_jsonable,
-            infer_material_hint,
+            infer_material_hint_v2,
+            infer_vessel_material,
+            spectral_consistency_check,
         )
         hull_poly_crop = out.get("aquaforge_hull_polygon_crop")
+        _hull_for_spec = hull_poly_crop if (hull_poly_crop and len(hull_poly_crop) >= 3) else None
         chip_half_spec = max(20, int(max(ar.chip_w, ar.chip_h)) // 2)
         spec_meas = extract_spectral_signature_from_disk(
-            tci_path, cx, cy, chip_half_spec, hull_poly_crop, out_size=64
+            tci_path, cx, cy, chip_half_spec, _hull_for_spec, out_size=64
         )
         if spec_meas is not None:
             out["aquaforge_spectral_measured"] = spectral_mean_to_jsonable(spec_meas)
-            out["aquaforge_material_hint"] = infer_material_hint(spec_meas)
+
+        pred_arr = None
+        if ar.spectral_pred is not None:
+            pred_arr = np.array(ar.spectral_pred, dtype=np.float32)
+        if spec_meas is not None or pred_arr is not None:
+            mat_label, mat_conf, mat_indices = infer_material_hint_v2(spec_meas, pred_arr)
+            out["aquaforge_material_hint"] = mat_label
+            out["aquaforge_material_confidence"] = round(mat_conf, 3)
+            if mat_indices is not None:
+                out["aquaforge_spectral_indices"] = {k: round(v, 4) for k, v in mat_indices.items()}
+
+            vm_label, vm_conf, _ = infer_vessel_material(spec_meas, pred_arr)
+            out["aquaforge_vessel_material"] = vm_label
+            out["aquaforge_vessel_material_confidence"] = round(vm_conf, 3)
+
+        if spec_meas is not None and ar.spectral_pred is not None:
+            out["aquaforge_spectral_consistency"] = spectral_consistency_check(
+                spec_meas, np.array(ar.spectral_pred, dtype=np.float32),
+            )
+    except Exception:
+        pass
+
+    # Material category from learned head: override SAM's category when they disagree.
+    if ar.mat_cat_logits is not None:
+        try:
+            _mc_arr = np.array(ar.mat_cat_logits, dtype=np.float32)
+            _mc_exp = np.exp(_mc_arr - _mc_arr.max())
+            _mc_probs = _mc_exp / _mc_exp.sum()
+            _mc_idx = int(np.argmax(_mc_probs))
+            _mc_names = ["vessel", "water", "cloud"]
+            out["aquaforge_mat_cat_label"] = _mc_names[_mc_idx]
+            out["aquaforge_mat_cat_confidence"] = round(float(_mc_probs[_mc_idx]), 3)
+
+            sam_hint = out.get("aquaforge_material_hint") or ""
+            sam_cat = sam_hint.split(":")[0].strip() if ":" in sam_hint else "vessel"
+            learned_cat = _mc_names[_mc_idx]
+            if sam_cat != learned_cat and _mc_probs[_mc_idx] > 0.6:
+                if learned_cat == "vessel" and sam_cat in ("water", "cloud", "oil"):
+                    out["aquaforge_material_hint"] = sam_hint.replace(
+                        f"{sam_cat}: ", "vessel (override): "
+                    )
+                elif learned_cat in ("water", "cloud") and sam_cat == "vessel":
+                    old_hint = out.get("aquaforge_material_hint", "unknown")
+                    out["aquaforge_material_hint"] = (
+                        f"{learned_cat}: {old_hint} (SAM disagrees)"
+                    )
+        except Exception:
+            pass
+
+    # Spectral anomaly, sun-glint, atmospheric quality, wake NIR — require 12-ch chip
+    try:
+        from aquaforge.spectral_bands import load_extra_bands_chip, bgr_and_extra_to_tensor
+        from aquaforge.spectral_extractor import (
+            spectral_anomaly_score,
+            sun_glint_likelihood,
+            atmospheric_quality_flag,
+            wake_nir_anomaly,
+            vegetation_false_positive_flag,
+        )
+        chip_half_feat = max(20, int(max(ar.chip_w, ar.chip_h)) // 2)
+        extra = load_extra_bands_chip(tci_path, cx, cy, chip_half_feat, 64)
+        if extra is not None:
+            from aquaforge.chip_io import read_chip_bgr_centered
+            bgr_feat, *_ = read_chip_bgr_centered(tci_path, cx, cy, chip_half_feat)
+            if bgr_feat.size > 0:
+                chip12 = bgr_and_extra_to_tensor(bgr_feat, extra, 64)  # (12, 64, 64)
+                hull_poly_crop = out.get("aquaforge_hull_polygon_crop")
+                seg_mask_64 = None
+                if hull_poly_crop and len(hull_poly_crop) >= 3:
+                    import cv2
+                    seg_mask_64 = np.zeros((64, 64), dtype=np.float32)
+                    sc = 64.0 / (2.0 * chip_half_feat)
+                    pts = np.array([[p[0] * sc, p[1] * sc] for p in hull_poly_crop], dtype=np.int32)
+                    cv2.fillPoly(seg_mask_64, [pts], 1.0)
+
+                out["aquaforge_atmospheric_quality"] = atmospheric_quality_flag(chip12)
+
+                if seg_mask_64 is not None:
+                    out["aquaforge_spectral_anomaly_score"] = spectral_anomaly_score(chip12, seg_mask_64)
+                    out["aquaforge_sun_glint_flag"] = sun_glint_likelihood(chip12, seg_mask_64)
+                    out["aquaforge_vegetation_flag"] = vegetation_false_positive_flag(chip12, seg_mask_64)
+
+                wake_seg = out.get("aquaforge_wake_segment_crop")
+                if wake_seg and len(wake_seg) >= 2 and seg_mask_64 is not None:
+                    wake_mask_64 = np.zeros((64, 64), dtype=np.float32)
+                    wp1 = (int(round(wake_seg[0][0] * sc)), int(round(wake_seg[0][1] * sc)))
+                    wp2 = (int(round(wake_seg[1][0] * sc)), int(round(wake_seg[1][1] * sc)))
+                    cv2.line(wake_mask_64, wp1, wp2, 1.0, thickness=3)
+                    out["aquaforge_wake_nir_excess"] = wake_nir_anomaly(
+                        chip12, wake_mask_64, seg_mask_64,
+                    )
+    except Exception:
+        pass
+
+    # --- Per-detection SCL chip statistics ---
+    if scl_path is not None:
+        try:
+            import rasterio
+            from rasterio.enums import Resampling
+            from aquaforge.s2_masks import (
+                SCL_WATER, SCL_CLOUD_SHADOWS, SCL_CLOUD_MEDIUM,
+                SCL_CLOUD_HIGH, SCL_THIN_CIRRUS,
+            )
+            chip_half_scl = max(20, int(max(ar.chip_w, ar.chip_h)) // 2) if ar is not None else 64
+            with rasterio.open(scl_path) as ds:
+                scl_res = ds.res[0]
+                scale = 10.0 / scl_res
+                scl_cx = cx * scale
+                scl_cy = cy * scale
+                scl_half = max(1, int(chip_half_scl * scale))
+                win_col = max(0, int(scl_cx) - scl_half)
+                win_row = max(0, int(scl_cy) - scl_half)
+                win_w = min(2 * scl_half, ds.width - win_col)
+                win_h = min(2 * scl_half, ds.height - win_row)
+                if win_w > 0 and win_h > 0:
+                    scl_chip = ds.read(
+                        1,
+                        window=rasterio.windows.Window(win_col, win_row, win_w, win_h),
+                        resampling=Resampling.nearest,
+                    )
+                    n = max(int(scl_chip.size), 1)
+                    cloud_px = int(np.isin(scl_chip, [SCL_CLOUD_MEDIUM, SCL_CLOUD_HIGH]).sum())
+                    cirrus_px = int((scl_chip == SCL_THIN_CIRRUS).sum())
+                    shadow_px = int((scl_chip == SCL_CLOUD_SHADOWS).sum())
+                    water_px = int((scl_chip == SCL_WATER).sum())
+                    out["aquaforge_scl_chip_stats"] = {
+                        "cloud_fraction": round(cloud_px / n, 4),
+                        "cirrus_fraction": round(cirrus_px / n, 4),
+                        "shadow_fraction": round(shadow_px / n, 4),
+                        "clear_water_fraction": round(water_px / n, 4),
+                    }
+        except Exception:
+            pass
+
+    # --- Composite spectral quality score and FP flag ---
+    try:
+        from aquaforge.spectral_extractor import compute_spectral_quality
+        sq, fp_flag = compute_spectral_quality(
+            material_hint=out.get("aquaforge_material_hint"),
+            material_confidence=out.get("aquaforge_material_confidence"),
+            spectral_anomaly_score=out.get("aquaforge_spectral_anomaly_score"),
+            spectral_consistency=out.get("aquaforge_spectral_consistency"),
+            sun_glint_flag=out.get("aquaforge_sun_glint_flag"),
+            atmospheric_quality=out.get("aquaforge_atmospheric_quality"),
+            vegetation_flag=out.get("aquaforge_vegetation_flag"),
+            spectral_indices=out.get("aquaforge_spectral_indices"),
+        )
+        out["aquaforge_spectral_quality"] = sq
+        out["aquaforge_fp_spectral_flag"] = fp_flag
     except Exception:
         pass
 
@@ -1115,7 +1448,6 @@ def run_aquaforge_spot_decode(
     scl_path: Path | None = None,
 ) -> dict[str, Any]:
     """Single-location AquaForge decode → review overlay dict (masks, headings, landmarks)."""
-    _ = scl_path
     return _aquaforge_spot_to_overlay_dict(
         project_root,
         tci_path,
@@ -1124,6 +1456,7 @@ def run_aquaforge_spot_decode(
         settings,
         spot_col_off=int(spot_col_off),
         spot_row_off=int(spot_row_off),
+        scl_path=scl_path,
     )
 
 

@@ -70,7 +70,7 @@ class TestBinaryLabelSkipsStaticSea(unittest.TestCase):
             _binary_training_label(
                 {
                     "record_type": "static_sea_witness",
-                    "review_category": "not_vessel",
+                    "review_category": "water",
                     "cx_full": 1.0,
                     "cy_full": 2.0,
                 }

@@ -35,6 +35,15 @@ from aquaforge.vessel_markers import (
 )
 
 
+# Heading sources where bow/stern is ambiguous (50% chance of 180° error).
+# These are excluded from heading supervision during training but remain in
+# the stored JSONL for API output (with the _alt reciprocal).
+_AMBIGUOUS_HEADING_SOURCES: frozenset[str] = frozenset({
+    "ambiguous_end_end",
+    "keel_quad_ambiguous",
+})
+
+
 def _marker_xy(m: dict[str, Any]) -> tuple[float, float] | None:
     try:
         return float(m["x"]), float(m["y"])
@@ -169,6 +178,21 @@ class AquaForgeSample:
     # persisted in JSONL extra.  Used as a physics-derived soft teacher for heading.
     chroma_heading_deg: float | None = None
     chroma_pnr: float | None = None   # phase-correlation quality (higher = more trustworthy)
+    # Review chip pixel origin when markers were placed (col, row); lets training
+    # convert marker crop-coords → full-res → training-chip-coords.
+    marker_origin_col: int | None = None
+    marker_origin_row: int | None = None
+    # Material category target: 0=vessel, 1=water, 2=cloud, -1=masked (land/ambiguous).
+    mat_cat_idx: int = -1
+
+
+_MAT_CAT_FROM_REVIEW: dict[str, int] = {
+    "vessel": 0,
+    "water": 1,
+    "not_vessel": 1,
+    "not_a_ship": 1,
+    "cloud": 2,
+}
 
 
 def iter_aquaforge_samples(
@@ -207,10 +231,16 @@ def iter_aquaforge_samples(
         heading: float | None = None
         if rtype == "vessel_size_feedback":
             h = rec.get("heading_deg_from_north")
+            if h is None:
+                h = extra.get("heading_deg_from_north")
             if h is not None:
                 try:
                     heading = float(h) % 360.0
                 except (TypeError, ValueError):
+                    heading = None
+            if heading is not None:
+                hsrc = rec.get("heading_source") or extra.get("heading_source")
+                if hsrc in _AMBIGUOUS_HEADING_SOURCES:
                     heading = None
             cls = 1.0
             ex_fb = rec.get("extra") if isinstance(rec.get("extra"), dict) else {}
@@ -220,6 +250,8 @@ def iter_aquaforge_samples(
             )
             ch = coastal_scene_hint(ex_fb)
             smh = small_vessel_length_hint(ex_fb)
+            _moc = extra.get("marker_origin_col") if isinstance(extra, dict) else None
+            _mor = extra.get("marker_origin_row") if isinstance(extra, dict) else None
             yield AquaForgeSample(
                 Path(path),
                 cx,
@@ -232,12 +264,20 @@ def iter_aquaforge_samples(
                 review_uncertainty=u_sig,
                 coastal_hint=ch,
                 small_vessel_hint=smh,
+                marker_origin_col=int(_moc) if _moc is not None else None,
+                marker_origin_row=int(_mor) if _mor is not None else None,
+                mat_cat_idx=0,
             )
             continue
 
-        # Negative examples: not_vessel, cloud, land — essential for calibrated classification
-        _NEGATIVE_CATS = {"not_vessel", "cloud", "land", "not_a_ship"}
+        # Negative examples: water, cloud, land — essential for calibrated classification.
+        # Legacy aliases ("not_vessel", "not_a_ship") are normalised to "water" by iter_reviews.
+        _NEGATIVE_CATS = {"water", "cloud", "land", "not_vessel", "not_a_ship"}
         if cat in _NEGATIVE_CATS:
+            _human_mc = extra.get("human_material_category")
+            _mc = _MAT_CAT_FROM_REVIEW.get(str(_human_mc)) if _human_mc else None
+            if _mc is None:
+                _mc = _MAT_CAT_FROM_REVIEW.get(cat, -1)
             yield AquaForgeSample(
                 Path(path),
                 cx,
@@ -250,6 +290,7 @@ def iter_aquaforge_samples(
                 review_uncertainty=0.0,
                 coastal_hint=coastal_scene_hint(extra),
                 small_vessel_hint=0.0,
+                mat_cat_idx=_mc,
             )
             continue
 
@@ -257,10 +298,16 @@ def iter_aquaforge_samples(
             continue
         cls = 1.0
         h2 = rec.get("heading_deg_from_north")
+        if h2 is None:
+            h2 = extra.get("heading_deg_from_north")
         if h2 is not None:
             try:
                 heading = float(h2) % 360.0
             except (TypeError, ValueError):
+                heading = None
+        if heading is not None:
+            hsrc = rec.get("heading_source") or extra.get("heading_source")
+            if hsrc in _AMBIGUOUS_HEADING_SOURCES:
                 heading = None
         u_sig = review_ui_uncertainty_signal(extra)
         pr = review_ui_active_learning_priority(
@@ -292,6 +339,12 @@ def iter_aquaforge_samples(
             chroma_pnr_val: float | None = float(extra["aquaforge_chroma_pnr"])
         except (KeyError, TypeError, ValueError):
             chroma_pnr_val = None
+        _moc2 = extra.get("marker_origin_col")
+        _mor2 = extra.get("marker_origin_row")
+        _human_mc2 = extra.get("human_material_category")
+        _mc2 = _MAT_CAT_FROM_REVIEW.get(str(_human_mc2)) if _human_mc2 else None
+        if _mc2 is None:
+            _mc2 = 0
         yield AquaForgeSample(
             Path(path),
             cx,
@@ -309,6 +362,9 @@ def iter_aquaforge_samples(
             dim_width_m=dim_wid,
             chroma_heading_deg=chroma_hdg,
             chroma_pnr=chroma_pnr_val,
+            marker_origin_col=int(_moc2) if _moc2 is not None else None,
+            marker_origin_row=int(_mor2) if _mor2 is not None else None,
+            mat_cat_idx=_mc2,
         )
 
 
@@ -430,6 +486,10 @@ def collate_batch(
             spec_valid[i] = 1.0
     spectral_mean_t = torch.tensor(spec_arr, device=device, dtype=torch.float32)
     spectral_valid_t = torch.tensor(spec_valid, device=device, dtype=torch.float32)
+    # Material category targets: -1 = masked (land/ambiguous), 0=vessel, 1=water, 2=cloud.
+    mat_cat_vals = [b[19] if len(b) >= 20 else -1 for b in batch_items]
+    mat_cat_t = torch.tensor(mat_cat_vals, device=device, dtype=torch.long)
+    mat_cat_mask = (mat_cat_t >= 0).float()
     return {
         "imgs": imgs,
         "cls": cls,
@@ -455,36 +515,20 @@ def collate_batch(
         "chroma_valid": chroma_valid_t,
         "spectral_mean": spectral_mean_t,    # (B, 12) measured hull spectral mean
         "spectral_valid": spectral_valid_t,  # (B,) 1.0 when 12-ch bands were available
+        "mat_cat_idx": mat_cat_t,            # (B,) int64 class indices (0/1/2 or -1=masked)
+        "mat_cat_mask": mat_cat_mask,         # (B,) 1.0 when mat_cat target is valid
     }
 
 
 def augment_bgr(bgr: np.ndarray, is_vessel: bool) -> np.ndarray:
+    """Photometric-only augmentation for BGR chips (brightness jitter + noise).
+    Geometric transforms (flips, rotations) are applied later via
+    ``_augment_geometric`` so that spectral bands, masks, keypoints, and heading
+    all receive the same spatial transform.
     """
-    Random augmentation for training chips:
-    - Horizontal/vertical flip
-    - 90-degree rotation (any multiple)
-    - Brightness/contrast jitter
-    - Small Gaussian noise
-    Applied to both vessel and negative chips so the model sees diverse examples.
-    """
-    import cv2
     import random
 
     out = bgr.copy()
-
-    # Random horizontal flip
-    if random.random() < 0.5:
-        out = cv2.flip(out, 1)
-
-    # Random vertical flip
-    if random.random() < 0.5:
-        out = cv2.flip(out, 0)
-
-    # Random 90-degree rotation
-    k = random.randint(0, 3)
-    if k > 0:
-        for _ in range(k):
-            out = cv2.rotate(out, cv2.ROTATE_90_CLOCKWISE)
 
     # Brightness jitter ±20%
     if random.random() < 0.7:
@@ -497,6 +541,52 @@ def augment_bgr(bgr: np.ndarray, is_vessel: bool) -> np.ndarray:
         out = np.clip(out.astype(np.float32) + noise, 0, 255).astype(np.uint8)
 
     return out
+
+
+def _augment_geometric(
+    img: np.ndarray,
+    mask: np.ndarray,
+    kp: np.ndarray,
+    vis: np.ndarray,
+    heading_deg: float | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float | None]:
+    """Apply random flips and 90-degree rotations to the image tensor (CHW),
+    hull mask (1,H,W), keypoints (N,2 normalised [0,1]), and heading consistently.
+    """
+    import random
+
+    hflip = random.random() < 0.5
+    vflip = random.random() < 0.5
+    rot_k = random.randint(0, 3)
+
+    if hflip:
+        img = img[:, :, ::-1].copy()
+        mask = mask[:, :, ::-1].copy()
+        kp = kp.copy()
+        kp[vis > 0, 0] = 1.0 - kp[vis > 0, 0]
+        if heading_deg is not None:
+            heading_deg = (360.0 - heading_deg) % 360.0
+
+    if vflip:
+        img = img[:, ::-1, :].copy()
+        mask = mask[:, ::-1, :].copy()
+        kp = kp.copy()
+        kp[vis > 0, 1] = 1.0 - kp[vis > 0, 1]
+        if heading_deg is not None:
+            heading_deg = (180.0 - heading_deg) % 360.0
+
+    for _ in range(rot_k):
+        # 90-degree clockwise rotation for CHW arrays
+        img = np.ascontiguousarray(np.rot90(img, k=-1, axes=(1, 2)))
+        mask = np.ascontiguousarray(np.rot90(mask, k=-1, axes=(1, 2)))
+        kp_new = kp.copy()
+        kp_new[vis > 0, 0] = 1.0 - kp[vis > 0, 1]
+        kp_new[vis > 0, 1] = kp[vis > 0, 0]
+        kp = kp_new
+        if heading_deg is not None:
+            heading_deg = (heading_deg + 90.0) % 360.0
+
+    return img, mask, kp, vis, heading_deg
 
 
 def chip_bgr_to_tensor(bgr: np.ndarray, imgsz: int) -> np.ndarray:
@@ -568,6 +658,8 @@ def build_training_row(
 
     if bgr.size == 0 or cw < 8 or ch < 8:
         return None
+
+    # Photometric augmentation (brightness/noise) — RGB only, no spatial change
     bgr = augment_bgr(bgr, is_vessel=sample.cls > 0.5)
 
     # Load extra spectral bands if available alongside TCI
@@ -575,10 +667,29 @@ def build_training_row(
 
     # Stack TCI + extra bands into one tensor (C, imgsz, imgsz)
     img = bgr_and_extra_to_tensor(bgr, extra_bands, imgsz)
-    mask = rasterize_hull_mask(sample.markers, cw, ch, imgsz)
 
-    # Extract spectral signature from the hull mask pixels.
-    # Only meaningful when the model input has 12 channels (extra bands loaded).
+    # --- Convert markers from review-chip-relative to training-chip-relative ---
+    markers_adj = sample.markers
+    if sample.markers and sample.marker_origin_col is not None:
+        tc0 = int(round(float(sample.cx))) - chip_half
+        tr0 = int(round(float(sample.cy))) - chip_half
+        off_x = float(sample.marker_origin_col) - float(tc0)
+        off_y = float(sample.marker_origin_row) - float(tr0)
+        if abs(off_x) > 0.5 or abs(off_y) > 0.5:
+            markers_adj = [dict(m) for m in sample.markers]
+            for m in markers_adj:
+                try:
+                    m["x"] = float(m["x"]) + off_x
+                    m["y"] = float(m["y"]) + off_y
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+    # Build targets from un-augmented markers (aligned with un-augmented image)
+    mask = rasterize_hull_mask(markers_adj, cw, ch, imgsz)
+    kp, vis = landmarks_crop_to_normalized(markers_adj, float(cw), float(ch))
+    heading_deg = sample.heading_deg
+
+    # Extract spectral mean BEFORE geometric augmentation (mask and image are aligned)
     spectral_mean: np.ndarray | None = None
     if extra_bands is not None:
         try:
@@ -586,11 +697,17 @@ def build_training_row(
             spectral_mean = extract_masked_spectral_mean(img, mask)
         except Exception:
             pass
-    kp, vis = landmarks_crop_to_normalized(sample.markers, float(cw), float(ch))
+
+    # Geometric augmentation: flips + rotations applied uniformly to ALL channels,
+    # the hull mask, keypoint positions, and heading angle.
+    img, mask, kp, vis, heading_deg = _augment_geometric(
+        img, mask, kp, vis, heading_deg,
+    )
+
     wake = np.array([1.0, 0.0], dtype=np.float32)
     wake_valid = 0.0
-    if sample.heading_deg is not None:
-        rad = math.radians(float(sample.heading_deg))
+    if heading_deg is not None:
+        rad = math.radians(float(heading_deg))
         wake = np.array([math.cos(rad), math.sin(rad)], dtype=np.float32)
         wake_valid = 1.0
     return (
@@ -599,7 +716,7 @@ def build_training_row(
         mask,
         kp,
         vis,
-        sample.heading_deg,
+        heading_deg,
         wake,
         wake_valid,
         float(sample.al_priority),
@@ -613,6 +730,7 @@ def build_training_row(
         sample.chroma_heading_deg,   # index 16: degrees from north | None
         sample.chroma_pnr,           # index 17: PNR quality | None
         spectral_mean,               # index 18: np.ndarray (12,) | None
+        sample.mat_cat_idx,          # index 19: int (0=vessel,1=water,2=cloud,-1=masked)
     )
 
 @dataclass
@@ -697,6 +815,7 @@ def prepare_pseudo_self_training_batch(
         self_training_trust_from_outputs,
     )
     from aquaforge.chip_io import read_chip_bgr_centered
+    from aquaforge.spectral_bands import load_extra_bands_chip, bgr_and_extra_to_tensor
 
     if not candidates:
         return None
@@ -712,7 +831,8 @@ def prepare_pseudo_self_training_batch(
             bgr, _, _, cw, ch = read_chip_bgr_centered(c.tci_path, c.cx, c.cy, chip_half)
             if bgr.size == 0 or cw < 8 or ch < 8:
                 continue
-            img = chip_bgr_to_tensor(bgr, imgsz)
+            extra_bands = load_extra_bands_chip(c.tci_path, c.cx, c.cy, chip_half, imgsz)
+            img = bgr_and_extra_to_tensor(bgr, extra_bands, imgsz)
             x = torch.from_numpy(img).float().unsqueeze(0).to(device)
             cls_l, seg, _kp, hdg, _wake, kp_hm, *_xh = model(x)
             out = {

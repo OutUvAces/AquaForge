@@ -6,7 +6,7 @@
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
 - **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
 
-Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** holds the full tiled + spot-decode stack; **only** **`run_aquaforge_tiled_scene_triples`** and **`run_aquaforge_spot_decode`** are exported (`__all__`). **`unified/settings.py`** loads `data/config/detection.yaml`. Supporting modules: `evaluation.py`, `model_manager.py`, `web_ui.py`, `mask_measurements.py`, `review_overlay.py`, `review_schema.py`, `unified/spot_landmarks.py`, and packaged YAML under `aquaforge/config/`. Saved review **`extra`** detector audit keys use the **`aquaforge_*`** prefix (e.g. `aquaforge_confidence`, `aquaforge_detector_snapshot`).
+Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** holds the full tiled + spot-decode stack; **only** **`run_aquaforge_tiled_scene_triples`** and **`run_aquaforge_spot_decode`** are exported (`__all__`). **`unified/settings.py`** loads `data/config/detection.yaml`. Supporting modules: `evaluation.py`, `model_manager.py`, `web_ui.py`, `spot_panel.py`, `review_overlay.py`, `review_schema.py`, `spectral_extractor.py`, `vessel_markers.py`, `unified/spot_landmarks.py`, and packaged YAML under `aquaforge/config/`. Saved review **`extra`** detector audit keys use the **`aquaforge_*`** prefix (e.g. `aquaforge_confidence`, `aquaforge_detector_snapshot`).
 
 ---
 
@@ -40,9 +40,23 @@ JPEG logos live in [`aquaforge/static/images/`](aquaforge/static/images/) and ar
 
 ### Daily review
 
-1. Open the **left panel** — choose a **scene** and **Refresh spot list** (full-scene AquaForge pass).
-2. Use **← Back** / **Next →** and **Ship** / **Not a ship** / **Unsure**; labels append to `data/labels/ship_reviews.jsonl` (or your configured path).
-3. **Advanced → Retrain AquaForge** runs `scripts/train_aquaforge.py` on that JSONL.
+1. Open the **left panel** — choose a **scene** and **Refresh detection list** (full-scene AquaForge pass).
+2. Use **← Back** / **Next →** and **Vessel** / **Not a Vessel** / **Unsure**; labels append to `data/labels/ship_reviews.jsonl` (or your configured path).
+3. Place manual hull markers (bow, stern, sides) for accurate dimensions and heading.
+4. **Train AquaForge** (sidebar) runs `scripts/train_aquaforge.py` on that JSONL; **Training Results** shows the last run summary.
+5. **Fix saved labels** opens the review/edit page to correct markers on previously saved detections.
+
+### Shared UI (spot_panel)
+
+The classification page and the review/edit page share a single rendering component ([`aquaforge/spot_panel.py`](aquaforge/spot_panel.py)). UI changes (overlays, markers, measurements, spectral charts) automatically appear on both pages. Markers are stored in full-resolution raster coordinates and correctly transform across zoom levels.
+
+### Image display
+
+Review chips and locator images use **global-max RGB normalization** (same as the overview map) so vessel colors appear natural — red hulls stay red. All 12 Sentinel-2 bands are used for spectral analysis and material prediction; the 3-band stretch is display-only.
+
+### Heading arrow
+
+A heading chevron (⇧) is drawn 50 m ahead of the bow when heading is known. The bow anchor follows a priority chain: manual bow marker → end markers → model landmarks → hull polygon edge. Heading is suppressed when the hull axis is 180°-ambiguous unless the spectral heading (PNR ≥ 2.0, within 45° of one axis candidate) can break the tie.
 
 ### Improve the model
 

@@ -31,6 +31,9 @@ import numpy as np
 from aquaforge.review_schema import (
     EXTRA_AF_TRAINING_PRIORITY,
     EXTRA_AQUAFORGE_CONFIDENCE,
+    EXTRA_AQUAFORGE_SPECTRAL_QUALITY,
+    EXTRA_AQUAFORGE_FP_SPECTRAL_FLAG,
+    EXTRA_AQUAFORGE_SPECTRAL_CONSISTENCY,
 )
 
 
@@ -97,6 +100,23 @@ def review_ui_uncertainty_signal(extra: dict[str, Any] | None) -> float:
         pass
     if ex.get("coastal_or_land_adjacent") is True or ex.get("near_coast_proxy") is True:
         u += 0.08
+
+    # Spectral disagreement: low quality or FP flag raises uncertainty.
+    sq = ex.get(EXTRA_AQUAFORGE_SPECTRAL_QUALITY)
+    try:
+        if sq is not None and float(sq) < 0.35:
+            u += 0.18
+    except (TypeError, ValueError):
+        pass
+    if ex.get(EXTRA_AQUAFORGE_FP_SPECTRAL_FLAG) is True:
+        u += 0.22
+    sc = ex.get(EXTRA_AQUAFORGE_SPECTRAL_CONSISTENCY)
+    try:
+        if sc is not None and float(sc) > 0.5:
+            u += 0.10
+    except (TypeError, ValueError):
+        pass
+
     return float(max(0.0, min(1.0, u)))
 
 
@@ -235,6 +255,21 @@ def review_ui_active_learning_priority(
 
     if heading_labeled:
         p += 0.15
+
+    # Spectral evidence disagreement: model says vessel but spectra say otherwise.
+    # These are the hardest cases — prioritize for human review.
+    if ex.get(EXTRA_AQUAFORGE_FP_SPECTRAL_FLAG) is True:
+        p += 1.35
+    sq = ex.get(EXTRA_AQUAFORGE_SPECTRAL_QUALITY)
+    try:
+        if sq is not None:
+            sqv = float(sq)
+            if sqv < 0.3:
+                p += 0.85
+            elif sqv < 0.45:
+                p += 0.4
+    except (TypeError, ValueError):
+        pass
 
     p *= 1.0 + 0.26 * review_ui_uncertainty_signal(ex)
     return float(max(0.45, min(p, 5.0)))

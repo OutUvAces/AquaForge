@@ -29,6 +29,9 @@ ARCH_CNN = "cnn"
 VESSEL_TYPE_NAMES = ["cargo", "tanker", "fishing", "container", "military", "other"]
 NUM_VESSEL_TYPES = len(VESSEL_TYPE_NAMES)  # 6
 
+MAT_CAT_NAMES = ["vessel", "water", "cloud"]
+NUM_MAT_CATS: int = len(MAT_CAT_NAMES)  # 3
+
 # Spectral band labels in the order they appear in the 12-channel input tensor.
 # Channels 0-2 are TCI RGB; channels 3-11 are the extra S-2 bands.
 SPECTRAL_BAND_LABELS = [
@@ -58,13 +61,13 @@ class _EncoderTriScale(nn.Module):
     Stride-8 **p3**, stride-16 **p4**, stride-32 **p5** feature maps (Sentinel-2 chip → hull / wake cues).
     Channel plan matches the legacy single-tower widths so heads stay parameter-efficient.
 
-    ``in_channels`` may be 3 (TCI only) or up to 12 (TCI + all S2 extra bands from
+    ``in_channels``: 12 for full multispectral (TCI + all S2 extra bands from
     ``aquaforge.spectral_bands``).  The first 7×7 stem automatically adapts.
     """
 
     def __init__(
         self,
-        in_channels: int = 3,
+        in_channels: int = 12,
         c1: int = 32,
         c2: int = 64,
         c3: int = 128,
@@ -111,6 +114,86 @@ class _EncoderTriScale(nn.Module):
         p4 = self.block3(p3)
         p5 = F.avg_pool2d(p4, kernel_size=2, stride=2)
         return p3, p4, p5
+
+
+class _InputBandAttention(nn.Module):
+    """Squeeze-excitation gate on input spectral bands.
+
+    Learns per-band importance weights so the model can emphasize bands most
+    useful for each input chip.  When a band is zero (missing data), the gate
+    naturally produces low weight.  Only meaningful for in_channels > 3.
+    """
+
+    def __init__(self, channels: int, reduction: int = 4) -> None:
+        super().__init__()
+        mid = max(channels // reduction, 2)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.gate = nn.Sequential(
+            nn.Linear(channels, mid),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        w = self.pool(x).view(b, c)
+        w = self.gate(w).view(b, c, 1, 1)
+        return x * w
+
+
+class _SpectralIndexLayer(nn.Module):
+    """Compute physics-informed spectral indices from 12-band input.
+
+    Produces 6 normalised-ratio indices (NDWI, MNDWI, NDVI, iron-oxide,
+    NIR/SWIR, NDRE) and concatenates them with the raw bands, giving an
+    18-channel tensor that encodes domain knowledge the model would
+    otherwise need many epochs to learn.  No learnable parameters.
+    """
+
+    N_INDICES: int = 6
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        eps = 1e-6
+        R = x[:, 0:1]
+        G = x[:, 1:2]
+        B = x[:, 2:3]
+        NIR = x[:, 3:4]       # B08
+        RE1 = x[:, 4:5]       # B05 (705 nm)
+        RE3 = x[:, 6:7]       # B07 (783 nm)
+        SWIR1 = x[:, 8:9]     # B11
+        ndwi = (G - NIR) / (G + NIR + eps)
+        mndwi = (G - SWIR1) / (G + SWIR1 + eps)
+        ndvi = (NIR - R) / (NIR + R + eps)
+        iron_oxide = R / (B + eps)
+        nir_swir = NIR / (SWIR1 + eps)
+        ndre = (RE3 - RE1) / (RE3 + RE1 + eps)
+        return torch.cat([x, ndwi, mndwi, ndvi, iron_oxide, nir_swir, ndre], dim=1)
+
+
+class _FeatureSE(nn.Module):
+    """Squeeze-excitation block on fused feature channels.
+
+    Applied after DeltaFuse to let the model learn cross-channel attention
+    in the fused feature space before the task heads.
+    """
+
+    def __init__(self, channels: int, reduction: int = 4) -> None:
+        super().__init__()
+        mid = max(channels // reduction, 4)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, mid),
+            nn.ReLU(inplace=True),
+            nn.Linear(mid, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        w = self.pool(x).view(b, c)
+        w = self.fc(w).view(b, c, 1, 1)
+        return x * w
 
 
 class AquaForgeDeltaFuse(nn.Module):
@@ -192,26 +275,30 @@ class AquaForgeCnn(nn.Module):
     - ``dim_pred``: (B, 2) — (length_norm, width_norm) normalised by chip ground size.
       Supervised from hull polygon measurements whenever a segmentation mask exists.
 
-    ``in_channels``: 3 for TCI-only (backward-compatible), 12 for full multispectral.
+    ``in_channels``: 12 for full multispectral (TCI RGB + 9 extra S2 bands).
     """
 
     def __init__(
         self,
         imgsz: int = 512,
         n_landmarks: int = NUM_LANDMARKS,
-        in_channels: int = 3,
+        in_channels: int = 12,
     ) -> None:
         super().__init__()
         self.model_arch = ARCH_CNN
         self.imgsz = int(imgsz)
         self.n_landmarks = int(n_landmarks)
         self.in_channels = int(in_channels)
-        self.encoder = _EncoderTriScale(in_channels=self.in_channels)
+        self.band_attn = _InputBandAttention(self.in_channels) if self.in_channels > 3 else None
+        self.spectral_idx = _SpectralIndexLayer() if self.in_channels >= 12 else None
+        _encoder_in = self.in_channels + (_SpectralIndexLayer.N_INDICES if self.in_channels >= 12 else 0)
+        self.encoder = _EncoderTriScale(in_channels=_encoder_in)
         c3, c4 = self.encoder.c3, self.encoder.c4
         self.p3_sv_boost_1x1 = nn.Conv2d(c3, c3, 1, bias=True)
         self.p3_sv_boost_head = nn.Linear(c3, 1, bias=True)
         self.p3_sv_boost_gain = nn.Parameter(torch.tensor(1.275, dtype=torch.float32))
         self.delta_fuse = AquaForgeDeltaFuse(c3=c3, c4=c4, c5=c4, out_ch=c4)
+        self.feat_se = _FeatureSE(c4)
         self.seg_up = nn.Sequential(
             nn.ConvTranspose2d(c4, 128, 4, 2, 1),
             nn.BatchNorm2d(128),
@@ -237,6 +324,9 @@ class AquaForgeCnn(nn.Module):
         # to encode material/spectral information in the bottleneck.
         # N_SPECTRAL_CHANNELS = 12; works in both 3-ch (partial) and 12-ch modes.
         self.mat_head = nn.Linear(c4, N_SPECTRAL_CHANNELS)
+        # Material category: vessel(0) / water(1) / cloud(2).
+        # Trained from review_category labels; land and ambiguous are masked out.
+        self.mat_cat_head = nn.Linear(c4, NUM_MAT_CATS)
 
     def forward(
         self,
@@ -246,8 +336,12 @@ class AquaForgeCnn(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-        torch.Tensor,
+        torch.Tensor, torch.Tensor,
     ]:
+        if self.band_attn is not None:
+            x = self.band_attn(x)
+        if self.spectral_idx is not None:
+            x = self.spectral_idx(x)
         p3, p4, p5 = self.encoder(x)
         z = F.relu(self.p3_sv_boost_1x1(p3), inplace=True)
         s = torch.sigmoid(self.p3_sv_boost_gain * self.p3_sv_boost_head(z.mean(dim=(2, 3))))
@@ -259,6 +353,7 @@ class AquaForgeCnn(nn.Module):
             area_gate = torch.tensor(1.0, device=p3.device, dtype=p3.dtype)
         p3 = p3 * (1.0 + s * area_gate)
         feat = self.delta_fuse(p3, p4, p5)
+        feat = self.feat_se(feat)
         seg = self.seg_up(feat)
         hm_lr = self.kp_hm_encoder(feat)
         kp_hm = F.interpolate(
@@ -275,15 +370,16 @@ class AquaForgeCnn(nn.Module):
         type_logit = self.type_head(g)   # (B, NUM_VESSEL_TYPES)
         dim_pred = self.dim_head(g)      # (B, 2): length_norm, width_norm
         spec_pred = torch.sigmoid(self.mat_head(g))  # (B, 12): predicted per-band mean in [0,1]
-        return cls_logit, seg, kp, hdg, wake, kp_hm, type_logit, dim_pred, spec_pred
+        mat_cat_logit = self.mat_cat_head(g)         # (B, 3): vessel/water/cloud
+        return cls_logit, seg, kp, hdg, wake, kp_hm, type_logit, dim_pred, spec_pred, mat_cat_logit
 
 
 def build_model(
     imgsz: int = 512,
     n_landmarks: int = NUM_LANDMARKS,
-    in_channels: int = 3,
+    in_channels: int = 12,
 ) -> AquaForgeCnn:
-    """Construct the default AquaForge CNN.  ``in_channels`` 3 = TCI only, 12 = full multispectral."""
+    """Construct the default AquaForge CNN.  ``in_channels`` = 12 for full multispectral."""
     return AquaForgeCnn(imgsz=imgsz, n_landmarks=n_landmarks, in_channels=in_channels)
 
 
@@ -323,7 +419,7 @@ def load_checkpoint(
     # (saved before that field was added) still load correctly without a warm-start reshape.
     sd = ckpt["state_dict"]
     first_w_key = "encoder.block01.0.weight"
-    ckpt_in_ch = int(sd[first_w_key].shape[1]) if first_w_key in sd else 3
+    ckpt_in_ch = int(sd[first_w_key].shape[1]) if first_w_key in sd else 12
 
     # Priority: explicit override > meta field > actual checkpoint channels
     in_ch_meta = (
@@ -341,20 +437,19 @@ def load_checkpoint(
     meta["model_arch"] = ARCH_CNN
 
     m = AquaForgeCnn(imgsz=imgsz, n_landmarks=nl, in_channels=in_ch_meta)
+    _actual_enc_in = m.encoder.in_channels  # includes spectral index channels
     fv = int(meta.get("format_version", 1))
     # format_version >= 7: Delta-Fuse + p3 small-vessel boost. 6: Delta-Fuse only. Older: loose load.
     strict = fv >= 7 and ckpt_in_ch == in_ch_meta
 
-    if not strict and ckpt_in_ch != in_ch_meta and first_w_key in sd:
-        # Warm-start: expand RGB checkpoint weight to in_ch_meta channels
+    if not strict and ckpt_in_ch != _actual_enc_in and first_w_key in sd:
         old_w = sd[first_w_key].to(device)  # (c1, ckpt_in_ch, 7, 7)
         c1 = old_w.shape[0]
-        new_w = T.zeros(c1, in_ch_meta, 7, 7, device=device, dtype=old_w.dtype)
-        new_w[:, :ckpt_in_ch, :, :] = old_w
-        # Initialise extra channels to a small fraction of the mean RGB weight
-        mean_rgb = old_w.mean(dim=1, keepdim=True)  # (c1, 1, 7, 7)
-        n_extra = in_ch_meta - ckpt_in_ch
-        new_w[:, ckpt_in_ch:, :, :] = mean_rgb.expand(-1, n_extra, -1, -1) * 0.05
+        new_w = T.zeros(c1, _actual_enc_in, 7, 7, device=device, dtype=old_w.dtype)
+        new_w[:, :min(ckpt_in_ch, _actual_enc_in), :, :] = old_w[:, :min(ckpt_in_ch, _actual_enc_in), :, :]
+        mean_rgb = old_w[:, :3].mean(dim=1, keepdim=True)  # (c1, 1, 7, 7)
+        for ci in range(min(ckpt_in_ch, _actual_enc_in), _actual_enc_in):
+            new_w[:, ci:ci+1, :, :] = mean_rgb * 0.05
         sd = dict(sd)
         sd[first_w_key] = new_w
 

@@ -150,9 +150,3 @@ def ocean_clear_mask(
         cloud_like |= s == SCL_CLOUD_SHADOWS
     snow = s == SCL_SNOW_ICE
     return water & ~cloud_like & ~snow
-
-
-def heuristic_water_mask(gray: np.ndarray) -> np.ndarray:
-    """Fallback when SCL is missing: median-intensity water guess."""
-    med = float(np.median(gray))
-    return gray < med * 1.05

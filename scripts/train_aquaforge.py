@@ -171,6 +171,12 @@ def main() -> None:
         action="store_true",
         help="Skip automatic export_aquaforge_onnx.py after training (default: export when script exists).",
     )
+    ap.add_argument(
+        "--backfill",
+        action="store_true",
+        help="After training, re-run model inference on all saved JSONL records to refresh "
+             "mat_cat predictions and spectral fields. SAM backfill always runs regardless.",
+    )
     args = ap.parse_args()
 
     _py = Path(sys.executable).resolve()
@@ -199,6 +205,7 @@ def main() -> None:
         raise SystemExit(11) from e
 
     from aquaforge.unified.constants import AQUAFORGE_FORMAT_VERSION, NUM_LANDMARKS
+    from aquaforge.spectral_bands import N_TOTAL_CHANNELS
     from aquaforge.unified.dataset import (
         AquaForgeSample,
         build_training_row,
@@ -332,13 +339,11 @@ def main() -> None:
         flush=True,
     )
 
-    # Auto-detect in_channels from band availability in training data.
-    # Check up to 10 distinct TCI files from the labeled rows; if any extra
-    # spectral bands are present, train a 12-channel model (missing bands fill
-    # with zeros per chip — the model learns to handle partial availability).
-    _in_channels = 3  # default: TCI only
+    # Always use 12-channel multispectral mode.  Scan band availability for
+    # diagnostics only — missing bands are zero-filled per chip at load time.
+    _in_channels = N_TOTAL_CHANNELS  # always 12
     try:
-        from aquaforge.spectral_bands import count_available_bands as _count_ab, N_EXTRA_BANDS as _N_E, N_TOTAL_CHANNELS as _N_TOT
+        from aquaforge.spectral_bands import count_available_bands as _count_ab, N_EXTRA_BANDS as _N_E
         _seen_tci: set = set()
         _max_bands = 0
         for _s in rows:
@@ -350,15 +355,18 @@ def main() -> None:
                     _max_bands = _nb
             if len(_seen_tci) >= 10:
                 break
-        if _max_bands > 0:
-            _in_channels = _N_TOT  # 12
+        if _max_bands == 0:
+            print(
+                "  WARNING: no extra spectral bands found on disk — model will "
+                "train with zero-filled channels 3-11 (suboptimal)",
+                flush=True,
+            )
         print(
-            f"  spectral bands: {_max_bands}/{_N_E} extra found -> "
-            f"in_channels={_in_channels} ({'12-ch multispectral' if _in_channels == _N_TOT else '3-ch TCI only'})",
+            f"  spectral bands: {_max_bands}/{_N_E} extra found -> in_channels={_in_channels} (12-ch multispectral)",
             flush=True,
         )
     except Exception as _e:
-        print(f"  spectral band check skipped ({_e}); using in_channels=3", flush=True)
+        print(f"  spectral band check skipped ({_e}); using in_channels={_in_channels}", flush=True)
 
     model = build_model(imgsz=int(args.imgsz), n_landmarks=NUM_LANDMARKS, in_channels=_in_channels).to(device)
 
@@ -367,6 +375,7 @@ def main() -> None:
     # so each training run fine-tunes the current model rather than starting
     # from scratch with random weights.
     _resumed = False
+    _epochs_previously_trained = 0
     if not getattr(args, "no_resume", False) and ckpt_path.is_file():
         try:
             from aquaforge.unified.model import load_checkpoint as _load_ckpt
@@ -376,7 +385,8 @@ def main() -> None:
             )
             model.load_state_dict(_ckpt_model.state_dict(), strict=False)
             _resumed = True
-            print(f"  resumed from checkpoint: {ckpt_path}", flush=True)
+            _epochs_previously_trained = int(_ckpt_meta.get("epochs_trained", _ckpt_meta.get("epoch", 0)))
+            print(f"  resumed from checkpoint: {ckpt_path} (epochs_trained={_epochs_previously_trained})", flush=True)
         except Exception as _re:
             print(f"  checkpoint load skipped ({_re}); starting from random weights", flush=True)
     elif getattr(args, "no_resume", False):
@@ -404,13 +414,30 @@ def main() -> None:
 
     lr_head = float(args.lr)
     opt = torch.optim.AdamW(model.parameters(), lr=lr_head)
+
+    # Restore optimizer state from checkpoint so momentum/adaptive LR history
+    # carries over between training runs (prevents score regression on restart).
+    if _resumed:
+        try:
+            _ckpt_raw = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+            if isinstance(_ckpt_raw, dict) and "optimizer_state" in _ckpt_raw:
+                opt.load_state_dict(_ckpt_raw["optimizer_state"])
+                print("  optimizer state restored from checkpoint", flush=True)
+            else:
+                print("  no optimizer state in checkpoint; using fresh optimizer", flush=True)
+            del _ckpt_raw
+        except Exception as _oe:
+            print(f"  optimizer state restore skipped ({_oe})", flush=True)
+
     teacher_budget = int(args.teacher_per_epoch)
     distill_w = float(args.teacher_distill_weight)
     use_balance = not bool(args.no_dynamic_balance)
     pseudo_n = int(args.pseudo_per_epoch)
     pseudo_w = float(args.pseudo_mix_weight)
 
+    _total_curriculum_epochs = _epochs_previously_trained + int(args.epochs)
     for epoch in range(int(args.epochs)):
+        _abs_epoch = _epochs_previously_trained + epoch
         model.train()
 
         clear_teacher_signals(rows)
@@ -424,7 +451,7 @@ def main() -> None:
             print(f"epoch {epoch + 1}: optional teacher targets filled for {n_t} sample(s)", flush=True)
 
         distill_cap = distill_w if teacher_budget > 0 else 0.0
-        base_sw = curriculum_base_weights(epoch, int(args.epochs), distill_cap=distill_cap)
+        base_sw = curriculum_base_weights(_abs_epoch, _total_curriculum_epochs, distill_cap=distill_cap)
         sw_eff = dict(base_sw)
         # Fresh EMA each epoch: coarse schedule from curriculum; balancer only redistributes within the epoch.
         balancer = DynamicLossBalancer() if use_balance else None
@@ -445,6 +472,7 @@ def main() -> None:
                 type_l = _xh[0] if len(_xh) >= 1 else None
                 dim_p  = _xh[1] if len(_xh) >= 2 else None
                 spec_p = _xh[2] if len(_xh) >= 3 else None
+                mc_l   = _xh[3] if len(_xh) >= 4 else None
                 pred = {
                     "cls_logit": cls_l,
                     "seg_logit": seg,
@@ -455,6 +483,7 @@ def main() -> None:
                     "type_logit": type_l,
                     "dim_pred": dim_p,
                     "spec_pred": spec_p,
+                    "mat_cat_logit": mc_l,
                 }
                 loss, logs = aquaforge_joint_loss(pred, batch_dict, sw_eff)
             opt.zero_grad()
@@ -573,6 +602,7 @@ def main() -> None:
             "jsonl": str(jp),
             "model_arch": ARCH_CNN,
             "epoch": epoch + 1,
+            "epochs_trained": _abs_epoch + 1,
             "in_channels": _in_channels,
             "train_aquaforge": {
                 "dynamic_balance": use_balance,
@@ -586,10 +616,43 @@ def main() -> None:
                 "auto_export_onnx": not bool(args.no_export_onnx),
             },
         }
-        _ckpt_mid = {"meta": _meta_mid, "state_dict": model.state_dict()}
+        _base = getattr(model, "_orig_mod", model)
+        _ckpt_mid = {
+            "meta": _meta_mid,
+            "state_dict": _base.state_dict(),
+            "optimizer_state": opt.state_dict(),
+        }
         with open(ckpt_path, "wb") as _fp:
             torch.save(_ckpt_mid, _fp)
         print(f"  checkpoint saved (epoch {epoch + 1})", flush=True)
+
+    # ── BatchNorm calibration ──────────────────────────────────────────────
+    # torch.compile (especially reduce-overhead mode) may run fused BN ops
+    # that don't write running_mean/running_var back to the original module.
+    # Re-calibrate by doing one full forward pass over the training data with
+    # the underlying (non-compiled) model in train mode + no grad.
+    _base_model = getattr(model, "_orig_mod", model)
+    _any_bn_bad = any(
+        isinstance(m, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d))
+        and m.running_mean is not None
+        and float(m.running_mean.abs().max()) == 0.0
+        and float(m.running_var.max() - m.running_var.min()) < 1e-6
+        for m in _base_model.modules()
+    )
+    if _any_bn_bad:
+        print("  calibrating BatchNorm running stats...", flush=True)
+        for m in _base_model.modules():
+            if isinstance(m, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d)):
+                m.reset_running_stats()
+        _base_model.train()
+        with torch.no_grad():
+            for _cal_batch in dl:
+                _cal_dict = collate_batch(_cal_batch, device)
+                _ = _base_model(_cal_dict["imgs"])
+        _base_model.eval()
+        print("  BatchNorm calibration complete", flush=True)
+
+    _save_sd = _base_model.state_dict()
 
     meta: dict[str, object] = {
         "format_version": AQUAFORGE_FORMAT_VERSION,
@@ -599,6 +662,7 @@ def main() -> None:
         "jsonl": str(jp),
         "model_arch": ARCH_CNN,
         "in_channels": _in_channels,
+        "epochs_trained": _total_curriculum_epochs,
         "train_aquaforge": {
             "dynamic_balance": use_balance,
             "priority_sampling": use_sampler,
@@ -614,7 +678,11 @@ def main() -> None:
     # Write via a Python file object: PyTorchFileWriter(path) in C++ often fails on Windows with
     # error 123 (ERROR_INVALID_NAME) for paths under OneDrive, spaces, or mixed separators; the
     # buffer code path (PyTorchFileWriter(stream)) avoids native open-by-string.
-    _ckpt = {"meta": meta, "state_dict": model.state_dict()}
+    _ckpt = {
+        "meta": meta,
+        "state_dict": _save_sd,
+        "optimizer_state": opt.state_dict(),
+    }
     with open(ckpt_path, "wb") as _fp:
         torch.save(_ckpt, _fp)
     print(f"Wrote {ckpt_path}", flush=True)
@@ -642,6 +710,39 @@ def main() -> None:
                     flush=True,
                 )
 
+    # --- Post-training spectral backfill ---
+    jsonl_path = project_root / "data" / "labels" / "ship_reviews.jsonl"
+    if jsonl_path.is_file():
+        try:
+            from scripts.backfill_spectral_fields import run_backfill
+            print("\n--- SAM spectral backfill (automatic) ---", flush=True)
+            run_backfill(jsonl_path, model_path=None)
+
+            if args.backfill and ckpt_path.is_file():
+                _dev = str(device) if "device" in dir() else "cpu"
+                print(f"\n--- Full model backfill (--backfill, device={_dev}) ---", flush=True)
+                run_backfill(
+                    jsonl_path,
+                    model_path=ckpt_path,
+                    device=_dev,
+                )
+        except Exception as _bf_err:
+            print(f"Backfill warning: {_bf_err}", flush=True)
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # Clean up PID file so the UI knows training is done.
+        # _training_is_active() checks this file; on Windows os.kill(pid, 0)
+        # can return True after process exit due to PID reuse.
+        try:
+            import argparse as _ap2
+            _p2 = _ap2.ArgumentParser()
+            _p2.add_argument("--project-root", type=Path, default=ROOT)
+            _ns, _ = _p2.parse_known_args()
+            _pf = Path(_ns.project_root) / "data" / "_training_pid.txt"
+            _pf.unlink(missing_ok=True)
+        except Exception:
+            pass

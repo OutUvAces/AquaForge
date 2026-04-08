@@ -35,6 +35,8 @@ EXTRA_AQUAFORGE_LENGTH_M = "aquaforge_length_m"
 EXTRA_AQUAFORGE_WIDTH_M = "aquaforge_width_m"
 EXTRA_AQUAFORGE_ASPECT_RATIO = "aquaforge_aspect_ratio"
 EXTRA_AQUAFORGE_HEADING_KEYPOINT_DEG = "aquaforge_heading_keypoint_deg"
+EXTRA_AQUAFORGE_HULL_HEADING_A_DEG = "aquaforge_hull_heading_a_deg"
+EXTRA_AQUAFORGE_HULL_HEADING_B_DEG = "aquaforge_hull_heading_b_deg"
 EXTRA_AQUAFORGE_HEADING_WAKE_DEG = "aquaforge_heading_wake_deg"
 EXTRA_AQUAFORGE_HEADING_FUSED_DEG = "aquaforge_heading_fused_deg"
 EXTRA_AQUAFORGE_HEADING_FUSION_SOURCE = "aquaforge_heading_fusion_source"
@@ -51,6 +53,29 @@ EXTRA_CHROMA_SPEED_KN = "aquaforge_chroma_speed_kn"
 EXTRA_CHROMA_HEADING_DEG = "aquaforge_chroma_heading_deg"
 EXTRA_CHROMA_PNR = "aquaforge_chroma_pnr"
 EXTRA_CHROMA_AGREES_WITH_MODEL = "aquaforge_chroma_agrees_with_model"
+EXTRA_CHROMA_SPEED_ERROR_KN = "aquaforge_chroma_speed_error_kn"
+EXTRA_CHROMA_HEADING_ERROR_DEG = "aquaforge_chroma_heading_error_deg"
+
+# Spectral quality assessment outputs (composite score + FP flag).
+EXTRA_AQUAFORGE_SPECTRAL_QUALITY = "aquaforge_spectral_quality"
+EXTRA_AQUAFORGE_FP_SPECTRAL_FLAG = "aquaforge_fp_spectral_flag"
+EXTRA_AQUAFORGE_MATERIAL_CONFIDENCE = "aquaforge_material_confidence"
+EXTRA_AQUAFORGE_SPECTRAL_ANOMALY = "aquaforge_spectral_anomaly_score"
+EXTRA_AQUAFORGE_SPECTRAL_CONSISTENCY = "aquaforge_spectral_consistency"
+EXTRA_AQUAFORGE_ATMOSPHERIC_QUALITY = "aquaforge_atmospheric_quality"
+EXTRA_AQUAFORGE_SUN_GLINT_FLAG = "aquaforge_sun_glint_flag"
+EXTRA_AQUAFORGE_VEGETATION_FLAG = "aquaforge_vegetation_flag"
+
+# Vessel-only SAM best match (category-constrained).
+EXTRA_AQUAFORGE_VESSEL_MATERIAL = "aquaforge_vessel_material"
+EXTRA_AQUAFORGE_VESSEL_MATERIAL_CONFIDENCE = "aquaforge_vessel_material_confidence"
+
+# Material category override: human correction of the learned/SAM material category.
+EXTRA_HUMAN_MATERIAL_CATEGORY = "human_material_category"
+
+# Learned material category head outputs.
+EXTRA_AQUAFORGE_MAT_CAT_LABEL = "aquaforge_mat_cat_label"
+EXTRA_AQUAFORGE_MAT_CAT_CONFIDENCE = "aquaforge_mat_cat_confidence"
 
 # Optional manual boost for AquaForge training sampler (see aquaforge.unified.distill).
 EXTRA_AF_TRAINING_PRIORITY = "af_training_priority"
@@ -65,6 +90,8 @@ def enrich_extra_with_predictions(
     aquaforge_width_m: float | None = None,
     aquaforge_aspect_ratio: float | None = None,
     aquaforge_heading_keypoint_deg: float | None = None,
+    aquaforge_hull_heading_a_deg: float | None = None,
+    aquaforge_hull_heading_b_deg: float | None = None,
     aquaforge_heading_wake_deg: float | None = None,
     aquaforge_heading_fused_deg: float | None = None,
     aquaforge_heading_fusion_source: str | None = None,
@@ -79,6 +106,16 @@ def enrich_extra_with_predictions(
     aquaforge_chroma_heading_deg: float | None = None,
     aquaforge_chroma_pnr: float | None = None,
     aquaforge_chroma_agrees_with_model: bool | None = None,
+    aquaforge_chroma_speed_error_kn: float | None = None,
+    aquaforge_chroma_heading_error_deg: float | None = None,
+    aquaforge_spectral_quality: float | None = None,
+    aquaforge_fp_spectral_flag: bool | None = None,
+    aquaforge_material_confidence: float | None = None,
+    aquaforge_spectral_anomaly_score: float | None = None,
+    aquaforge_spectral_consistency: float | None = None,
+    aquaforge_atmospheric_quality: str | None = None,
+    aquaforge_sun_glint_flag: bool | None = None,
+    aquaforge_vegetation_flag: bool | None = None,
 ) -> dict[str, Any]:
     """Merge AquaForge scores into ``extra`` for training analysis (what the UI believed vs label)."""
     out = dict(extra or {})
@@ -94,6 +131,10 @@ def enrich_extra_with_predictions(
         out[EXTRA_AQUAFORGE_ASPECT_RATIO] = float(aquaforge_aspect_ratio)
     if aquaforge_heading_keypoint_deg is not None:
         out[EXTRA_AQUAFORGE_HEADING_KEYPOINT_DEG] = float(aquaforge_heading_keypoint_deg)
+    if aquaforge_hull_heading_a_deg is not None:
+        out[EXTRA_AQUAFORGE_HULL_HEADING_A_DEG] = float(aquaforge_hull_heading_a_deg)
+    if aquaforge_hull_heading_b_deg is not None:
+        out[EXTRA_AQUAFORGE_HULL_HEADING_B_DEG] = float(aquaforge_hull_heading_b_deg)
     if aquaforge_heading_wake_deg is not None:
         out[EXTRA_AQUAFORGE_HEADING_WAKE_DEG] = float(aquaforge_heading_wake_deg)
     if aquaforge_heading_fused_deg is not None:
@@ -124,6 +165,26 @@ def enrich_extra_with_predictions(
         out[EXTRA_CHROMA_PNR] = float(aquaforge_chroma_pnr)
     if aquaforge_chroma_agrees_with_model is not None:
         out[EXTRA_CHROMA_AGREES_WITH_MODEL] = bool(aquaforge_chroma_agrees_with_model)
+    if aquaforge_chroma_speed_error_kn is not None:
+        out[EXTRA_CHROMA_SPEED_ERROR_KN] = float(aquaforge_chroma_speed_error_kn)
+    if aquaforge_chroma_heading_error_deg is not None:
+        out[EXTRA_CHROMA_HEADING_ERROR_DEG] = float(aquaforge_chroma_heading_error_deg)
+    if aquaforge_spectral_quality is not None:
+        out[EXTRA_AQUAFORGE_SPECTRAL_QUALITY] = float(aquaforge_spectral_quality)
+    if aquaforge_fp_spectral_flag is not None:
+        out[EXTRA_AQUAFORGE_FP_SPECTRAL_FLAG] = bool(aquaforge_fp_spectral_flag)
+    if aquaforge_material_confidence is not None:
+        out[EXTRA_AQUAFORGE_MATERIAL_CONFIDENCE] = float(aquaforge_material_confidence)
+    if aquaforge_spectral_anomaly_score is not None:
+        out[EXTRA_AQUAFORGE_SPECTRAL_ANOMALY] = float(aquaforge_spectral_anomaly_score)
+    if aquaforge_spectral_consistency is not None:
+        out[EXTRA_AQUAFORGE_SPECTRAL_CONSISTENCY] = float(aquaforge_spectral_consistency)
+    if aquaforge_atmospheric_quality is not None:
+        out[EXTRA_AQUAFORGE_ATMOSPHERIC_QUALITY] = str(aquaforge_atmospheric_quality)
+    if aquaforge_sun_glint_flag is not None:
+        out[EXTRA_AQUAFORGE_SUN_GLINT_FLAG] = bool(aquaforge_sun_glint_flag)
+    if aquaforge_vegetation_flag is not None:
+        out[EXTRA_AQUAFORGE_VEGETATION_FLAG] = bool(aquaforge_vegetation_flag)
     return out
 
 

@@ -50,7 +50,7 @@ def _infer_review_category(rec: dict[str, Any]) -> str | None:
     if v is True:
         return "vessel"
     if v is False:
-        return "not_vessel"
+        return "water"
     return None
 
 

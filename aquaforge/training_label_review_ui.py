@@ -6,6 +6,7 @@ Embedded from :mod:`aquaforge.web_ui` via session state.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -21,10 +22,10 @@ from aquaforge.labels import (
 # Match main review deck button labels (avoid importing web_ui — circular).
 _TRAINING_REVIEW_CATEGORY_BUTTON_LABELS: dict[str, str] = {
     "vessel": "Vessel",
-    "not_vessel": "Not a vessel",
+    "water": "Water",
     "cloud": "Cloud",
     "land": "Land",
-    "ambiguous": "Unclear",
+    "ambiguous": "Unsure",
 }
 from aquaforge.s2_download import image_acquisition_display_utc_from_tci_filename
 from aquaforge.training_review_spot_ui import (
@@ -60,7 +61,7 @@ def _cat(rec: dict) -> str:
     if rec.get("is_vessel") is True:
         return "vessel"
     if rec.get("is_vessel") is False:
-        return "not_vessel"
+        return "water"
     return ""
 
 
@@ -159,6 +160,26 @@ def _apply_filters(
     return out
 
 
+def _format_spectral_velocity(
+    ex: dict, spd: object, hdg: object,
+) -> str:
+    if spd is None:
+        return "\u2014"
+    s = f"{float(spd):.1f}"
+    se = ex.get("aquaforge_chroma_speed_error_kn")
+    if se is not None:
+        s += f" \u00b1{float(se):.1f}"
+    s += " kn"
+    if hdg is not None:
+        s += f" @ {int(round(float(hdg)))}\u00b0"
+        he = ex.get("aquaforge_chroma_heading_error_deg")
+        if he is not None:
+            s += f" \u00b1{int(round(float(he)))}\u00b0"
+    else:
+        s += " (below detection threshold)"
+    return s
+
+
 def _fmt_scalar(v: object) -> str:
     if v is None:
         return "—"
@@ -217,8 +238,9 @@ def render_training_label_review_ui(
         "Detection flags: check **Yes** and/or **No** per row (neither = show all)."
     )
     st.markdown("###### Category")
-    fc_row = st.columns(len(REVIEW_CATEGORIES))
-    for i, (ckey, _) in enumerate(REVIEW_CATEGORIES):
+    _filter_cat_order = ("vessel", "water", "ambiguous", "cloud", "land")
+    fc_row = st.columns(len(_filter_cat_order))
+    for i, ckey in enumerate(_filter_cat_order):
         with fc_row[i]:
             active = ckey in set(st.session_state.get("tr_filter_cats", []))
             if st.button(
@@ -237,9 +259,9 @@ def render_training_label_review_ui(
                 st.rerun()
 
     st.markdown("###### Label confidence")
-    _conf_filter_opts = ("(unset)", "high", "medium", "low")
-    _conf_filter_labels = ("(unset)", "High", "Medium", "Low")
-    cf_row = st.columns(4)
+    _conf_filter_opts = ("high", "medium", "low")
+    _conf_filter_labels = ("High", "Medium", "Low")
+    cf_row = st.columns(3)
     for j, (opt, lbl) in enumerate(zip(_conf_filter_opts, _conf_filter_labels)):
         with cf_row[j]:
             active = opt in set(st.session_state.get("tr_filter_conf", []))
@@ -348,33 +370,6 @@ def render_training_label_review_ui(
     ix = max(0, min(ix, n - 1))
     st.session_state["tr_filtered_ix"] = ix
 
-    st.markdown("##### Navigation")
-    n1, n2, n3, n4, n5 = st.columns([1, 1, 1, 1, 2])
-    with n1:
-        if st.button("◀ Previous", disabled=ix <= 0, key="tr_nav_prev"):
-            st.session_state["tr_filtered_ix"] = ix - 1
-            st.rerun()
-    with n2:
-        if st.button("Next ▶", disabled=ix >= n - 1, key="tr_nav_next"):
-            st.session_state["tr_filtered_ix"] = ix + 1
-            st.rerun()
-    with n3:
-        goto = st.number_input(
-            "Position",
-            min_value=1,
-            max_value=n,
-            value=ix + 1,
-            help="Filtered list position (1-based). Click **Go** to jump.",
-        )
-    with n4:
-        if st.button("Go", key="tr_nav_goto_btn"):
-            st.session_state["tr_filtered_ix"] = max(0, min(n - 1, int(goto) - 1))
-            st.rerun()
-    with n5:
-        st.caption(
-            f"**{ix + 1}** of **{n}** in filtered list · **{len(all_rows)}** total rows in JSONL"
-        )
-
     rec = dict(filtered[ix])
     record_id = str(rec.get("id", ""))
     if not record_id:
@@ -397,6 +392,16 @@ def render_training_label_review_ui(
         hdg_alt = ex.get("heading_deg_from_north_alt")
         conf_v = ex.get(LABEL_CONFIDENCE_EXTRA_KEY)
 
+        _af_conf = ex.get("aquaforge_confidence")
+        _af_fused = ex.get("aquaforge_heading_fused_deg")
+        _af_mat = ex.get("aquaforge_material_hint")
+        _cv_spd = ex.get("aquaforge_chroma_speed_kn")
+        _cv_hdg = ex.get("aquaforge_chroma_heading_deg")
+        _s2_plat = ex.get("s2_platform")
+        _s2_tile = ex.get("s2_tile_id")
+        _land_frac = ex.get("land_mask_chip_land_fraction")
+        _scl_stats = ex.get("aquaforge_scl_chip_stats")
+
         summary_rows: list[list[str]] = [
             ["Record ID", record_id[:8] + "…"],
             ["Category", _cat(rec)],
@@ -414,6 +419,31 @@ def render_training_label_review_ui(
             ["Wake present", _fmt_scalar(ex.get("wake_present"))],
             ["Cloud obscuration", _fmt_scalar(ex.get("partial_cloud_obscuration"))],
             ["Dimension markers", _dimension_markers_summary(ex.get("dimension_markers"))],
+            ["Model confidence (at save)", _fmt_scalar(_af_conf)],
+            ["Model heading fused (°)", _fmt_scalar(_af_fused)],
+            ["Material hint", str(_af_mat) if _af_mat else "—"],
+            [
+                "Spectral velocity",
+                _format_spectral_velocity(ex, _cv_spd, _cv_hdg),
+            ],
+            [
+                "Sentinel-2",
+                f"{_s2_plat or '—'} / {_s2_tile or '—'}"
+                if _s2_plat or _s2_tile
+                else "—",
+            ],
+            ["Land fraction (chip)", _fmt_scalar(_land_frac)],
+            [
+                "SCL observation quality",
+                (
+                    f"cloud {_scl_stats['cloud_fraction']:.0%} · "
+                    f"cirrus {_scl_stats['cirrus_fraction']:.0%} · "
+                    f"shadow {_scl_stats['shadow_fraction']:.0%} · "
+                    f"clear water {_scl_stats['clear_water_fraction']:.0%}"
+                )
+                if isinstance(_scl_stats, dict)
+                else "—",
+            ],
             ["Image file", fn or "—"],
         ]
         st.table(summary_rows)
@@ -435,7 +465,6 @@ def render_training_label_review_ui(
     tci_str = str(tp) if tp is not None and tp.is_file() else str(rec.get("tci_path") or "")
     ctx = None
     if tp is not None and tp.is_file():
-        st.markdown("##### Marker editor (same workflow as main review page)")
         ctx = render_training_spot_marker_editor(
             record_id=record_id,
             tci_path_str=tci_str,
@@ -448,7 +477,27 @@ def render_training_label_review_ui(
     else:
         st.warning("TCI file not found on disk — marker editing disabled for this row.")
 
-    st.markdown("##### Category & confidence (same controls as main review page)")
+    # ── Navigation in nav_columns (matches main UI placement) ─────────
+    if ctx is not None and ctx.nav_columns:
+        _nc = ctx.nav_columns
+        with _nc[0]:
+            if st.button("← Back", disabled=ix <= 0, key="tr_nav_prev",
+                         use_container_width=True):
+                st.session_state["tr_filtered_ix"] = ix - 1
+                st.rerun()
+        with _nc[1]:
+            st.markdown(
+                f"<div style='text-align:center;line-height:2.4;"
+                f"font-size:0.75rem;color:#888'>"
+                f"{ix + 1} / {n}</div>",
+                unsafe_allow_html=True,
+            )
+        with _nc[2]:
+            if st.button("Next →", disabled=ix >= n - 1, key="tr_nav_next",
+                         use_container_width=True):
+                st.session_state["tr_filtered_ix"] = ix + 1
+                st.rerun()
+
     cats = [c[0] for c in REVIEW_CATEGORIES]
     cur_cat = rec.get("review_category")
     if cur_cat not in cats:
@@ -456,20 +505,6 @@ def render_training_label_review_ui(
     pk_cat = f"tr_cat_pick_{record_id}"
     if pk_cat not in st.session_state:
         st.session_state[pk_cat] = str(cur_cat)
-
-    st.markdown("###### Category")
-    cat_save_row = st.columns(len(REVIEW_CATEGORIES))
-    picked_cat = str(st.session_state[pk_cat])
-    for i, (ckey, _) in enumerate(REVIEW_CATEGORIES):
-        with cat_save_row[i]:
-            if st.button(
-                _TRAINING_REVIEW_CATEGORY_BUTTON_LABELS.get(ckey, ckey),
-                key=f"tr_save_cat_{record_id}_{ckey}",
-                use_container_width=True,
-                type="primary" if ckey == picked_cat else "secondary",
-            ):
-                st.session_state[pk_cat] = ckey
-                st.rerun()
 
     conf_opts2 = ("(unset)", "high", "medium", "low")
     raw_conf = ex.get(LABEL_CONFIDENCE_EXTRA_KEY)
@@ -483,24 +518,58 @@ def render_training_label_review_ui(
     if pk_conf not in st.session_state:
         st.session_state[pk_conf] = cur_c
 
-    st.markdown("###### Label confidence (all categories except Unclear)")
-    cr1, cr2, cr3, cr4 = st.columns(4)
+    pk_cloud_osc = f"tr_cloud_osc_{record_id}"
+    if pk_cloud_osc not in st.session_state:
+        st.session_state[pk_cloud_osc] = bool(ex.get("partial_cloud_obscuration", False))
+
+    _dc_head, _dc_co, _dc_hi, _dc_med, _dc_lo = st.columns(5)
+    with _dc_head:
+        st.markdown("##### Classification")
+    with _dc_co:
+        _cloud_osc_cur = bool(st.session_state.get(pk_cloud_osc, False))
+        if st.button(
+            "Cloud Obscured",
+            key=f"tr_save_cloud_osc_{record_id}",
+            type="primary" if _cloud_osc_cur else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[pk_cloud_osc] = not _cloud_osc_cur
+            st.rerun()
     picked_conf = str(st.session_state[pk_conf])
-    _edit_conf_lbl = ("(unset)", "High", "Medium", "Low")
-    for j, (opt, lbl) in enumerate(zip(conf_opts2, _edit_conf_lbl)):
-        with (cr1, cr2, cr3, cr4)[j]:
+    _conf_defs = (
+        (_dc_hi, "High confidence", "high"),
+        (_dc_med, "Medium confidence", "medium"),
+        (_dc_lo, "Low confidence", "low"),
+    )
+    for _col, _lbl, _val in _conf_defs:
+        with _col:
             if st.button(
-                lbl,
-                key=f"tr_save_conf_{record_id}_{j}",
-                type="primary" if picked_conf == opt else "secondary",
+                _lbl,
+                key=f"tr_save_conf_{record_id}_{_val}",
+                type="primary" if picked_conf == _val else "secondary",
+                use_container_width=True,
             ):
-                st.session_state[pk_conf] = opt
+                st.session_state[pk_conf] = _val
+                st.rerun()
+
+    _cat_button_order = ("vessel", "water", "ambiguous", "cloud", "land")
+    cat_save_row = st.columns(len(_cat_button_order))
+    picked_cat = str(st.session_state[pk_cat])
+    for i, ckey in enumerate(_cat_button_order):
+        with cat_save_row[i]:
+            if st.button(
+                _TRAINING_REVIEW_CATEGORY_BUTTON_LABELS.get(ckey, ckey),
+                key=f"tr_save_cat_{record_id}_{ckey}",
+                use_container_width=True,
+                type="primary" if ckey == picked_cat else "secondary",
+            ):
+                st.session_state[pk_cat] = ckey
                 st.rerun()
 
     new_cat = str(st.session_state[pk_cat])
     new_conf = str(st.session_state[pk_conf])
 
-    if st.button("Save all changes to JSONL", type="primary", key=f"tr_save_all_{record_id}"):
+    if st.button("Save all changes to JSONL", key=f"tr_save_all_{record_id}", use_container_width=True):
         if ctx is not None:
             merge_spot_session_into_record(rec, ctx)
         ex2 = dict(rec.get("extra") or {})
@@ -513,6 +582,10 @@ def render_training_label_review_ui(
                 ex2[LABEL_CONFIDENCE_EXTRA_KEY] = str(new_conf).lower()
         else:
             ex2.pop(LABEL_CONFIDENCE_EXTRA_KEY, None)
+        ex2["partial_cloud_obscuration"] = bool(
+            st.session_state.get(f"tr_cloud_osc_{record_id}", False)
+        )
+        ex2["last_edited_at"] = datetime.now(timezone.utc).isoformat()
         rec["extra"] = ex2
         if replace_review_record_by_id(labels_path, rec):
             st.success("Updated row.")

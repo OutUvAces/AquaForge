@@ -91,7 +91,7 @@ def letterbox_rgb_to_square(
     sc = min(side / max(w, 1), side / max(h, 1))
     nw = max(1, int(round(w * sc)))
     nh = max(1, int(round(h * sc)))
-    im_small = im.resize((nw, nh), Image.Resampling.LANCZOS)
+    im_small = im.resize((nw, nh), Image.Resampling.NEAREST)
     out = Image.new("RGB", (side, side), fill)
     ox = (side - nw) // 2
     oy = (side - nh) // 2
@@ -107,6 +107,11 @@ def click_square_letterbox_to_original_xy(
     """
     Map a click from ``streamlit_image_coordinates`` on the letterboxed square image to
     coordinates in the **original** (pre-letterbox) image used to build the square.
+
+    ``click["width"]`` / ``click["height"]`` must be the **CSS rendered** size
+    of the ``<img>`` element (``getBoundingClientRect().width``), not the
+    natural / intrinsic pixel size.  ``click["x"]`` / ``click["y"]`` are
+    ``event.offsetX`` / ``event.offsetY`` — always in CSS pixels.
     """
     if not click or "x" not in click or "y" not in click:
         return None

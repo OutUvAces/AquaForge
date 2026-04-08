@@ -80,14 +80,12 @@ def _probability_to_percent_str(p: float | None) -> str:
 
 
 def _percentile_stretch_u8_rgb(rgb: np.ndarray) -> np.ndarray:
-    """2–98% per-band stretch (uint8 RGB), same idea as locator/spot review reads."""
+    """Global-max stretch (uint8 RGB) — matches overview map radiometry."""
     arr = rgb.astype(np.float32)
     if arr.size == 0:
         return rgb
-    lo = np.percentile(arr, 2.0, axis=(0, 1))
-    hi = np.percentile(arr, 98.0, axis=(0, 1))
-    out = (np.clip((arr - lo) / (hi - lo + 1e-9), 0.0, 1.0) * 255.0).astype(np.uint8)
-    return out
+    mx = max(float(arr.max()), 1e-6)
+    return np.clip(arr / mx * 255.0, 0, 255).astype(np.uint8)
 
 
 import streamlit as st
@@ -106,6 +104,7 @@ from aquaforge.labels import (
     default_labels_path,
     filter_unlabeled_candidates,
     labeled_xy_points_for_tci,
+    load_land_exclusion_points,
     merge_pending_locator_into_candidates,
     overview_grid_feedback_cells_for_tci,
     remove_pending_near,
@@ -122,7 +121,6 @@ from aquaforge.overview_grid_feedback import (
 )
 from aquaforge.locator_coords import (
     click_square_letterbox_to_original_xy,
-    letterbox_rgb_to_square,
 )
 from aquaforge.review_schema import (
     enrich_extra_with_predictions,
@@ -154,12 +152,9 @@ from aquaforge.unified.settings import (
 )
 from aquaforge.review_overlay import (
     annotate_locator_spot_outline,
-    annotate_spot_detection_center,
     extent_preview_image,
     footprint_width_length_m,
     fullres_xy_from_spot_red_outline_aabb_center,
-    overlay_bow_heading_arrowhead,
-    overlay_aquaforge_on_spot_rgb,
     read_locator_and_spot_rgb_matching_stretch,
     vessel_quad_for_label,
 )
@@ -176,6 +171,8 @@ from aquaforge.s2_masks import find_scl_for_tci
 from aquaforge.evaluation import evaluate_aquaforge_vs_binary_labels
 from aquaforge.s2_download import (
     cdse_download_ready,
+    download_chroma_bands_for_tci,
+    download_extra_bands_for_tci,
     download_item_tci_scl,
     download_scl_for_local_tci,
     format_item_label,
@@ -191,10 +188,11 @@ from aquaforge.static_vessel_nominations import (
 from aquaforge.duplicate_review_ui import render_duplicate_review_expander
 from aquaforge.training_label_review_ui import render_training_label_review_ui
 from aquaforge.vessel_markers import (
+    MARKER_COLORS_RGB,
     MARKER_ROLE_BUTTON_LABELS,
     MARKER_ROLES,
     SIDE_LIKE_ROLES,
-    draw_markers_on_rgb,
+    draw_markers_on_display,
     marker_hull_index,
     metrics_from_markers,
     paired_wake_marker_dicts,
@@ -202,6 +200,7 @@ from aquaforge.vessel_markers import (
     quad_crop_from_dimension_markers,
     serialize_markers_for_json,
 )
+from aquaforge.spot_panel import render_spot_panel
 from aquaforge.chip_io import polygon_fullres_to_crop
 from aquaforge.vessel_heading import merge_keel_heading_into_extra
 from aquaforge.hull_aspect import enrich_extra_hull_aspect_ratio
@@ -223,7 +222,7 @@ PREVIEW_THUMB_DIR = SAMPLES_DIR / ".preview_thumbnails"
 DEFAULT_BBOX = "103.6,1.05,104.2,1.45"
 DEFAULT_DATETIME = "2024-06-01T00:00:00Z/2024-06-15T23:59:59Z"
 MIN_OPEN_WATER_FRACTION = 0.01
-REVIEW_CHIP_TARGET_SIDE_M = 500.0
+REVIEW_CHIP_TARGET_SIDE_M = 1000.0
 REVIEW_LOCATOR_TARGET_SIDE_M = 5000.0
 # Close-up (main focus) — single large square in the calm review layout.
 CHIP_DISPLAY_MAIN = 1000
@@ -264,8 +263,8 @@ def _detection_yaml_mtime(project_root: Path) -> float:
 
 
 REVIEW_CATEGORY_BUTTON_LABELS: dict[str, str] = {
-    "vessel": "Ship",
-    "not_vessel": "Not a ship",
+    "vessel": "Vessel",
+    "water": "Water",
     "cloud": "Cloud",
     "land": "Land",
     "ambiguous": "Unsure",
@@ -275,12 +274,7 @@ def _ui_styles() -> None:
     st.markdown(
         """
 <style>
-  /* Wide calm main column; extra bottom space so the sticky action row is not clipped */
-  /*
-   * Streamlit draws a fixed header/toolbar over the main column; padding only on
-   * div.block-container is not enough — the scroll viewport starts at y=0 and the
-   * first lines of st.info / captions are clipped. Pad the main section itself.
-   */
+  /* Main layout */
   section[data-testid="stMain"],
   section.main {
     padding-top: 3.75rem !important;
@@ -289,13 +283,6 @@ def _ui_styles() -> None:
     padding-top: 1rem !important;
     padding-bottom: 5.5rem !important;
     max-width: min(1180px, 96vw);
-  }
-  /* Notched / inset displays */
-  @supports (padding: max(0px)) {
-    section[data-testid="stMain"],
-    section.main {
-      padding-top: max(3.75rem, calc(env(safe-area-inset-top, 0px) + 2.75rem)) !important;
-    }
   }
   /* Extra clearance before the one-time startup callout */
   .vd-main-top-spacer {
@@ -308,28 +295,22 @@ def _ui_styles() -> None:
     font-size: 0.78rem !important;
     color: #64748b !important;
   }
-  /* Optional outline tools: compact secondary buttons */
-  button[kind="secondary"] {
-    font-size: 0.68rem !important;
-    line-height: 1.12 !important;
-    padding: 0.2rem 0.35rem !important;
-    white-space: nowrap !important;
-  }
-  /* Daily review: large, obvious Ship / Not a ship / Unsure + nav */
+  button[kind="secondary"],
   button[kind="primary"] {
-    font-size: 1.08rem !important;
-    padding: 0.55rem 0.75rem !important;
-    min-height: 2.85rem !important;
+    font-size: 0.85rem !important;
+    line-height: 1.2 !important;
+    padding: 0.4rem 0.5rem !important;
+    min-height: 2.4rem !important;
+    white-space: nowrap !important;
   }
   /* Sticky-ish footer row: stays near viewport bottom on short pages */
   .vd-review-footer-anchor {
     position: sticky;
     bottom: 0;
     z-index: 50;
-    background: linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(248,250,252,0.97) 18%, rgba(248,250,252,1) 100%);
+    background: transparent;
     padding-top: 0.5rem;
     margin-top: 0.25rem;
-    border-top: 1px solid rgba(148, 163, 184, 0.35);
     border-radius: 10px 10px 0 0;
   }
   .vd-hero {
@@ -365,20 +346,37 @@ def _ui_styles() -> None:
     background: rgba(248, 250, 252, 0.65);
     margin-bottom: 0.55rem;
   }
-  p.vd-deck-foot, span.vd-deck-foot { font-size: 0.68rem !important; color: #64748b; line-height: 1.3; margin: 0.1rem 0 0 0 !important; }
+  p.vd-deck-foot, span.vd-deck-foot { font-size: 0.68rem !important; color: #64748b; line-height: 1.3; margin: -0.5rem 0 0 0 !important; }
   div[data-testid="column"] span.vd-metric { font-size: 0.72rem !important; color: #475569; font-weight: 600; }
   /* Seamless banner: logo + background appear as one continuous object */
   .af-seamless-banner {
     background: #0c1220;
-    padding: 2rem 0 1.5rem 0;
-    margin: -1rem -3rem 1.5rem -3rem;
+    padding: 1.25rem 0 1.25rem 0;
+    margin: 0 -3rem 1rem -3rem;
     text-align: center;
-    width: 100%;
+    width: calc(100% + 6rem);
   }
   .af-seamless-banner img {
     display: block;
     margin: 0 auto;
     box-shadow: none;
+  }
+  /* Suppress all Streamlit horizontal rule dividers site-wide */
+  hr {
+    display: none !important;
+  }
+  /* Collapse vertical gap between overlay legend rows (checkbox + label pairs) */
+  [data-testid="stHorizontalBlock"]:has([data-testid="stCheckbox"]) {
+    margin-top: -1rem !important;
+    margin-bottom: -0.5rem !important;
+    align-items: center !important;
+  }
+  /* Undo the above for horizontal blocks that contain nested sub-layouts
+     (e.g. the outer chip columns that nest overlay legend rows inside them) */
+  [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"] [data-testid="stHorizontalBlock"]) {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+    align-items: flex-start !important;
   }
 </style>
         """,
@@ -414,6 +412,19 @@ def _cached_review_crop_metrics(
         tci_path_str, target_side_m=REVIEW_LOCATOR_TARGET_SIDE_M
     )
     return spot_px, loc_px, gdx, gdy, gavg
+
+
+def _markers_to_crop(
+    markers: list[dict], sc0: float, sr0: float
+) -> list[dict]:
+    """Convert markers stored in full-res raster coords to crop-relative."""
+    out = []
+    for m in markers:
+        if not isinstance(m, dict) or "x" not in m or "y" not in m:
+            continue
+        out.append({**m, "x": m["x"] - sc0, "y": m["y"] - sr0})
+    return out
+
 
 
 def _render_catalog_panel() -> None:
@@ -493,6 +504,9 @@ def _render_catalog_panel() -> None:
                             outcome = download_item_tci_scl(
                                 picked, SAMPLES_DIR, token, skip_if_exists=skip_if_exists
                             )
+                            if outcome.tci_path:
+                                download_extra_bands_for_tci(outcome.tci_path, token=token)
+                                download_chroma_bands_for_tci(outcome.tci_path, ["B02", "B04"], token=token)
                             st.success(
                                 f"{format_item_label(picked)}\n\n"
                                 f"{tci_scl_download_summary(outcome)}"
@@ -545,6 +559,9 @@ def _render_catalog_panel() -> None:
                         outcome = download_item_tci_scl(
                             one, SAMPLES_DIR, token, skip_if_exists=skip_if_exists
                         )
+                        if outcome.tci_path:
+                            download_extra_bands_for_tci(outcome.tci_path, token=token)
+                            download_chroma_bands_for_tci(outcome.tci_path, ["B02", "B04"], token=token)
                         st.success(
                             f"{format_item_label(one)}\n\n{tci_scl_download_summary(outcome)}"
                         )
@@ -1026,6 +1043,7 @@ def _subprocess_train_aquaforge(
     _child_env = dict(_os.environ)
     if "PROCESSOR_ARCHITECTURE" not in _child_env:
         _child_env["PROCESSOR_ARCHITECTURE"] = "AMD64"
+    _child_env["PYTHONUTF8"] = "1"
 
     with open(log_path, "w", encoding="utf-8", errors="replace") as _lf:
         # On Windows use CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW so the
@@ -1083,77 +1101,128 @@ def _training_is_active(project_root: Path) -> tuple[bool, int | None]:
         return False, None
 
 
-def _render_training_progress_panel(project_root: Path) -> None:
+def _render_training_log_panel(
+    project_root: Path,
+    *,
+    header: str,
+    header_type: str = "info",
+    show_stop: bool = False,
+    poll: bool = False,
+) -> None:
+    """Render training metrics + scrollable log from ``data/train_log.txt``.
+
+    Used both for live progress (``poll=True``) and for the static post-training
+    summary (``poll=False``).
     """
-    Show a live training progress panel whenever a training job is active.
-    Called from ``main()`` at every rerun.  The inner fragment polls every 4 s
-    without touching the rest of the page (no full-page reload).
-    """
-    is_active, _ = _training_is_active(project_root)
-    if not is_active:
+    import re as _re
+
+    log_path = project_root / "data" / "train_log.txt"
+    if not log_path.is_file():
         return
 
-    @st.fragment(run_every="4s")
-    def _progress_fragment() -> None:
-        import re as _re
+    st.markdown("---")
 
-        log_path = project_root / "data" / "train_log.txt"
-        is_active2, pid2 = _training_is_active(project_root)
-
-        st.markdown("---")
+    if show_stop:
         _hdr_col, _stop_col = st.columns([5, 1])
         with _hdr_col:
-            st.markdown("#### Training in progress…")
+            st.markdown(f"#### {header}")
         with _stop_col:
             if st.button("Stop training", key="vd_stop_training_panel",
                          type="secondary", use_container_width=True):
                 _stop_training(project_root)
                 st.rerun()
+    else:
+        if header_type == "success":
+            st.success(header)
+        else:
+            st.markdown(f"#### {header}")
 
-        if not is_active2:
-            st.info("Training finished.")
-            return
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
 
-        if log_path.is_file():
-            try:
-                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                lines = []
+    epoch_lines = [l for l in lines if l.startswith("epoch ") and "score=" in l]
+    if epoch_lines:
+        last = epoch_lines[-1]
+        m_ep = _re.search(r"epoch (\d+)/(\d+)", last)
+        m_sc = _re.search(r"score=([\d.]+)/100", last)
+        m_ca = _re.search(r"cls_acc=([\d.]+)%", last)
+        m_lo = _re.search(r"loss=([\d.]+)", last)
+        if m_ep:
+            ep_cur, ep_tot = int(m_ep.group(1)), int(m_ep.group(2))
+            st.progress(ep_cur / ep_tot, text=f"Epoch {ep_cur} / {ep_tot}")
+        _c1, _c2, _c3 = st.columns(3)
+        if m_sc:
+            _c1.metric("Score", f"{float(m_sc.group(1)):.1f} / 100")
+        if m_ca:
+            _c2.metric("Class accuracy", f"{float(m_ca.group(1)):.1f}%")
+        if m_lo:
+            _c3.metric("Loss", f"{float(m_lo.group(1)):.4f}")
 
-            epoch_lines = [l for l in lines if l.startswith("epoch ") and "score=" in l]
-            if epoch_lines:
-                last = epoch_lines[-1]
-                m_ep = _re.search(r"epoch (\d+)/(\d+)", last)
-                m_sc = _re.search(r"score=([\d.]+)/100", last)
-                m_ca = _re.search(r"cls_acc=([\d.]+)%", last)
-                m_lo = _re.search(r"loss=([\d.]+)", last)
-                if m_ep:
-                    ep_cur, ep_tot = int(m_ep.group(1)), int(m_ep.group(2))
-                    st.progress(ep_cur / ep_tot, text=f"Epoch {ep_cur} / {ep_tot}")
-                _c1, _c2, _c3 = st.columns(3)
-                if m_sc:
-                    _c1.metric("Score", f"{float(m_sc.group(1)):.1f} / 100")
-                if m_ca:
-                    _c2.metric("Class accuracy", f"{float(m_ca.group(1)):.1f}%")
-                if m_lo:
-                    _c3.metric("Loss", f"{float(m_lo.group(1)):.4f}")
+    _escaped = [
+        l.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        for l in lines
+    ]
+    st.markdown(
+        "<div style='display:flex;flex-direction:column-reverse;"
+        "max-height:320px;overflow-y:auto;"
+        "background:#0e1117;border-radius:6px;'>"
+        "<pre style='white-space:pre-wrap;margin:0;"
+        "font-size:0.78rem;line-height:1.4;color:#fafafa;"
+        "padding:0.6rem;'>"
+        + "<br>".join(_escaped)
+        + "</pre></div>",
+        unsafe_allow_html=True,
+    )
 
-            tail = lines[-18:] if len(lines) > 18 else lines
-            _escaped = [
-                l.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                for l in tail
-            ]
-            st.markdown(
-                "<pre style='white-space:pre-wrap;"
-                "font-size:0.78rem;line-height:1.4;max-height:320px;"
-                "overflow-y:auto;background:#0e1117;color:#fafafa;"
-                "padding:0.6rem;border-radius:6px;'>"
-                + "<br>".join(_escaped)
-                + "</pre>",
-                unsafe_allow_html=True,
-            )
+    if not poll and st.button("Dismiss", key="vd_dismiss_train_log", type="secondary"):
+        st.session_state["_vd_dismiss_train_log"] = True
+        st.rerun()
 
-    _progress_fragment()
+
+def _render_training_progress_panel(project_root: Path) -> None:
+    """
+    Show a live training progress panel whenever a training job is active,
+    or the final training summary when the user requests it via Training Results.
+    """
+    is_active, _ = _training_is_active(project_root)
+
+    if is_active:
+        @st.fragment(run_every="4s")
+        def _progress_fragment() -> None:
+            is_active2, _ = _training_is_active(project_root)
+            if is_active2:
+                _render_training_log_panel(
+                    project_root,
+                    header="Training in progress\u2026",
+                    show_stop=True,
+                    poll=True,
+                )
+            else:
+                st.session_state["_vd_show_train_results"] = True
+                _render_training_log_panel(
+                    project_root,
+                    header="Training complete.  Refresh the page to load the new model.",
+                    header_type="success",
+                    poll=False,
+                )
+        _progress_fragment()
+        return
+
+    # Show last results only when explicitly requested via Training Results button
+    log_path = project_root / "data" / "train_log.txt"
+    if (
+        log_path.is_file()
+        and st.session_state.get("_vd_show_train_results")
+        and not st.session_state.get("_vd_dismiss_train_log")
+    ):
+        _render_training_log_panel(
+            project_root,
+            header="Last training run results",
+            header_type="success",
+            poll=False,
+        )
 
 
 def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None:
@@ -1267,6 +1336,44 @@ def _render_ml_pip_install_block(project_root: Path, *, key_suffix: str) -> None
     )
 
 
+def _render_train_aquaforge_button(project_root: Path, labels_path: Path) -> None:
+    """Compact sidebar button for training — runs the same subprocess as the full section."""
+    _pid_file = _training_pid_file(project_root)
+    is_active = _pid_file.is_file()
+    if is_active:
+        if st.button(
+            "Stop Training",
+            key="vd_stop_train_sidebar",
+            use_container_width=True,
+        ):
+            _stop_training(project_root)
+            st.rerun()
+        return
+    script = project_root / "scripts" / "train_aquaforge.py"
+    _torch_ok = _streamlit_torch_installed()
+    _n_af = _count_aquaforge_training_rows(labels_path, project_root)
+    _can_train = (
+        script.is_file()
+        and _torch_ok
+        and _n_af >= 2
+        and labels_path.is_file()
+    )
+    if st.button(
+        "Train AquaForge",
+        use_container_width=True,
+        key="vd_train_aquaforge_sidebar_btn",
+        disabled=not _can_train,
+        help="Train the model on your saved reviews.",
+    ):
+        try:
+            st.session_state.pop("_vd_dismiss_train_log", None)
+            _subprocess_train_aquaforge(project_root, labels_path, [])
+        except OSError as e:
+            st.error(str(e))
+            return
+        st.rerun()
+
+
 def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> None:
     """
     Run scripts/train_aquaforge.py on the live review JSONL (same file append_review writes).
@@ -1322,6 +1429,7 @@ def _render_retrain_aquaforge_section(project_root: Path, labels_path: Path) -> 
             st.warning("No labels file yet — save a few reviews first.")
             return
         try:
+            st.session_state.pop("_vd_dismiss_train_log", None)
             _subprocess_train_aquaforge(project_root, labels_path, [])
         except OSError as e:
             st.error(str(e))
@@ -1375,6 +1483,7 @@ def _render_train_first_aquaforge_section(project_root: Path, labels_path: Path)
             st.warning("No labels file yet.")
             return
         try:
+            st.session_state.pop("_vd_dismiss_train_log", None)
             _subprocess_train_aquaforge(
                 project_root,
                 labels_path,
@@ -1599,7 +1708,7 @@ def main() -> None:
     st.set_page_config(
         page_title="AquaForge",
         layout="wide",
-        initial_sidebar_state="collapsed",
+        initial_sidebar_state="auto",
         page_icon=pil_small if pil_small is not None else "🛰️",
     )
     if pil_small is not None:
@@ -1650,7 +1759,6 @@ def main() -> None:
             st.markdown("# AquaForge")
     else:
         st.markdown("# AquaForge")
-    st.markdown("---")
 
     if st.session_state.get("vd_ui_mode") == "training_review":
         render_training_label_review_ui(
@@ -1658,6 +1766,10 @@ def main() -> None:
             labels_path=labels_path,
             embedded=True,
         )
+        return
+
+    if st.session_state.get("vd_ui_mode") == "whole_image_map":
+        _render_whole_image_map_view(ROOT, labels_path)
         return
 
     tci_list = discover_tci_jp2()
@@ -1675,7 +1787,6 @@ def main() -> None:
         if not tci_list:
             st.caption("Add an image to start.")
         else:
-            st.markdown("##### Image")
             file_help = "Which satellite image you are working on."
             if len(tci_list) <= 12:
                 pick_i = st.radio(
@@ -1717,15 +1828,57 @@ def main() -> None:
                 except Exception:
                     pass
                 refresh = True
+        if tci_list:
+            if st.button(
+                "🗺️ Whole-image map",
+                key="btn_open_whole_image_map",
+                use_container_width=True,
+                help="Open the full satellite image overview in the main window for tile QA and spot placement.",
+            ):
+                st.session_state["vd_ui_mode"] = "whole_image_map"
+                st.session_state["_map_tci_choice"] = str(choice)
+                st.rerun()
+
+        # ── Train / Results / Fix labels / Stop — always visible ──
+        _train_col, _results_col = st.columns(2)
+        with _train_col:
+            _render_train_aquaforge_button(ROOT, labels_path)
+        with _results_col:
+            if st.button(
+                "Training Results",
+                key="vd_show_train_results_btn",
+                use_container_width=True,
+                help="Show the last training run results.",
+            ):
+                st.session_state["_vd_dismiss_train_log"] = False
+                st.session_state["_vd_show_train_results"] = True
+                st.rerun()
+        if st.button(
+            "Fix saved labels",
+            key="vd_nav_training_review",
+            use_container_width=True,
+            help="Open the label editor.",
+        ):
+            st.session_state["vd_ui_mode"] = "training_review"
+            st.rerun()
+        if st.button(
+            "🛑 Stop Server (Exit AquaForge)",
+            type="secondary",
+            use_container_width=True,
+            key="stop_server_btn",
+        ):
+            st.error("Server stopping...")
+            import time
+            time.sleep(0.5)
+            os._exit(0)
+
         with st.expander("Advanced", expanded=False):
             if not tci_list:
                 st.info(
                     "Add a `*TCI_10m*.jp2` under **data/** or download one below."
                 )
             _det_adv = load_aquaforge_settings(ROOT)
-            _render_retrain_aquaforge_section(ROOT, labels_path)
             _render_train_first_aquaforge_section(ROOT, labels_path)
-            st.markdown("---")
             if getattr(_det_adv, "ui_require_checkbox_for_aquaforge_overlays", False):
                 st.checkbox(
                     "Allow full AquaForge inference on spots (uses more CPU/GPU)",
@@ -1733,79 +1886,10 @@ def main() -> None:
                     help="When off, the app skips heavy model work until you enable this.",
                 )
             _sidebar_spot_finding_settings()
-            # Cloud mask QC and threshold tuning
-            with st.expander("☁ Cloud mask QC", expanded=False):
-                from aquaforge.cloud_mask import (
-                    CLOUD_BRIGHTNESS_THRESHOLD as _CM_BT,
-                    CLOUD_VARIANCE_THRESHOLD as _CM_VT,
-                )
-                st.caption(
-                    "Tiles are skipped **only** when both conditions are true: "
-                    "mean luminance > brightness threshold AND pixel variance < variance threshold. "
-                    "Adjust here to tune which tiles get skipped."
-                )
-                _cm_bt = st.slider(
-                    "Brightness threshold (0–255)",
-                    min_value=180,
-                    max_value=255,
-                    value=int(st.session_state.get("vd_cloud_brightness_threshold", int(_CM_BT))),
-                    step=1,
-                    key="vd_cloud_brightness_threshold",
-                    help="Tiles with mean luminance above this are considered cloud-bright. "
-                         "Lower = skip fewer tiles; higher = skip more.",
-                )
-                _cm_vt = st.slider(
-                    "Variance threshold",
-                    min_value=50,
-                    max_value=2000,
-                    value=int(st.session_state.get("vd_cloud_variance_threshold", int(_CM_VT))),
-                    step=10,
-                    key="vd_cloud_variance_threshold",
-                    help="Tiles with pixel variance below this are considered uniform (cloud-like). "
-                         "Lower = skip fewer tiles; higher = skip more.",
-                )
-                st.caption(
-                    f"Current: skip if brightness > **{_cm_bt}** AND variance < **{_cm_vt}**"
-                )
-                if tci_loaded_sidebar:
-                    st.info(
-                        "The stats for the **current review chip** are shown in "
-                        "**Advanced (this spot)** beneath the review chip."
-                    )
             with st.expander("Download satellite image", expanded=False):
                 _render_catalog_panel()
-            _aquaforge_vs_labels_expander(labels_path)
             _exports_and_analytics_expander(labels_path)
             render_duplicate_review_expander(project_root=ROOT, labels_path=labels_path)
-            if st.button(
-                "Fix saved labels",
-                key="vd_nav_training_review",
-                help="Open the label editor.",
-            ):
-                st.session_state["vd_ui_mode"] = "training_review"
-                st.rerun()
-
-            # Stop server button - allows clean termination and relaunch
-            if st.button(
-                "🛑 Stop Server (Exit AquaForge)",
-                type="secondary",
-                key="stop_server_btn",
-            ):
-                st.error("Server stopping...")
-                import time
-                time.sleep(0.5)
-                os._exit(0)
-
-            if tci_loaded_sidebar:
-                with st.expander("Whole-image map", expanded=False):
-                    _render_hundred_cell_overview(
-                        tci_loaded=tci_loaded_sidebar,
-                        labels_path=labels_path,
-                        meta=st.session_state.meta
-                        if isinstance(st.session_state.meta, dict)
-                        else {},
-                        wrap_expander=False,
-                    )
 
             if tci_loaded_sidebar:
                 _cog_path = Path(
@@ -2129,10 +2213,6 @@ def main() -> None:
                         raw = []
                     elif raw:
                         raw = raw[:pool]
-                        st.info(
-                            f"⚡ Loaded **{len(raw)}** vessel candidate(s) from scan cache "
-                            f"(model + thresholds unchanged) — skipped full re-scan."
-                        )
                     else:
                         st.info("⚡ Loaded scan result from cache — no detections found previously.")
                 else:
@@ -2148,22 +2228,32 @@ def main() -> None:
                             f"(conf ≥ {det_cfg.aquaforge.conf_threshold:.2f}, "
                             f"proposal floor {det_cfg.aquaforge.tiled_min_proposal_confidence:.2f})…"
                         )
+                        _land_excl = load_land_exclusion_points(
+                            labels_path, str(tci_path)
+                        )
                         raw, meta = run_aquaforge_tiled_scene_triples(
                             ROOT,
                             tci_path,
                             det_cfg,
                             cloud_brightness_threshold=_cb_thresh,
                             cloud_variance_threshold=_cv_thresh,
+                            land_exclusion_points=_land_excl or None,
                         )
                         _skipped_land = meta.get("land_tiles_skipped", 0)
                         _skipped_cloud = meta.get("cloud_tiles_skipped", 0)
-                        if _skipped_land or _skipped_cloud:
+                        _land_px_rej = meta.get("land_pixel_rejected", 0)
+                        _land_rv_rej = meta.get("land_review_rejected", 0)
+                        if _skipped_land or _skipped_cloud or _land_px_rej or _land_rv_rej:
                             _skip_parts = []
                             if _skipped_land:
-                                _skip_parts.append(f"**{_skipped_land:,}** land")
+                                _skip_parts.append(f"**{_skipped_land:,}** land tile(s)")
                             if _skipped_cloud:
-                                _skip_parts.append(f"**{_skipped_cloud:,}** 100%-cloud")
-                            st.write(f"🌍 Skipped {' + '.join(_skip_parts)} tile(s)")
+                                _skip_parts.append(f"**{_skipped_cloud:,}** 100%-cloud tile(s)")
+                            if _land_px_rej:
+                                _skip_parts.append(f"**{_land_px_rej}** land-pixel candidate(s)")
+                            if _land_rv_rej:
+                                _skip_parts.append(f"**{_land_rv_rej}** previously-reviewed land candidate(s)")
+                            st.write(f"🌍 Skipped {', '.join(_skip_parts)}")
                         if meta.get("error") == "aquaforge_weights_missing":
                             try:
                                 _af_rel = expected_aquaforge_checkpoint_path(ROOT).relative_to(ROOT)
@@ -2179,7 +2269,7 @@ def main() -> None:
                         elif raw:
                             raw = raw[:pool]
                             st.write(f"✅ Merging overlapping detections → **{len(raw)}** unique vessel candidate(s) above threshold")
-                            _det_status.update(label=f"Found {len(raw)} vessel candidate(s) — loading review queue…", state="complete", expanded=False)
+                            _det_status.update(label="Detection complete — loading review queue…", state="complete", expanded=False)
                         else:
                             st.write("⚠️ No detections passed the confidence threshold")
                             _det_status.update(label="No detections above threshold", state="error", expanded=True)
@@ -2200,6 +2290,27 @@ def main() -> None:
                 st.session_state.idx = 0
                 st.session_state.tci_loaded = str(tci_path.resolve())
                 st.session_state.last_scene_key = scene_key
+                _pool_n = len(st.session_state.detector_unlabeled_pool_all)
+                if _cached is not None and cands:
+                    if _pool_n > len(cands):
+                        st.info(
+                            f"⚡ Scan cache hit — queued **{len(cands)}** of "
+                            f"**{_pool_n}** unlabeled candidate(s) — skipped full re-scan."
+                        )
+                    else:
+                        st.info(
+                            f"⚡ Loaded **{len(cands)}** candidate(s) from scan cache "
+                            f"— skipped full re-scan."
+                        )
+                elif _cached is None and cands:
+                    try:
+                        _det_status.update(
+                            label=f"Queued {len(cands)} of {_pool_n} candidate(s)",
+                            state="complete",
+                            expanded=False,
+                        )
+                    except Exception:
+                        pass
                 if not cands:
                     if raw:
                         st.warning(
@@ -2233,6 +2344,13 @@ def main() -> None:
             Path(st.session_state.tci_loaded),
             project_root=ROOT,
         )
+        # Re-apply the slider limit so changes take effect without a full
+        # Refresh.  Manual locator picks (score == LOCATOR_MANUAL_SCORE) are
+        # always kept; only auto-detected candidates are trimmed.
+        _cur_max_k = int(st.session_state.get("webui_max_k", 10))
+        _manual = [c for c in cands if c[2] == LOCATOR_MANUAL_SCORE]
+        _auto = [c for c in cands if c[2] != LOCATOR_MANUAL_SCORE]
+        cands = _manual + _auto[:_cur_max_k]
     else:
         cands = []
 
@@ -2242,7 +2360,7 @@ def main() -> None:
     if not candidates_ready(cands, tci_loaded):
         if tci_loaded:
             st.info(
-                "Nothing to review — **Refresh detection list** in the left panel, or **Advanced → Whole-image map** to add a spot."
+                "Nothing to review — **Refresh detection list** in the left panel, or click **🗺️ Whole-image map** in the sidebar to add a spot."
             )
         else:
             st.info(
@@ -2261,6 +2379,38 @@ def main() -> None:
 
 def candidates_ready(cands: list, tci_loaded: str) -> bool:
     return bool(cands) and bool(tci_loaded)
+
+
+def _render_whole_image_map_view(project_root: Path, labels_path: Path) -> None:
+    """Full-width main-area view for the whole-image map, entered via sidebar button."""
+    _map_tci = (
+        str(st.session_state.get("tci_loaded") or "").strip()
+        or str(st.session_state.get("_map_tci_choice") or "").strip()
+    )
+    if not _map_tci:
+        st.warning("No image selected. Go back and select an image first.")
+        if st.button("← Back to review"):
+            st.session_state["vd_ui_mode"] = None
+            st.rerun()
+        return
+
+    col_back, col_title = st.columns([1, 5])
+    with col_back:
+        if st.button("← Back to review", key="map_back_top"):
+            st.session_state["vd_ui_mode"] = None
+            st.rerun()
+    with col_title:
+        st.markdown(f"### 🗺️ Whole-image map")
+    st.caption(f"Image: `{Path(_map_tci).name}`")
+
+    _render_hundred_cell_overview(
+        tci_loaded=_map_tci,
+        labels_path=labels_path,
+        meta=st.session_state.meta
+        if isinstance(st.session_state.meta, dict)
+        else {},
+        wrap_expander=False,
+    )
 
 
 def _render_hundred_cell_overview(
@@ -2316,6 +2466,7 @@ def _render_hundred_cell_overview(
                 st.rerun()
 
         tci_p = Path(tci_loaded)
+        tci_jp2 = tci_p  # original JP2 — used for band file lookups
         # Prefer COG GeoTIFF if it exists — any window read is ~10× faster
         _tci_cog = tci_p.with_name(tci_p.stem + "_cog.tif")
         if _tci_cog.is_file():
@@ -2430,9 +2581,9 @@ def _render_hundred_cell_overview(
 
         ov_key_pin = hashlib.sha256(f"{tci_loaded}|ovpin".encode()).hexdigest()[:18]
         st.caption(
-            "**Orange** = detector centers on this mosaic · **violet tint** = tile already has saved QA feedback · "
-            "after you **pick a mode** (button stays highlighted), click a cell to record. "
-            "Queued locator picks are shown on the **spot locator** view in review."
+            "**Click any cell** to zoom in and queue vessel spots at full resolution · "
+            "**Orange** = detector centers · **violet tint** = tile has saved QA feedback · "
+            "select a **tile mode** above to record QA feedback instead of zooming."
         )
         click_tile = streamlit_image_coordinates(
             ov_rgb,
@@ -2441,6 +2592,25 @@ def _render_hundred_cell_overview(
             use_column_width=False,
             cursor="crosshair",
         )
+        # Click with no tile-feedback mode → zoom into that cell
+        if click_tile is not None and not st.session_state.get(mode_key):
+            _zc = overview_click_to_grid_cell(
+                click_tile,
+                mosaic_w=int(ov_meta["mosaic_w"]),
+                mosaic_h=int(ov_meta["mosaic_h"]),
+                divisions=gdiv,
+            )
+            if _zc is not None:
+                _dedupe_z = (
+                    f"{tci_loaded}|zoom|{click_tile.get('unix_time')}|"
+                    f"{click_tile.get('x')}|{click_tile.get('y')}"
+                )
+                if st.session_state.get("_last_ov_zoom_click") != _dedupe_z:
+                    st.session_state["_last_ov_zoom_click"] = _dedupe_z
+                    st.session_state["_ov_zoom_cell"] = _zc
+                    st.rerun()
+
+        # Tile-feedback mode click handling (existing logic)
         if click_tile is not None and st.session_state.get(mode_key):
             cell = overview_click_to_grid_cell(
                 click_tile,
@@ -2561,6 +2731,136 @@ def _render_hundred_cell_overview(
                     )
                     st.rerun()
 
+        # --- Zoomed tile panel ---
+        _zoom_cell = st.session_state.get("_ov_zoom_cell")
+        if _zoom_cell is not None:
+            _render_tile_zoom_panel(
+                tci_loaded=tci_loaded,
+                labels_path=labels_path,
+                zoom_cell=_zoom_cell,
+                w_full=w_full_i,
+                h_full=h_full_i,
+                gdiv=gdiv,
+                dets_fullres=dets_meta,
+                scl_save=scl_save,
+            )
+
+
+TILE_ZOOM_DISPLAY_W = 1000
+
+
+def _render_tile_zoom_panel(
+    *,
+    tci_loaded: str,
+    labels_path: Path,
+    zoom_cell: tuple[int, int],
+    w_full: int,
+    h_full: int,
+    gdiv: int,
+    dets_fullres: list,
+    scl_save: str | None,
+) -> None:
+    """Render a full-resolution crop of one grid cell with click-to-queue spot placement."""
+    import cv2
+    from aquaforge.raster_rgb import read_rgba_window
+
+    tr, tc = zoom_cell
+    col0 = tc * w_full // gdiv
+    col1 = (tc + 1) * w_full // gdiv
+    row0 = tr * h_full // gdiv
+    row1 = (tr + 1) * h_full // gdiv
+    crop_w = col1 - col0
+    crop_h = row1 - row0
+
+    st.markdown("---")
+    hdr_col, clear_col = st.columns([5, 1])
+    with hdr_col:
+        st.markdown(f"##### Tile ({tr}, {tc}) — full resolution")
+    with clear_col:
+        if st.button("✕ Close zoom", key="btn_close_zoom"):
+            st.session_state["_ov_zoom_cell"] = None
+            st.rerun()
+
+    tci_p = Path(tci_loaded)
+    _tci_cog = tci_p.with_name(tci_p.stem + "_cog.tif")
+    read_path = _tci_cog if _tci_cog.is_file() else tci_p
+    if not read_path.is_file():
+        st.warning("Image file missing — cannot read tile.")
+        return
+
+    try:
+        rgba, _ww, _wh, _wf, _hf, _c0, _r0 = read_rgba_window(
+            read_path, col0, row0, col1, row1
+        )
+        tile_rgb = rgba[:, :, :3].copy()
+    except Exception as e:
+        st.warning(f"Could not read tile crop: {e}")
+        return
+
+    tile_dets_in_cell = [
+        (float(d[0]), float(d[1]), float(d[2]))
+        for d in dets_fullres
+        if col0 <= float(d[0]) < col1 and row0 <= float(d[1]) < row1
+    ]
+    for dx, dy, _ds in tile_dets_in_cell:
+        px = int(round(dx - col0))
+        py = int(round(dy - row0))
+        cv2.circle(tile_rgb, (px, py), 7, (0, 165, 255), 2)
+        cv2.circle(tile_rgb, (px, py), 2, (0, 165, 255), -1)
+
+    queued = st.session_state.get("pending_locator_candidates") or []
+    for qx, qy, _qs in queued:
+        if col0 <= float(qx) < col1 and row0 <= float(qy) < row1:
+            px = int(round(float(qx) - col0))
+            py = int(round(float(qy) - row0))
+            cv2.circle(tile_rgb, (px, py), 9, (0, 255, 0), 2)
+            cv2.drawMarker(tile_rgb, (px, py), (0, 255, 0), cv2.MARKER_CROSS, 12, 2)
+
+    st.caption(
+        f"**{crop_w}×{crop_h}** px at full resolution · "
+        f"**{len(tile_dets_in_cell)}** detection(s) (orange) · "
+        "**Click** to queue a vessel spot (green cross) · "
+        "click the overview grid above to switch tiles."
+    )
+
+    zoom_pin_key = hashlib.sha256(
+        f"{tci_loaded}|zoom|{tr}|{tc}".encode()
+    ).hexdigest()[:16]
+    click_zoom = streamlit_image_coordinates(
+        tile_rgb,
+        key=f"ov_zoom_{zoom_pin_key}",
+        width=TILE_ZOOM_DISPLAY_W,
+        use_column_width=False,
+        cursor="crosshair",
+    )
+
+    if click_zoom is not None:
+        dw = float(click_zoom.get("width") or 0)
+        dh = float(click_zoom.get("height") or 0)
+        if dw > 0 and dh > 0:
+            cx_tile = float(click_zoom["x"]) * (crop_w / dw)
+            cy_tile = float(click_zoom["y"]) * (crop_h / dh)
+            cx_full = col0 + cx_tile
+            cy_full = row0 + cy_tile
+            cx_full = float(np.clip(cx_full, 0, w_full - 1))
+            cy_full = float(np.clip(cy_full, 0, h_full - 1))
+            dedupe_zq = (
+                f"{tci_loaded}|zoomq|{click_zoom.get('unix_time')}|"
+                f"{click_zoom.get('x')}|{click_zoom.get('y')}"
+            )
+            if st.session_state.get("_last_zoom_queue_click") != dedupe_zq:
+                st.session_state["_last_zoom_queue_click"] = dedupe_zq
+                if "pending_locator_candidates" not in st.session_state:
+                    st.session_state.pending_locator_candidates = []
+                st.session_state.pending_locator_candidates.append(
+                    (cx_full, cy_full, 0.0)
+                )
+                st.success(
+                    f"Queued vessel spot at full-res ({cx_full:.0f}, {cy_full:.0f}). "
+                    "It will appear in the review queue when you go back."
+                )
+                st.rerun()
+
 
 def _render_spot_measurements_panel(
     *,
@@ -2572,6 +2872,15 @@ def _render_spot_measurements_panel(
     cx: float,
     cy: float,
     in_expander: bool = True,
+    wake_active: bool = False,
+    hull_active: bool = False,
+    struct_active: bool = False,
+    dir_active: bool = False,
+    marker_metrics: dict | None = None,
+    spot_k: str = "",
+    marker_quad_h1: list | None = None,
+    scw: int = 0,
+    sch: int = 0,
 ) -> None:
     """AquaForge chip readouts — expander or inline column."""
 
@@ -2637,79 +2946,240 @@ def _render_spot_measurements_panel(
                     st.caption(
                         "You have a saved heading here, but no overlay heading to compare."
                     )
+        _p_style = "margin:0 0 1em 0;padding:0;font-size:.85em;color:rgba(250,250,250,.6)"
+        _p_style_tight = "margin:0;padding:0;font-size:.85em;color:rgba(250,250,250,.6)"
+
+        # ── Vessel confidence ─────────────────────────────────────────────
         if af_spot.get("aquaforge_confidence") is not None:
-            st.caption(
-                f"Vessel confidence: **{_probability_to_percent_str(float(af_spot['aquaforge_confidence']))}**"
+            st.markdown(
+                f"<p style='{_p_style}'>Vessel confidence: "
+                f"{_probability_to_percent_str(float(af_spot['aquaforge_confidence']))}</p>",
+                unsafe_allow_html=True,
             )
-        if af_spot.get("aquaforge_length_m") is not None and af_spot.get("aquaforge_width_m") is not None:
-            st.caption(
-                f"Mask size (length × width): **{af_spot['aquaforge_length_m']:.0f}** × "
-                f"**{af_spot['aquaforge_width_m']:.0f}** m"
+
+        # ── Hull / structure block (stacked, no gaps) ────────────────────
+        _gm = marker_metrics or {}
+        _hull_struct_lines: list[str] = []
+        _mk_len = _gm.get("length_m")
+        _mk_wid = _gm.get("width_m")
+        if _mk_len is not None and _mk_wid is not None:
+            _hull_struct_lines.append(
+                f"Hull size: {_mk_len:.0f} × {_mk_wid:.0f} m (from markers)"
             )
-        if af_spot.get("aquaforge_heading_keypoint_deg") is not None:
-            st.caption(
-                f"Structure heading: **{int(round(float(af_spot['aquaforge_heading_keypoint_deg'])))}°**"
-            )
+        elif af_spot.get("aquaforge_length_m") is not None and af_spot.get("aquaforge_width_m") is not None:
+            if hull_active:
+                _hull_struct_lines.append(
+                    f"Hull size: {af_spot['aquaforge_length_m']:.0f} × "
+                    f"{af_spot['aquaforge_width_m']:.0f} m"
+                )
+            else:
+                _hull_struct_lines.append("Hull size: —")
         if af_spot.get("aquaforge_landmark_bow_confidence") is not None:
-            _bc = float(af_spot["aquaforge_landmark_bow_confidence"])
-            _sc = float(af_spot.get("aquaforge_landmark_stern_confidence") or 0.0)
-            st.caption(
-                f"Bow / stern confidence: **{_probability_to_percent_str(_bc)}** / "
-                f"**{_probability_to_percent_str(_sc)}**"
+            if struct_active:
+                _bc = float(af_spot["aquaforge_landmark_bow_confidence"])
+                _sc = float(af_spot.get("aquaforge_landmark_stern_confidence") or 0.0)
+                _hull_struct_lines.append(
+                    f"Bow / stern confidence: {_probability_to_percent_str(_bc)} / "
+                    f"{_probability_to_percent_str(_sc)}"
+                )
+            else:
+                _hull_struct_lines.append("Bow / stern confidence: —")
+        _ha = af_spot.get("aquaforge_hull_heading_a_deg")
+        _hb = af_spot.get("aquaforge_hull_heading_b_deg")
+        if _ha is not None and _hb is not None and hull_active:
+            _hull_struct_lines.append(f"Hull axis: {int(round(_ha))}° / {int(round(_hb))}°")
+        elif _ha is not None:
+            _hull_struct_lines.append("Hull axis: —")
+        if af_spot.get("aquaforge_heading_keypoint_deg") is not None:
+            _sval = f"{int(round(float(af_spot['aquaforge_heading_keypoint_deg'])))}°" if struct_active else "—"
+            _hull_struct_lines.append(f"Structure heading: {_sval}")
+        if _hull_struct_lines:
+            st.markdown(
+                f"<p style='{_p_style}'>" + "<br>".join(_hull_struct_lines) + "</p>",
+                unsafe_allow_html=True,
             )
-        if af_spot.get("aquaforge_heading_wake_heuristic_deg") is not None:
-            st.caption(
-                f"Wake line (simple): **{int(round(float(af_spot['aquaforge_heading_wake_heuristic_deg'])))}°**"
+
+        # ── Heading (fused) — marker-derived takes priority ─────────────
+        _mk_hdg = _gm.get("heading_deg_from_north")
+        _mk_hdg_src = _gm.get("heading_source")
+        if _mk_hdg is not None:
+            _mk_h = int(round(float(_mk_hdg)))
+            _mk_alt = _gm.get("heading_deg_from_north_alt")
+            if _mk_hdg_src == "ambiguous_end_end" and _mk_alt is not None:
+                _dval = f"{_mk_h}° / {int(round(float(_mk_alt)))}° (from markers, ±180°)"
+            else:
+                _src_lbl = {"bow_stern": "bow–stern", "wake_disambiguated": "wake"}.get(_mk_hdg_src or "", "markers")
+                _dval = f"{_mk_h}° (from {_src_lbl})"
+            st.markdown(
+                f"<p style='{_p_style}'>Heading: {_dval}</p>",
+                unsafe_allow_html=True,
             )
-        if af_spot.get("aquaforge_heading_wake_model_deg") is not None:
-            st.caption(
-                f"Wake model: **{int(round(float(af_spot['aquaforge_heading_wake_model_deg'])))}°**"
+        elif af_spot.get("aquaforge_heading_fused_deg") is not None:
+            _fused_src = af_spot.get("aquaforge_heading_fusion_source", "none")
+            if not dir_active:
+                _dval = "—"
+            elif _fused_src == "hull_axis_ambiguous":
+                _f = int(round(float(af_spot["aquaforge_heading_fused_deg"])))
+                _dval = f"{_f}° (±180° ambiguous)"
+            else:
+                _f = int(round(float(af_spot["aquaforge_heading_fused_deg"])))
+                _src_label = {"structures": "from structures", "hull_wake_disambiguated": "hull + wake"}.get(_fused_src, "")
+                _dval = f"{_f}°" + (f" ({_src_label})" if _src_label else "")
+            st.markdown(
+                f"<p style='{_p_style}'>Heading: {_dval}</p>",
+                unsafe_allow_html=True,
             )
-        if af_spot.get("aquaforge_heading_wake_deg") is not None:
-            st.caption(
-                f"Wake heading: **{int(round(float(af_spot['aquaforge_heading_wake_deg'])))}°**"
-            )
-        if af_spot.get("aquaforge_heading_fused_deg") is not None:
-            st.caption(
-                f"Shown heading: **{int(round(float(af_spot['aquaforge_heading_fused_deg'])))}°**"
-            )
-        # Chromatic fringe velocity — from B02/B04 band temporal offset
+
+        # ── Spectral velocity (stacked, no gaps) ────────────────────────
         _cv_spd = af_spot.get("aquaforge_chroma_speed_kn")
         _cv_hdg = af_spot.get("aquaforge_chroma_heading_deg")
         _cv_pnr = af_spot.get("aquaforge_chroma_pnr")
         _cv_agree = af_spot.get("aquaforge_chroma_agrees_with_model")
+        _cv_spd_err = af_spot.get("aquaforge_chroma_speed_error_kn")
+        _cv_hdg_err = af_spot.get("aquaforge_chroma_heading_error_deg")
         if _cv_spd is not None and _cv_hdg is not None:
-            _agree_icon = ""
-            if _cv_agree is True:
-                _agree_icon = " — heading confirmed"
-            elif _cv_agree is False:
-                _agree_icon = " — heading conflict"
-            st.caption(
-                f"Chromatic velocity: **{float(_cv_spd):.1f} kn** "
-                f"| motion heading **{int(round(float(_cv_hdg)))}°** "
-                f"| PNR **{float(_cv_pnr):.1f}**{_agree_icon}"
+            _spd_str = f"{float(_cv_spd):.1f}"
+            if _cv_spd_err is not None:
+                _spd_str += f" \u00b1{float(_cv_spd_err):.1f}"
+            _hdg_str = f"{int(round(float(_cv_hdg)))}\u00b0"
+            if _cv_hdg_err is not None:
+                _hdg_str += f" \u00b1{int(round(float(_cv_hdg_err)))}\u00b0"
+            st.markdown(
+                f"<p style='{_p_style}'>"
+                f"Spectral velocity: {_spd_str} kn<br>"
+                f"Spectral heading: {_hdg_str}</p>",
+                unsafe_allow_html=True,
+            )
+        elif _cv_spd is not None:
+            _spd_str = f"{float(_cv_spd):.1f}"
+            if _cv_spd_err is not None:
+                _spd_str += f" \u00b1{float(_cv_spd_err):.1f}"
+            st.markdown(
+                f"<p style='{_p_style}'>"
+                f"Spectral velocity: {_spd_str} kn<br>"
+                f"Spectral heading: <i>below detection threshold</i></p>",
+                unsafe_allow_html=True,
             )
         elif af_spot.get("aquaforge_chroma_speed_ms") is None:
-            st.caption("Chromatic velocity: *B02/B04 bands not yet downloaded*")
+            _b02_p = tci_p.parent / tci_p.name.replace("_TCI_10m", "_B02_10m")
+            _b04_p = tci_p.parent / tci_p.name.replace("_TCI_10m", "_B04_10m")
+            if _b02_p.is_file() and _b04_p.is_file():
+                st.markdown(
+                    f"<p style='{_p_style}'>Spectral velocity: <i>no detectable motion (vessel stationary or low SNR)</i></p>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"<p style='{_p_style}'>Spectral velocity: <i>B02/B04 bands not yet downloaded</i></p>",
+                    unsafe_allow_html=True,
+                )
 
-        # Spectral signature display
+        # ── Predicted material + Spectral signature chart ────────────────
+        # If user placed hull markers, resample spectral signature using the
+        # marker-defined hull instead of the model's decoded polygon.
+        _marker_spec_key = f"_vd_marker_spec_{spot_k}"
+        _marker_spec_sig_key = f"_vd_marker_spec_sig_{spot_k}"
+        _marker_spec_cached = st.session_state.get(_marker_spec_key)
+        if marker_quad_h1 is not None and len(marker_quad_h1) == 4:
+            _mq_sig = str([(round(p[0], 2), round(p[1], 2)) for p in marker_quad_h1])
+            if st.session_state.get(_marker_spec_sig_key) != _mq_sig:
+                try:
+                    from aquaforge.spectral_extractor import (
+                        extract_spectral_signature_from_disk,
+                        infer_material_hint_v2,
+                    )
+                    _chip_half_spec = max(20, int(max(scw, sch)) // 2)
+                    _marker_spec_meas = extract_spectral_signature_from_disk(
+                        tci_p, cx, cy, _chip_half_spec, marker_quad_h1, out_size=64,
+                    )
+                    if _marker_spec_meas is not None:
+                        _pred_arr = af_spot.get("aquaforge_spectral_pred")
+                        _m_label, _m_conf, _m_indices = infer_material_hint_v2(
+                            _marker_spec_meas, _pred_arr,
+                        )
+                        _marker_spec_cached = {
+                            "spectral_measured": _marker_spec_meas.tolist()
+                            if hasattr(_marker_spec_meas, "tolist")
+                            else list(_marker_spec_meas),
+                            "material_hint": _m_label,
+                        }
+                    else:
+                        _marker_spec_cached = None
+                except Exception:
+                    _marker_spec_cached = None
+                st.session_state[_marker_spec_key] = _marker_spec_cached
+                st.session_state[_marker_spec_sig_key] = _mq_sig
+        elif marker_quad_h1 is None or len(marker_quad_h1) != 4:
+            if _marker_spec_cached is not None:
+                st.session_state[_marker_spec_key] = None
+                st.session_state[_marker_spec_sig_key] = None
+                _marker_spec_cached = None
+
         _spec_meas = af_spot.get("aquaforge_spectral_measured")
         _spec_pred = af_spot.get("aquaforge_spectral_pred")
         _mat_hint = af_spot.get("aquaforge_material_hint")
+        if _marker_spec_cached is not None:
+            _spec_meas = _marker_spec_cached.get("spectral_measured", _spec_meas)
+            _mat_hint = _marker_spec_cached.get("material_hint", _mat_hint)
         if _spec_meas is not None or _spec_pred is not None:
             from aquaforge.spectral_extractor import BAND_LABELS as _SLABELS, BAND_COLOURS as _SCOLS
             import pandas as _spd
-            st.caption("**Spectral signature** (hull reflectance by band):")
+            _pre_chart_lines: list[str] = []
+            if _mat_hint:
+                _pre_chart_lines.append(f"Predicted material: {_mat_hint}")
+            _pre_chart_lines.append("Spectral signature (nm):")
+            st.markdown(
+                f"<p style='{_p_style_tight}'>" + "<br>".join(_pre_chart_lines) + "</p>",
+                unsafe_allow_html=True,
+            )
+            _band_display = {
+                "R (B04)": "Red-665", "G (B03)": "Green-560", "B (B02)": "Blue-490",
+                "B08 NIR": "NIR-842", "B05 RE1": "NIR-705", "B06 RE2": "NIR-740",
+                "B07 RE3": "NIR-783", "B8A NIR-n": "NIR-865",
+                "B11 SWIR1": "SWIR-1610", "B12 SWIR2": "SWIR-2190",
+                "B01 CoAer": "Violet-443", "B09 WV": "NIR-945",
+            }
+            _band_order = [
+                "Violet-443", "Blue-490", "Green-560", "Red-665",
+                "NIR-705", "NIR-740", "NIR-783",
+                "NIR-842", "NIR-865", "NIR-945",
+                "SWIR-1610", "SWIR-2190",
+            ]
             _rows = []
             for i, lbl in enumerate(_SLABELS):
-                _m = float(_spec_meas[i]) if _spec_meas is not None and i < len(_spec_meas) else None
-                _p = float(_spec_pred[i]) if _spec_pred is not None and i < len(_spec_pred) else None
-                _rows.append({"Band": lbl, "Measured": _m, "Predicted": _p})
+                _m = float(_spec_meas[i]) if _spec_meas is not None and i < len(_spec_meas) else float("nan")
+                _p = float(_spec_pred[i]) if _spec_pred is not None and i < len(_spec_pred) else float("nan")
+                _disp = _band_display.get(lbl, lbl)
+                _rows.append({"Band": _disp, "Measured": _m, "Predicted": _p})
             _df = _spd.DataFrame(_rows).set_index("Band")
-            # Show as Streamlit bar chart (auto-resizes)
-            st.bar_chart(_df.dropna(how="all"), height=160)
-            if _mat_hint:
-                st.caption(f"Material hint: **{_mat_hint}**")
+            _df.index = _spd.CategoricalIndex(
+                _df.index, categories=_band_order, ordered=True
+            )
+            _df = _df.sort_index()
+            _df = _df.dropna(axis=1, how="all").dropna(axis=0, how="all")
+            _df_plot = _df.reset_index().melt(id_vars="Band", var_name="Series", value_name="Value")
+            _df_plot = _df_plot.dropna(subset=["Value"])
+            _vl_spec = {
+                "mark": {"type": "bar", "opacity": 0.7},
+                "encoding": {
+                    "x": {"field": "Band", "type": "nominal", "sort": _band_order, "axis": {"labelAngle": -90, "title": None}},
+                    "y": {"field": "Value", "type": "quantitative", "axis": {"labels": False, "title": None, "ticks": False}},
+                    "color": {"field": "Series", "type": "nominal", "legend": None},
+                },
+                "height": 220,
+            }
+            st.vega_lite_chart(_df_plot, _vl_spec, use_container_width=True)
+            _chart_series = [c for c in _df.columns if _df[c].notna().any()]
+            if _chart_series:
+                _ser_colors = {"Measured": "#1f77b4", "Predicted": "#4cc9f0"}
+                _ser_html = "&emsp;".join(
+                    f"<span style='color:{_ser_colors.get(s, '#aaa')}'>■</span>&nbsp;{s}"
+                    for s in _chart_series
+                )
+                st.markdown(
+                    f"<p style='margin:-2.5rem 0 0 0;padding:0;text-align:center;font-size:0.82rem;color:#c8cdd8'>{_ser_html}</p>",
+                    unsafe_allow_html=True,
+                )
         sw = af_spot.get("aquaforge_warnings") or []
         if isinstance(sw, list):
             sw = [x for x in sw if str(x) != "aquaforge_weights_missing"]
@@ -2751,6 +3221,7 @@ def _render_review_deck(
     dim_key = f"dim_markers_{spot_k}"
     hull_mode_k = f"hull_mode_{spot_k}"
     active_hull_k = f"active_hull_{spot_k}"
+    no_wake_key = f"_vd_no_wake_{spot_k}"
     prev_sk = st.session_state.get("_vd_prev_review_spot_k")
     if prev_sk is not None and prev_sk != spot_k:
         st.session_state[hull_mode_k] = "single"
@@ -2772,6 +3243,7 @@ def _render_review_deck(
         st.success(str(flash_loc))
 
     tci_p = Path(tci_loaded)
+    tci_jp2 = tci_p  # original JP2 — used for band file lookups
     # Prefer COG GeoTIFF if it exists — all reads (inference, review chip, locator) are fast
     _tci_cog2 = tci_p.with_name(tci_p.stem + "_cog.tif")
     if _tci_cog2.is_file():
@@ -2787,6 +3259,7 @@ def _render_review_deck(
     for _xk, _dv in (
         ("vd_ov_hull", True),
         ("vd_ov_mark", True),
+        ("vd_ov_keel", True),
         ("vd_ov_dir", True),
         ("vd_ov_wake", True),
     ):
@@ -2817,7 +3290,9 @@ def _render_review_deck(
     chip_px, locator_px, gdx, gdy, gavg = _cached_review_crop_metrics(
         str(tci_p.resolve()), mt
     )
-    spot_px_read = int(chip_px)
+    # Zoom slider: user-adjustable field of view (metres per side)
+    _zoom_m = int(st.session_state.get("vd_review_zoom_m", REVIEW_CHIP_TARGET_SIDE_M))
+    spot_px_read = max(20, int(round(_zoom_m / max(gavg, 0.1))))
 
     # --- Step 1: Run inference first (does not depend on the JP2 chip read) ---
     _mscl = (meta or {}).get("scl_path")
@@ -2825,6 +3300,12 @@ def _render_review_deck(
     if _scl_for_spot is not None and not _scl_for_spot.is_file():
         _scl_for_spot = None
     # Inference sig excludes sc0/sr0 because they are ignored inside run_aquaforge_spot_decode.
+    _chroma_available = False
+    try:
+        from aquaforge.chromatic_velocity import chroma_bands_available as _chroma_avail_fn
+        _chroma_available = _chroma_avail_fn(tci_p)
+    except Exception:
+        pass
     af_spot_sig = (
         _detection_yaml_mtime(ROOT),
         mt,
@@ -2832,7 +3313,8 @@ def _render_review_deck(
         round(cx, 7),
         round(cy, 7),
         "aquaforge",
-        "spot_ov8",
+        "spot_ov10",
+        _chroma_available,
     ) + ((_af_overlay_allow,) if det_settings.ui_require_checkbox_for_aquaforge_overlays else ())
     af_spot_state_k = f"vd_aquaforge_spot_{spot_k}"
     if det_settings.ui_require_checkbox_for_aquaforge_overlays and not _af_overlay_allow:
@@ -2841,7 +3323,7 @@ def _render_review_deck(
     elif st.session_state.get(af_spot_state_k + "_sig") != af_spot_sig:
         st.session_state[af_spot_state_k] = run_aquaforge_spot_decode(
             ROOT,
-            tci_p,
+            tci_jp2,
             cx,
             cy,
             det_settings,
@@ -2906,6 +3388,8 @@ def _render_review_deck(
             _oldest = next(iter(_CHIP_READ_CACHE))
             del _CHIP_READ_CACHE[_oldest]
     loc_rgb, lc0, lr0, lcw, lch, spot_rgb, sc0, sr0, scw, sch = _CHIP_READ_CACHE[_chip_cache_key]
+
+    mk_crop = _markers_to_crop(mk_draw, float(sc0), float(sr0))
 
     # --- Background prefetch: read the next spot's chip while the user reviews this one ---
     _tci_str = str(tci_p.resolve())
@@ -2978,9 +3462,9 @@ def _render_review_deck(
         labeled_reviewed_fullres=labeled_review_fr,
     )
 
-    marker_quad_h1 = quad_crop_from_dimension_markers(mk_draw, hull_index=1)
+    marker_quad_h1 = quad_crop_from_dimension_markers(mk_crop, hull_index=1)
     marker_quad_h2 = (
-        quad_crop_from_dimension_markers(mk_draw, hull_index=2) if is_twin else None
+        quad_crop_from_dimension_markers(mk_crop, hull_index=2) if is_twin else None
     )
     quad_extent1, extent_src1 = vessel_quad_for_label(
         spot_rgb,
@@ -3045,627 +3529,124 @@ def _render_review_deck(
     if sel_mk not in st.session_state:
         st.session_state[sel_mk] = MARKER_ROLES[0]
 
-    _show_hull = bool(st.session_state.get("vd_ov_hull", True))
-    _show_mark = bool(st.session_state.get("vd_ov_mark", True))
-    _show_dir = bool(st.session_state.get("vd_ov_dir", True))
-    _show_wake = bool(st.session_state.get("vd_ov_wake", True))
-
-    spot_vis = annotate_spot_detection_center(
-        spot_rgb,
-        cx,
-        cy,
-        sc0,
-        sr0,
-        meters_per_pixel=gavg,
-        draw_footprint_outline=False,
-    )
-    # Initialize overlay data — populated below if af_spot is available
-    _poly = None
-    _kpc = None
-    _kxc = None
-    _bs = None
-    _wk = None
-    _arrow_h: float | None = None
-    if af_spot and (_show_hull or _show_mark or _show_wake):
-        _sc0i = int(sc0)
-        _sr0i = int(sr0)
-        _poly = None
-        raw_full_poly = af_spot.get("aquaforge_hull_polygon_fullres")
-        if isinstance(raw_full_poly, list) and len(raw_full_poly) >= 3:
-            _fp = [
-                (float(t[0]), float(t[1]))
-                for t in raw_full_poly
-                if isinstance(t, (list, tuple)) and len(t) >= 2
-            ]
-            if len(_fp) >= 3:
-                _poly = polygon_fullres_to_crop(_fp, _sc0i, _sr0i)
-        if _poly is None:
-            raw_poly = af_spot.get("aquaforge_hull_polygon_crop")
-            if isinstance(raw_poly, list) and len(raw_poly) >= 3:
-                _poly = [(float(t[0]), float(t[1])) for t in raw_poly]
-        _kpc = None
-        _kxc = None
-        lm_full = af_spot.get("aquaforge_landmarks_xy_fullres")
-        if isinstance(lm_full, list) and lm_full:
-            _kxc = []
-            for p in lm_full:
-                if not isinstance(p, (list, tuple)) or len(p) < 3:
-                    continue
-                _kxc.append(
-                    (float(p[0]) - sc0, float(p[1]) - sr0, float(p[2]))
-                )
-            if not _kxc:
-                _kxc = None
-        if _kxc is None:
-            raw_kp = af_spot.get("aquaforge_keypoints_crop")
-            if isinstance(raw_kp, list) and raw_kp:
-                _kpc = [(float(t[0]), float(t[1])) for t in raw_kp]
-            raw_kxc = af_spot.get("aquaforge_keypoints_xy_conf_crop")
-            if isinstance(raw_kxc, list) and raw_kxc:
-                _kxc = [
-                    (float(t[0]), float(t[1]), float(t[2]))
-                    for t in raw_kxc
-                    if isinstance(t, (list, tuple)) and len(t) >= 3
-                ]
-        # ── Dependency: structures require hull detection ──────────────────
-        # If no hull polygon was decoded, suppress structures and all
-        # downstream overlays (bow-stern, heading) at the UI level too.
-        # This catches old JSONL entries and any inference edge-cases where
-        # the inference-side suppression didn't fire.
-        if not _poly:
-            _kxc = None
-            _kpc = None
-        _bs_conf = None
-        if af_spot.get("aquaforge_landmark_heading_trust") is not None:
-            _bs_conf = float(af_spot["aquaforge_landmark_heading_trust"])
-        _bs = None
-        _mbs_kp = 0.2
-        if _poly and (
-            _show_mark
-            and isinstance(lm_full, list)
-            and len(lm_full) >= 2
-            and isinstance(lm_full[0], (list, tuple))
-            and isinstance(lm_full[1], (list, tuple))
-            and len(lm_full[0]) >= 3
-            and len(lm_full[1]) >= 3
-        ):
-            _bc = float(lm_full[0][2])
-            _stc = float(lm_full[1][2])
-            if _bc >= _mbs_kp and _stc >= _mbs_kp:
-                _bs = (
-                    (float(lm_full[0][0]) - sc0, float(lm_full[0][1]) - sr0),
-                    (float(lm_full[1][0]) - sc0, float(lm_full[1][1]) - sr0),
-                )
-                if _bs_conf is None:
-                    _bs_conf = float(max(0.0, min(1.0, min(_bc, _stc))))
-        if _poly and _bs is None:
-            raw_bs = af_spot.get("aquaforge_bow_stern_segment_crop")
-            if isinstance(raw_bs, list) and len(raw_bs) == 2:
-                a0, a1 = raw_bs[0], raw_bs[1]
-                _bs = ((float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1])))
-        _wk: list[tuple[float, float]] | None = None
-        wk_full = af_spot.get("aquaforge_wake_segment_fullres")
-        if isinstance(wk_full, list) and len(wk_full) >= 2:
-            w0, w1 = wk_full[0], wk_full[1]
-            if (
-                isinstance(w0, (list, tuple))
-                and isinstance(w1, (list, tuple))
-                and len(w0) >= 2
-                and len(w1) >= 2
-            ):
-                _wk = [
-                    (float(w0[0]) - sc0, float(w0[1]) - sr0),
-                    (float(w1[0]) - sc0, float(w1[1]) - sr0),
-                ]
-        if _wk is None:
-            raw_wk = af_spot.get("aquaforge_wake_segment_crop")
-            if isinstance(raw_wk, list) and len(raw_wk) >= 2:
-                w0, w1 = raw_wk[0], raw_wk[1]
-                _wk = [(float(w0[0]), float(w0[1])), (float(w1[0]), float(w1[1]))]
-        # ── Proximity gate: suppress model-predicted wake if far from hull ──────
-        # A wake start must be near the hull (stern).  If both endpoints are far
-        # from the hull centroid, the prediction is a spurious outlier.
-        # User-drawn wakes (the manual override below) are never suppressed.
-        if _wk is not None and _poly:
-            _hcx_crop = sum(p[0] for p in _poly) / len(_poly)
-            _hcy_crop = sum(p[1] for p in _poly) / len(_poly)
-            _hull_xs_w = [p[0] for p in _poly]
-            _hull_ys_w = [p[1] for p in _poly]
-            _hull_half_diag = math.sqrt(
-                (max(_hull_xs_w) - min(_hull_xs_w)) ** 2
-                + (max(_hull_ys_w) - min(_hull_ys_w)) ** 2
-            ) / 2.0
-            # Threshold: 2× hull half-diagonal + 100 m minimum.
-            # The nearest wake endpoint must be within this distance of the centroid.
-            _w_thresh = max(
-                _hull_half_diag * 2.0,
-                int(round(100.0 / max(gavg, 1.0))),
-            )
-            _wd0 = math.sqrt((_wk[0][0] - _hcx_crop) ** 2 + (_wk[0][1] - _hcy_crop) ** 2)
-            _wd1 = math.sqrt((_wk[1][0] - _hcx_crop) ** 2 + (_wk[1][1] - _hcy_crop) ** 2)
-            if min(_wd0, _wd1) > _w_thresh:
-                _wk = None
-        # Manual curved wake override: use the full polyline from session markers
-        _mk_for_wake = st.session_state.get(dim_key, [])
-        if isinstance(_mk_for_wake, list):
-            _wp_list = wake_polyline_marker_dicts(_mk_for_wake, hull_index=1)
-            if _wp_list is not None:
-                _wk = [(float(m["x"]), float(m["y"])) for m in _wp_list]
-        if _poly or _kxc or _kpc or _bs or _wk:
-            spot_vis = overlay_aquaforge_on_spot_rgb(
-                spot_vis,
-                hull_polygon_crop=_poly,
-                keypoints_crop=None if _kxc else _kpc,
-                keypoints_xy_conf=_kxc,
-                bow_stern_segment_crop=_bs,
-                bow_stern_min_confidence=_bs_conf,
-                wake_polyline_crop=_wk,
-                draw_hull_outline=_show_hull,
-                draw_keypoints=_show_mark and bool(_poly),
-                draw_bow_stern=_show_mark and bool(_poly),
-                draw_wake=_show_wake,
-            )
-    mk_draw2 = st.session_state.get(dim_key, [])
-    if not isinstance(mk_draw2, list):
-        mk_draw2 = []
-    spot_ui = draw_markers_on_rgb(spot_vis, mk_draw2) if mk_draw2 else spot_vis
-
-    side_px = CHIP_DISPLAY_SIDE
-    main_px = CHIP_DISPLAY_MAIN
-    if extent_preview1 is not None:
-        extent_sq1, _ = letterbox_rgb_to_square(extent_preview1, side_px)
-    else:
-        extent_sq1 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
-    if extent_preview2 is not None:
-        extent_sq2, _ = letterbox_rgb_to_square(extent_preview2, side_px)
-    else:
-        extent_sq2 = np.full((side_px, side_px, 3), 36, dtype=np.uint8)
-    spot_sq, spot_lb_meta = letterbox_rgb_to_square(spot_ui, main_px)
-    # Compute heading value for both the arrow overlay and the legend presence indicator.
-    # Only use aquaforge_heading_fused_deg — it is already suppressed to None by the
-    # dependency chain in inference.py when hull/structures are absent.
-    # Wake-derived heading keys (aquaforge_wake_aux_deg etc.) are intentionally excluded
-    # here because heading display requires structures; wake is independent.
-    if isinstance(af_spot, dict) and af_spot:
-        _raw = af_spot.get("aquaforge_heading_fused_deg")
-        if _raw is not None:
-            try:
-                _fv = float(_raw)
-                if math.isfinite(_fv):
-                    _arrow_h = _fv
-            except (TypeError, ValueError):
-                pass
-    if _show_dir and _arrow_h is not None:
-        # Use bow position for a spatially grounded arrowhead 50 m off the bow.
-        # Fall back to the corner arrow if bow is unknown.
-        _bow_crop_xy = None
-        if _bs is not None:
-            _bow_crop_xy = _bs[0]  # bow is the first point of the segment
-        if _bow_crop_xy is not None and scw > 0 and sch > 0:
-            spot_sq = overlay_bow_heading_arrowhead(
-                spot_sq,
-                spot_lb_meta,
-                _arrow_h,
-                _bow_crop_xy,
-                chip_native_w=scw,
-                chip_native_h=sch,
-                meters_per_native_px=float(gavg) if gavg else 10.0,
-                offset_m=50.0,
-            )
-        else:
-            # Bow position unknown — place the arrowhead at the chip centre so the
-            # heading indicator is still the same green style (no more yellow line).
-            _cx = float(scw) / 2.0 if scw > 0 else float(main_px) / 2.0
-            _cy = float(sch) / 2.0 if sch > 0 else float(main_px) / 2.0
-            spot_sq = overlay_bow_heading_arrowhead(
-                spot_sq,
-                spot_lb_meta,
-                _arrow_h,
-                (_cx, _cy),
-                chip_native_w=scw if scw > 0 else main_px,
-                chip_native_h=sch if sch > 0 else main_px,
-                meters_per_native_px=float(gavg) if gavg else 10.0,
-                offset_m=80.0,
-            )
-    # Draw detection ID in the top-left corner of the chip image.
-    try:
-        from PIL import Image as _PILImage, ImageDraw as _PILDraw, ImageFont as _PILFont
-        _id_img = _PILImage.fromarray(spot_sq)
-        _id_draw = _PILDraw.Draw(_id_img)
-        _id_text = f"{idx + 1} / {n}"
-        _fsize = max(16, main_px // 42)
-        try:
-            _font = _PILFont.truetype("arial.ttf", _fsize)
-        except Exception:
-            _font = _PILFont.load_default()
-        _pad = max(4, _fsize // 4)
-        _bbox = _id_draw.textbbox((0, 0), _id_text, font=_font)
-        _tw, _th = _bbox[2] - _bbox[0], _bbox[3] - _bbox[1]
-        _id_draw.rectangle([_pad - 2, _pad - 2, _pad + _tw + 4, _pad + _th + 4],
-                           fill=(0, 0, 0, 160))
-        _id_draw.text((_pad, _pad), _id_text, font=_font, fill=(255, 255, 255))
-        spot_sq = np.asarray(_id_img)
-    except Exception:
-        pass
-    loc_sq, loc_lb_meta = letterbox_rgb_to_square(loc_vis, side_px)
-
-    wake_vis_k = f"wake_vis_{spot_k}"
     cloud_partial_k = f"cloud_partial_{spot_k}"
 
-    mk_list_fb = st.session_state.get(dim_key, [])
-    if not isinstance(mk_list_fb, list):
-        mk_list_fb = []
-    _wake_pv = bool(st.session_state.get(wake_vis_k, False))
-    gm: dict | None = None
-    gm2: dict | None = None
-    if mk_list_fb:
-        try:
-            gm = metrics_from_markers(
-                mk_list_fb,
-                sc0,
-                sr0,
-                raster_path=tci_p,
-                hull_index=1,
-                wake_present=_wake_pv,
-            )
-        except Exception:
-            gm = None
-        if is_twin:
-            try:
-                gm2 = metrics_from_markers(
-                    mk_list_fb,
-                    sc0,
-                    sr0,
-                    raster_path=tci_p,
-                    hull_index=2,
-                    wake_present=_wake_pv,
-                )
-            except Exception:
-                gm2 = None
-
-    def _derived_metrics_html(gmb: dict | None, label: str = "") -> str:
-        if not gmb:
-            return f'<p class="vd-deck-foot">{label}—</p>'
-        parts: list[str] = []
-        if gmb.get("length_m") is not None:
-            if gmb.get("heading_source") == "ambiguous_end_end":
-                parts.append(f"Keel (ends) {gmb['length_m']:.0f} m")
-            else:
-                parts.append(f"Bow–stern {gmb['length_m']:.0f} m")
-        if gmb.get("width_m") is not None:
-            parts.append(f"Beam {gmb['width_m']:.0f} m")
-        if gmb.get("heading_deg_from_north") is not None:
-            parts.append(f"Hdg {gmb['heading_deg_from_north']:.0f}°")
-        alt_h = gmb.get("heading_deg_from_north_alt")
-        if alt_h is not None:
-            try:
-                parts.append(f"alt {float(alt_h):.0f}°")
-            except (TypeError, ValueError):
-                pass
-        body = " · ".join(parts) if parts else "Bow/stern or two ends + up to two side points"
-        note = ""
-        if gmb.get("notes"):
-            note = "<br/>" + "; ".join(str(x) for x in gmb["notes"][:3])
-        lab = f"<b>{label}</b> " if label else ""
-        return f'<p class="vd-deck-foot">{lab}{body}{note}</p>'
-
-    _cmain, _cside = st.columns([2.45, 0.95])
-    with _cmain:
-        # Include idx in the key so the coordinate component remounts when changing spots (avoids stale image).
-        click_spot_dim = streamlit_image_coordinates(
-            np.ascontiguousarray(spot_sq.copy()),
-            key=f"spot_dim_idx{idx}_{spot_k}",
-            width=main_px,
-            height=main_px,
-            use_column_width=False,
-            cursor="crosshair",
-        )
-        # Overlay checkboxes — one row directly under the review chip.
-        # Default all to True (checked) so overlays are visible on fresh load.
-        _ov1, _ov2, _ov3, _ov4 = st.columns(4)
-        with _ov1:
-            st.checkbox("Outline", key="vd_ov_hull", value=True)
-        with _ov2:
-            st.checkbox("Direction", key="vd_ov_dir", value=True)
-        with _ov3:
-            st.checkbox("Structures", key="vd_ov_mark", value=True)
-        with _ov4:
-            st.checkbox("Wake", key="vd_ov_wake", value=True)
-    with _cside:
-        click_loc = streamlit_image_coordinates(
-            loc_sq,
-            key=f"loc_vessel_{spot_k}",
-            width=side_px,
-            height=side_px,
-            use_column_width=False,
-            cursor="crosshair",
-        )
-        st.markdown(
-            '<p class="vd-deck-foot">'
-            "<span style='color:#ff6600'>●</span>&nbsp;model detected&emsp;"
-            "<span style='color:#22cc55'>●</span>&nbsp;manually queued&emsp;"
-            "<span style='color:#9944ff'>●</span>&nbsp;manually evaluated&emsp;"
-            "<span style='color:#ffdd00'>■</span>&nbsp;current detection"
-            "</p>",
-            unsafe_allow_html=True,
-        )
-        # Overlay presence legend — items dim when overlay is absent from this chip.
-        _hull_on = bool(_poly) and _show_hull
-        _dir_on = (_arrow_h is not None) and _show_dir
-        _struct_on = bool(_kxc or _kpc) and _show_mark
-        _wake_on = bool(_wk) and _show_wake
-        def _leg_color(active: bool, base: str) -> str:
-            return base if active else "#3a3a4a"
-        def _leg_label(active: bool, text: str) -> str:
-            style = "" if active else "text-decoration:line-through;opacity:0.45;"
-            return f"<span style='{style}'>{text}</span>"
-        st.markdown(
-            "<div style='font-size:0.92rem;color:#c8cdd8;line-height:2.1;margin-top:0.5rem'>"
-            f"<span style='color:{_leg_color(_hull_on, '#00ffdc')};font-size:1.1em'>▬</span>&nbsp;"
-            f"{_leg_label(_hull_on, 'hull boundary')}<br/>"
-            f"<span style='color:{_leg_color(_dir_on, '#3cff60')};font-size:1.2em'>&#8679;</span>&nbsp;"
-            f"{_leg_label(_dir_on, 'heading')}<br/>"
-            f"<span style='color:{_leg_color(_struct_on, '#ff00c8')};font-size:1.1em'>●</span>&nbsp;"
-            f"{_leg_label(_struct_on, 'structures')}<br/>"
-            f"<span style='color:{_leg_color(_wake_on, '#ff9b00')};font-size:1.1em'>─</span>&nbsp;"
-            f"{_leg_label(_wake_on, 'Wake')}<br/>"
-            f"<span style='color:{_leg_color(bool(_bs) and _show_mark, '#78ff50')};font-size:1.1em'>─</span>&nbsp;"
-            f"{_leg_label(bool(_bs) and _show_mark, 'Keel')}"
-            "</div>",
-            unsafe_allow_html=True,
-        )
+    def _meas_cb(state: dict) -> None:
         if af_spot:
             _render_spot_measurements_panel(
                 af_spot=dict(af_spot) if isinstance(af_spot, dict) else {},
                 det_settings=det_settings,
                 labels_path=labels_path,
-                tci_p=tci_p,
+                tci_p=tci_jp2,
                 tci_loaded=tci_loaded,
                 cx=cx,
                 cy=cy,
                 in_expander=False,
+                wake_active=state.get("wake_active", False),
+                hull_active=state.get("hull_active", False),
+                struct_active=state.get("struct_active", False),
+                dir_active=state.get("dir_active", False),
+                marker_metrics=state.get("marker_metrics"),
+                spot_k=spot_k,
+                marker_quad_h1=marker_quad_h1,
+                scw=state.get("scw", 0),
+                sch=state.get("sch", 0),
             )
-        st.markdown("##### From markers")
-        if is_twin:
-            h1t = ""
-            h2t = ""
-            if fp is not None:
-                w1, l1, _fs = fp
-                h1t = f"H1 L×W **{l1:.0f}×{w1:.0f} m** · "
-            else:
-                h1t = "H1: ≥2 markers · "
-            if fp_h2 is not None:
-                w2, l2, _fs2 = fp_h2
-                h2t = f"H2 L×W **{l2:.0f}×{w2:.0f} m**"
-            else:
-                h2t = "H2: ≥2 markers"
-            st.markdown(
-                "<p class=\"vd-deck-foot\">Extent preview when bow, stern, and **two side** points are set.<br/>"
-                f"{h1t}{h2t}</p>",
-                unsafe_allow_html=True,
-            )
-        else:
-            if fp is not None:
-                width_m, length_m, _fss = fp
-                st.markdown(
-                    f"<p class=\"vd-deck-foot\">Footprint <b>{length_m:.0f}×{width_m:.0f} m</b> — "
-                    f"hull from markers (edges through sides) or PCA.</p>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    '<p class="vd-deck-foot">Hull from markers when ≥2 hull points; '
-                    "bow + stern + two **side** points give the edge-aligned rectangle.</p>",
-                    unsafe_allow_html=True,
-                )
-        spot_body2 = ""
-        if is_twin:
-            spot_body2 = _derived_metrics_html(gm, "H1 ")
-            spot_body2 += _derived_metrics_html(gm2, "H2 ")
-        else:
-            spot_body2 = _derived_metrics_html(gm, "") if gm else (
-                '<p class="vd-deck-foot">Pick a role below, then click the large image.</p>'
-            )
-        st.markdown(spot_body2, unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.caption("Bow, stern, sides: pick a role, then click the **large** image (left column).")
-    st.markdown("##### Ships in this chip")
-    v1, v2, v3, v4 = st.columns(4)
-    with v1:
-        if st.button(
-            "One ship",
-            key=f"hull_single_{spot_k}",
-            use_container_width=True,
-            type="primary" if not is_twin else "secondary",
-            help="Single vessel in this chip",
-        ):
-            st.session_state[hull_mode_k] = "single"
-            st.session_state[dim_key] = [
-                m
-                for m in st.session_state.get(dim_key, [])
-                if marker_hull_index(m) == 1
-            ]
-            st.rerun()
-    with v2:
-        if st.button(
-            "Two ships",
-            key=f"hull_twin_{spot_k}",
-            use_container_width=True,
-            type="primary" if is_twin else "secondary",
-            help="Two vessels side by side",
-        ):
-            st.session_state[hull_mode_k] = "twin"
-            st.session_state[active_hull_k] = 1
-            st.rerun()
-    with v3:
-        if st.button(
-            "→ H1",
-            key=f"edit_h1_{spot_k}",
-            use_container_width=True,
-            disabled=not is_twin,
-            type="primary"
-            if is_twin and int(st.session_state.get(active_hull_k, 1)) == 1
-            else "secondary",
-            help="Markers apply to hull 1",
-        ):
-            st.session_state[active_hull_k] = 1
-            st.rerun()
-    with v4:
-        if st.button(
-            "→ H2",
-            key=f"edit_h2_{spot_k}",
-            use_container_width=True,
-            disabled=not is_twin,
-            type="primary"
-            if is_twin and int(st.session_state.get(active_hull_k, 1)) == 2
-            else "secondary",
-            help="Markers apply to hull 2",
-        ):
-            st.session_state[active_hull_k] = 2
-            st.rerun()
-        
-    st.markdown("##### Markers")
-    st.caption("Pick a role, then click the **center** image. **Clear** removes all points.")
-    r_cols = st.columns(6)
-    for i, role in enumerate(MARKER_ROLES):
-        with r_cols[i]:
-            active = st.session_state.get(sel_mk) == role
-            if st.button(
-                MARKER_ROLE_BUTTON_LABELS.get(role, role),
-                key=f"mkpick_{role}_{spot_k}",
-                use_container_width=True,
-                type="primary" if active else "secondary",
-            ):
-                st.session_state[sel_mk] = role
-                st.rerun()
-    with r_cols[5]:
-        if st.button(
-            "Clear",
-            key=f"clr_dim_{spot_k}",
-            use_container_width=True,
-        ):
-            st.session_state[dim_key] = []
-            st.rerun()
-    if is_twin:
-        st.caption(f"Placing on **hull {int(st.session_state.get(active_hull_k, 1))}**.")
-    st.markdown("##### Training flags")
-    _wn1, _wn2 = st.columns(2)
-    with _wn1:
-        st.checkbox(
-            "Wake visible behind the ship",
-            key=wake_vis_k,
-            help="Helps the model learn water patterns.",
+    _panel_result = render_spot_panel(
+        spot_rgb=spot_rgb,
+        loc_vis=loc_vis,
+        source_dict=af_spot if af_spot else {},
+        sc0=sc0, sr0=sr0, scw=scw, sch=sch,
+        gavg=gavg, cx=cx, cy=cy,
+        raster_path=tci_jp2,
+        spot_key=spot_k,
+        dim_key=dim_key,
+        hull_mode_key=hull_mode_k,
+        active_hull_key=active_hull_k,
+        no_wake_key=no_wake_key,
+        cloud_key=cloud_partial_k,
+        sel_mk_key=sel_mk,
+        zoom_key="vd_review_zoom_m",
+        ov_prefix="vd",
+        marker_col_off=float(sc0),
+        marker_row_off=float(sr0),
+        interactive_locator=True,
+        render_measurements=_meas_cb,
+        footprint=fp,
+        det_id_display=spot_k[:12],
+    )
+
+    _poly = _panel_result.overlay_geom.hull_polygon_crop
+    _kxc = _panel_result.overlay_geom.keypoints_xy_conf
+    _kpc = _panel_result.overlay_geom.keypoints_crop
+    _bs = _panel_result.overlay_geom.bow_stern_segment_crop
+    _wk = _panel_result.overlay_geom.wake_polyline_crop
+    is_twin = _panel_result.is_twin
+
+    def _vd_review_go_prev() -> None:
+        st.session_state.idx = max(0, int(st.session_state.idx) - 1)
+
+    def _vd_review_go_next() -> None:
+        st.session_state.idx = int(st.session_state.idx) + 1
+
+    def _vd_review_go_skip() -> None:
+        pool = st.session_state.get("detector_candidates") or []
+        i = int(st.session_state.idx)
+        if i < 0 or i >= len(pool):
+            return
+        cxi, cyi, _sc = pool[i]
+        st.session_state.pending_locator_candidates = remove_pending_near(
+            st.session_state.pending_locator_candidates,
+            float(cxi),
+            float(cyi),
         )
-    with _wn2:
-        st.checkbox(
-            "Partly hidden by cloud",
-            key=cloud_partial_k,
-            help="Marks a harder example.",
+        st.session_state.idx = i + 1
+
+    _nc = _panel_result.nav_columns
+    with _nc[0]:
+        st.button(
+            "← Back",
+            disabled=idx <= 0,
+            use_container_width=True,
+            key="vd_review_spot_back",
+            on_click=_vd_review_go_prev,
         )
-    if click_spot_dim is not None:
-        sdd = (
-            f"{click_spot_dim.get('unix_time')}|{click_spot_dim.get('x')}|"
-            f"{click_spot_dim.get('y')}"
+    with _nc[1]:
+        st.markdown(
+            f"<div style='text-align:center;line-height:2.4;font-size:0.75rem;color:#888'>"
+            f"{idx + 1} / {n}</div>",
+            unsafe_allow_html=True,
         )
-        sk_last = f"_last_spot_dim_{spot_k}"
-        if st.session_state.get(sk_last) != sdd:
-            xy_sp = click_square_letterbox_to_original_xy(click_spot_dim, spot_lb_meta)
-            if xy_sp is not None:
-                role_sp = str(st.session_state.get(sel_mk, "bow"))
-                hi = (
-                    int(st.session_state.get(active_hull_k, 1))
-                    if st.session_state.get(hull_mode_k) == "twin"
-                    else 1
-                )
-                entry: dict = {
-                    "role": role_sp,
-                    "x": float(xy_sp[0]),
-                    "y": float(xy_sp[1]),
-                }
-                if hi == 2:
-                    entry["hull"] = 2
-                cur = list(st.session_state.get(dim_key, []))
+    with _nc[2]:
+        st.button(
+            "Next →",
+            disabled=idx >= n - 1,
+            use_container_width=True,
+            key="vd_review_spot_next",
+            on_click=_vd_review_go_next,
+        )
+    with _nc[6]:
+        st.button(
+            "Skip",
+            use_container_width=True,
+            key="vd_review_spot_skip_main",
+            help="Next spot without saving (works on the last spot too — ends the batch).",
+            on_click=_vd_review_go_skip,
+        )
 
-                def _strip_hull_roles(roles: frozenset[str]) -> list:
-                    return [
-                        m
-                        for m in cur
-                        if not (
-                            isinstance(m, dict)
-                            and marker_hull_index(m) == hi
-                            and str(m.get("role")) in roles
-                        )
-                    ]
-
-                if role_sp == "side":
-                    cur.append(entry)
-                    non_side = [
-                        m
-                        for m in cur
-                        if not (
-                            isinstance(m, dict)
-                            and marker_hull_index(m) == hi
-                            and str(m.get("role")) in SIDE_LIKE_ROLES
-                        )
-                    ]
-                    side_run = [
-                        m
-                        for m in cur
-                        if (
-                            isinstance(m, dict)
-                            and marker_hull_index(m) == hi
-                            and str(m.get("role")) in SIDE_LIKE_ROLES
-                        )
-                    ]
-                    st.session_state[dim_key] = non_side + side_run[-2:]
-                elif role_sp == "end":
-                    cur = _strip_hull_roles(frozenset({"bow", "stern"}))
-                    cur.append(entry)
-                    non_end = [
-                        m
-                        for m in cur
-                        if not (
-                            isinstance(m, dict)
-                            and marker_hull_index(m) == hi
-                            and str(m.get("role")) == "end"
-                        )
-                    ]
-                    end_run = [
-                        m
-                        for m in cur
-                        if (
-                            isinstance(m, dict)
-                            and marker_hull_index(m) == hi
-                            and str(m.get("role")) == "end"
-                        )
-                    ]
-                    st.session_state[dim_key] = non_end + end_run[-2:]
-                else:
-                    if role_sp in ("bow", "stern", "bridge"):
-                        cur = _strip_hull_roles(frozenset({"end"}))
-                    cur = [
-                        m
-                        for m in cur
-                        if not (
-                            isinstance(m, dict)
-                            and m.get("role") == role_sp
-                            and marker_hull_index(m) == hi
-                        )
-                    ]
-                    cur.append(entry)
-                    st.session_state[dim_key] = cur
-            st.session_state[sk_last] = sdd
-            st.rerun()
-
+    click_loc = _panel_result.click_locator
+    loc_lb_meta = _panel_result.loc_lb_meta
     if click_loc is not None:
         ut = click_loc.get("unix_time")
         dedupe = f"{tci_loaded}|{idx}|{ut}|{click_loc.get('x')}|{click_loc.get('y')}"
         if st.session_state.get("_last_manual_locator_save") != dedupe:
             xy = click_square_letterbox_to_original_xy(click_loc, loc_lb_meta)
             if xy is not None:
-                cx_m = lc0 + float(xy[0])
-                cy_m = lr0 + float(xy[1])
+                _loc_sx = float(lcw) / float(loc_lb_meta.orig_w) if loc_lb_meta.orig_w > 0 else 1.0
+                _loc_sy = float(lch) / float(loc_lb_meta.orig_h) if loc_lb_meta.orig_h > 0 else 1.0
+                cx_m = lc0 + float(xy[0]) * _loc_sx
+                cy_m = lr0 + float(xy[1]) * _loc_sy
                 before = len(st.session_state.pending_locator_candidates)
                 new_pending, skip_loc = append_locator_pick_to_pending(
                     st.session_state.pending_locator_candidates,
@@ -3712,131 +3693,70 @@ def _render_review_deck(
     conf_k = f"label_conf_{spot_k}"
     if conf_k not in st.session_state:
         st.session_state[conf_k] = "high"
-
-    # on_click runs before the rest of the script on the next run — avoids streamlit_image_coordinates
-    # / widget order quirks where footer clicks did not advance idx reliably.
-    def _vd_review_go_prev() -> None:
-        st.session_state.idx = max(0, int(st.session_state.idx) - 1)
-
-    def _vd_review_go_next() -> None:
-        st.session_state.idx = int(st.session_state.idx) + 1
-
-    def _vd_review_go_skip() -> None:
-        pool = st.session_state.get("detector_candidates") or []
-        i = int(st.session_state.idx)
-        if i < 0 or i >= len(pool):
-            return
-        cxi, cyi, _sc = pool[i]
-        st.session_state.pending_locator_candidates = remove_pending_near(
-            st.session_state.pending_locator_candidates,
-            float(cxi),
-            float(cyi),
-        )
-        st.session_state.idx = i + 1
-
-    st.markdown('<div class="vd-review-footer-anchor"></div>', unsafe_allow_html=True)
-    st.markdown("---")
-    fb1, fb2, fb3, fb4, fb5, fb6, fb7 = st.columns([0.5, 0.4, 0.5, 0.5, 1.05, 1.05, 1.05])
-    with fb1:
-        st.button(
-            "← Back",
-            disabled=idx <= 0,
-            use_container_width=True,
-            key="vd_review_spot_back",
-            on_click=_vd_review_go_prev,
-        )
-    with fb2:
-        st.markdown(
-            f"<div style='text-align:center;line-height:2.4;font-size:0.9rem;color:#888'>"
-            f"{idx + 1} / {n}</div>",
-            unsafe_allow_html=True,
-        )
-    with fb3:
-        st.button(
-            "Next →",
-            disabled=idx >= n - 1,
-            use_container_width=True,
-            key="vd_review_spot_next",
-            on_click=_vd_review_go_next,
-        )
-    with fb4:
-        st.button(
-            "Skip",
-            use_container_width=True,
-            key="vd_review_spot_skip_main",
-            help="Next spot without saving (works on the last spot too — ends the batch).",
-            on_click=_vd_review_go_skip,
-        )
-    with fb5:
+    cur_conf = str(st.session_state.get(conf_k, "high")).lower()
+    _cloud_osc = bool(st.session_state.get(cloud_partial_k, False))
+    _cr1, _cr2, _cr3, _cr4, _cr5 = st.columns(5)
+    with _cr1:
+        st.markdown("##### Classification")
+    with _cr2:
         if st.button(
-            "Ship",
-            key=f"lbl_vessel_{idx}",
-            use_container_width=True,
-            type="primary",
-        ):
-            _commit_review_label(
-                ckey="vessel",
-                idx=idx,
-                cx=cx,
-                cy=cy,
-                score=score,
-                spot_k=spot_k,
-                dim_key=dim_key,
-                tci_loaded=tci_loaded,
-                meta=meta,
-                labels_path=labels_path,
-                tci_p=tci_p,
-                sc0=sc0,
-                sr0=sr0,
-                fp=fp,
-            )
-    with fb6:
-        if st.button(
-            "Not a ship",
-            key=f"lbl_not_vessel_{idx}",
+            "Cloud Obscured",
+            key=f"cloud_osc_btn_{spot_k}",
+            type="primary" if _cloud_osc else "secondary",
             use_container_width=True,
         ):
-            _commit_review_label(
-                ckey="not_vessel",
-                idx=idx,
-                cx=cx,
-                cy=cy,
-                score=score,
-                spot_k=spot_k,
-                dim_key=dim_key,
-                tci_loaded=tci_loaded,
-                meta=meta,
-                labels_path=labels_path,
-                tci_p=tci_p,
-                sc0=sc0,
-                sr0=sr0,
-                fp=fp,
-            )
-    with fb7:
+            st.session_state[cloud_partial_k] = not _cloud_osc
+            st.rerun()
+    with _cr3:
         if st.button(
-            "Unsure",
-            key=f"lbl_ambiguous_{idx}",
+            "High confidence",
+            key=f"conf_hi_{spot_k}",
+            type="primary" if cur_conf == "high" else "secondary",
             use_container_width=True,
         ):
-            _commit_review_label(
-                ckey="ambiguous",
-                idx=idx,
-                cx=cx,
-                cy=cy,
-                score=score,
-                spot_k=spot_k,
-                dim_key=dim_key,
-                tci_loaded=tci_loaded,
-                meta=meta,
-                labels_path=labels_path,
-                tci_p=tci_p,
-                sc0=sc0,
-                sr0=sr0,
-                fp=fp,
-            )
-
-    st.markdown("---")
-    st.caption("Cloud, land, confidence — **Skip** is on the main bar above.")
+            st.session_state[conf_k] = "high"
+            st.rerun()
+    with _cr4:
+        if st.button(
+            "Medium confidence",
+            key=f"conf_med_{spot_k}",
+            type="primary" if cur_conf == "medium" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[conf_k] = "medium"
+            st.rerun()
+    with _cr5:
+        if st.button(
+            "Low confidence",
+            key=f"conf_lo_{spot_k}",
+            type="primary" if cur_conf == "low" else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state[conf_k] = "low"
+            st.rerun()
+    _cl1, _cl2, _cl3, _cl4, _cl5 = st.columns(5)
+    _cls_kw = dict(
+        idx=idx, cx=cx, cy=cy, score=score, spot_k=spot_k,
+        dim_key=dim_key, tci_loaded=tci_loaded, meta=meta,
+        labels_path=labels_path, tci_p=tci_p, sc0=sc0, sr0=sr0, fp=fp,
+        wake_active=bool(_wk), hull_active=bool(_poly),
+        struct_active=bool(_kxc or _kpc), dir_active=bool(_bs),
+    )
+    with _cl1:
+        if st.button("Vessel", key=f"lbl_vessel_{idx}", use_container_width=True):
+            _commit_review_label(ckey="vessel", **_cls_kw)
+    with _cl2:
+        if st.button("Water", key=f"lbl_water_{idx}", use_container_width=True):
+            _commit_review_label(ckey="water", **_cls_kw)
+    with _cl3:
+        if st.button("Unsure", key=f"lbl_ambiguous_{idx}", use_container_width=True):
+            _commit_review_label(ckey="ambiguous", **_cls_kw)
+    with _cl4:
+        if st.button("Cloud", key=f"lbl_cloud_{idx}", use_container_width=True):
+            _commit_review_label(ckey="cloud", **_cls_kw)
+    with _cl5:
+        if st.button("Land", key=f"lbl_land_{idx}", use_container_width=True):
+            _commit_review_label(ckey="land", **_cls_kw)
 
     # ── Cloud mask QC for this chip ──────────────────────────────────────
     try:
@@ -3856,117 +3776,10 @@ def _render_review_deck(
                 brightness_threshold=float(_cm_bt_qc),
                 variance_threshold=float(_cm_vt_qc),
             )
-            _cm_label = "🔴 **Would skip** (classified as 100% cloud)" if _cm_stats["would_skip"] else "🟢 **Would process** (not 100% cloud)"
-            st.markdown(f"**Cloud mask result:** {_cm_label}")
-            _cm_c1, _cm_c2 = st.columns(2)
-            with _cm_c1:
-                _bm_margin = _cm_stats["margin_brightness"]
-                _bm_color = "🔴" if _bm_margin > 0 else "🟢"
-                st.metric(
-                    "Brightness (mean)",
-                    f"{_cm_stats['brightness_mean']:.0f}",
-                    delta=f"{_bm_margin:+.0f} vs threshold",
-                    delta_color="inverse",
-                    help="Mean BT.601 luminance (0–255). Threshold set in ☁ Cloud mask QC.",
-                )
-            with _cm_c2:
-                _pv_margin = _cm_stats["margin_variance"]
-                st.metric(
-                    "Pixel variance",
-                    f"{_cm_stats['pixel_variance']:.0f}",
-                    delta=f"{_pv_margin:+.0f} vs threshold",
-                    delta_color="normal",
-                    help="Variance of luminance. Low = uniform (cloud-like). Threshold set in ☁ Cloud mask QC.",
-                )
-            if _cm_stats["would_skip"]:
-                st.warning(
-                    "⚠️ With current thresholds this chip would have been **skipped** "
-                    "during tile inference. If this is wrong, raise the brightness "
-                    "threshold or lower the variance threshold in **☁ Cloud mask QC**."
-                )
     except Exception as _cm_qc_err:
-        st.caption(f"Cloud QC unavailable: {_cm_qc_err}")
+        pass
 
-    st.markdown("---")
-    mx1, mx2 = st.columns(2)
-    with mx1:
-        if st.button(
-            "Cloud",
-            key=f"lbl_cloud_{idx}",
-            use_container_width=True,
-        ):
-            _commit_review_label(
-                ckey="cloud",
-                idx=idx,
-                cx=cx,
-                cy=cy,
-                score=score,
-                spot_k=spot_k,
-                dim_key=dim_key,
-                tci_loaded=tci_loaded,
-                meta=meta,
-                labels_path=labels_path,
-                tci_p=tci_p,
-                sc0=sc0,
-                sr0=sr0,
-                fp=fp,
-            )
-    with mx2:
-        if st.button(
-            "Land",
-            key=f"lbl_land_{idx}",
-            use_container_width=True,
-        ):
-            _commit_review_label(
-                ckey="land",
-                idx=idx,
-                cx=cx,
-                cy=cy,
-                score=score,
-                spot_k=spot_k,
-                dim_key=dim_key,
-                tci_loaded=tci_loaded,
-                meta=meta,
-                labels_path=labels_path,
-                tci_p=tci_p,
-                sc0=sc0,
-                sr0=sr0,
-                fp=fp,
-            )
-    st.markdown("**How sure are you?** (only matters if you did not pick **Unsure**)")
-    ch1, ch2, ch3, _ = st.columns(4)
-    cur_conf = str(st.session_state.get(conf_k, "high")).lower()
-    with ch1:
-        if st.button(
-            "High",
-            key=f"conf_hi_{spot_k}",
-            type="primary" if cur_conf == "high" else "secondary",
-        ):
-            st.session_state[conf_k] = "high"
-            st.rerun()
-    with ch2:
-        if st.button(
-            "Medium",
-            key=f"conf_med_{spot_k}",
-            type="primary" if cur_conf == "medium" else "secondary",
-        ):
-            st.session_state[conf_k] = "medium"
-            st.rerun()
-    with ch3:
-        if st.button(
-            "Low",
-            key=f"conf_lo_{spot_k}",
-            type="primary" if cur_conf == "low" else "secondary",
-        ):
-            st.session_state[conf_k] = "low"
-            st.rerun()
-
-    st.divider()
-    st.markdown("**Queue / AquaForge**")
-    st.caption(
-        "Queue order is **AquaForge vessel confidence** (highest first). "
-        "**Vessel confidence** (as a %) is in the captions next to the locator above."
-    )
+    pass  # confidence buttons moved to Detection classification heading row
 
 
 def _commit_review_label(
@@ -3985,6 +3798,10 @@ def _commit_review_label(
     sc0: int,
     sr0: int,
     fp: tuple[float, float, str] | None,
+    wake_active: bool = False,
+    hull_active: bool = False,
+    struct_active: bool = False,
+    dir_active: bool = False,
 ) -> None:
     cx_save = float(cx)
     cy_save = float(cy)
@@ -4013,24 +3830,33 @@ def _commit_review_label(
             ) = read_locator_and_spot_rgb_matching_stretch(
                 tci_p, cx, cy, chip_px, locator_px
             )
-            mk_outline = st.session_state.get(dim_key, [])
+            mk_outline_raw = st.session_state.get(dim_key, [])
+            mk_outline = (
+                _markers_to_crop(mk_outline_raw, float(sc_rd), float(sr_rd))
+                if isinstance(mk_outline_raw, list)
+                else []
+            )
             mq = (
                 quad_crop_from_dimension_markers(mk_outline, hull_index=1)
-                if isinstance(mk_outline, list)
+                if mk_outline
                 else None
             )
             if mq is not None and len(mq) != 4:
                 mq = None
-            cx_save, cy_save = fullres_xy_from_spot_red_outline_aabb_center(
-                spot_rgb,
-                sc_rd,
-                sr_rd,
-                cx,
-                cy,
-                meters_per_pixel=gavg,
-                marker_quad_crop=mq,
-                manual_quad_crop=None,
-            )
+            # Skip red-outline refinement for manually queued spots — trust
+            # the user's click position; the heuristic can drift to wakes or
+            # glint and introduce a systematic offset.
+            if score != LOCATOR_MANUAL_SCORE:
+                cx_save, cy_save = fullres_xy_from_spot_red_outline_aabb_center(
+                    spot_rgb,
+                    sc_rd,
+                    sr_rd,
+                    cx,
+                    cy,
+                    meters_per_pixel=gavg,
+                    marker_quad_crop=mq,
+                    manual_quad_crop=None,
+                )
             spot_sc = int(sc_rd)
             spot_sr = int(sr_rd)
             qh1, _qsrc = vessel_quad_for_label(
@@ -4049,6 +3875,31 @@ def _commit_review_label(
             cx_save = float(cx)
             cy_save = float(cy)
 
+    # ------------------------------------------------------------------
+    # Land: bare-minimum record — just mark the location so the system
+    # never looks here again.  No model loading, no metrics, no extras.
+    # ------------------------------------------------------------------
+    if ckey == "land":
+        append_review(
+            labels_path,
+            tci_path=tci_loaded,
+            cx_full=cx_save,
+            cy_full=cy_save,
+            review_category="land",
+            scl_path=(meta or {}).get("scl_path"),
+            extra={
+                "score": score,
+                "candidate_index": idx,
+                "cx_candidate": float(cx),
+                "cy_candidate": float(cy),
+            },
+        )
+        st.session_state.pending_locator_candidates = remove_pending_near(
+            st.session_state.pending_locator_candidates, cx, cy
+        )
+        st.session_state.idx = idx + 1
+        st.rerun()
+
     _dset_fp = load_aquaforge_settings(ROOT)
     _af_pred_sv = get_cached_aquaforge_predictor(ROOT, _dset_fp)
     sv_comb = float(
@@ -4065,12 +3916,31 @@ def _commit_review_label(
     if _af_onx_save is not None and _af_onx_save.is_file():
         _fp_paths.append(_af_onx_save)
     fpid = model_run_fingerprint(*_fp_paths)
-    extra: dict = {"score": score, "candidate_index": idx}
-    wake_k = f"wake_vis_{spot_k}"
-    extra["wake_present"] = bool(st.session_state.get(wake_k, False))
-    extra["partial_cloud_obscuration"] = bool(
-        st.session_state.get(f"cloud_partial_{spot_k}", False)
-    )
+    extra: dict = {
+        "score": score,
+        "candidate_index": idx,
+        "cx_candidate": float(cx),
+        "cy_candidate": float(cy),
+    }
+    _is_negative = ckey in ("water", "cloud")
+    if _is_negative:
+        hull_active = False
+        struct_active = False
+        dir_active = False
+        wake_active = False
+    _mk_commit = st.session_state.get(dim_key, [])
+    if not isinstance(_mk_commit, list):
+        _mk_commit = []
+    if _is_negative or st.session_state.get(f"_vd_no_wake_{spot_k}", False):
+        extra["wake_present"] = False
+    else:
+        extra["wake_present"] = wake_active or any(
+            isinstance(m, dict) and m.get("role") == "wake" for m in _mk_commit
+        )
+    if not _is_negative:
+        extra["partial_cloud_obscuration"] = bool(
+            st.session_state.get(f"cloud_partial_{spot_k}", False)
+        )
     attach_label_identity_extra(extra, tci_loaded, cx_save, cy_save)
     conf_k = f"label_conf_{spot_k}"
     if ckey != "ambiguous":
@@ -4079,127 +3949,151 @@ def _commit_review_label(
         ).lower()
     if score == LOCATOR_MANUAL_SCORE:
         extra["manual_locator"] = True
-    if fp is not None:
+    if fp is not None and not _is_negative:
         wm, lm, fs = fp
         extra["estimated_width_m"] = wm
         extra["estimated_length_m"] = lm
         extra["footprint_source"] = fs
-    mk_save = st.session_state.get(dim_key, [])
+    mk_save: list = []
     gmx: dict | None = None
     gmx2: dict | None = None
-    if isinstance(mk_save, list) and mk_save:
-        ser2 = serialize_markers_for_json(mk_save)
-        if ser2:
-            extra["dimension_markers"] = ser2
-        try:
-            gmx = metrics_from_markers(
-                mk_save,
-                sc0,
-                sr0,
-                raster_path=tci_p,
-                hull_index=1,
-                wake_present=bool(st.session_state.get(wake_k, False)),
-            )
-        except Exception:
-            gmx = None
-        if gmx:
-            if gmx.get("length_m") is not None:
-                extra["graphic_length_m"] = gmx["length_m"]
-            if gmx.get("width_m") is not None:
-                extra["graphic_width_m"] = gmx["width_m"]
-            if gmx.get("heading_deg_from_north") is not None:
-                extra["heading_deg_from_north"] = gmx["heading_deg_from_north"]
-            if gmx.get("heading_deg_from_north_alt") is not None:
-                extra["heading_deg_from_north_alt"] = gmx["heading_deg_from_north_alt"]
-            if gmx.get("heading_source"):
-                extra["heading_source"] = gmx["heading_source"]
-        if st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin":
+    if not _is_negative:
+        mk_save_raw = st.session_state.get(dim_key, [])
+        mk_save = (
+            _markers_to_crop(mk_save_raw, float(sc0), float(sr0))
+            if isinstance(mk_save_raw, list)
+            else []
+        )
+        if mk_save:
+            ser2 = serialize_markers_for_json(mk_save)
+            if ser2:
+                extra["dimension_markers"] = ser2
+                extra["marker_origin_col"] = int(sc0)
+                extra["marker_origin_row"] = int(sr0)
             try:
-                gmx2 = metrics_from_markers(
+                gmx = metrics_from_markers(
                     mk_save,
                     sc0,
                     sr0,
                     raster_path=tci_p,
-                    hull_index=2,
-                    wake_present=bool(st.session_state.get(wake_k, False)),
+                    hull_index=1,
+                    wake_present=extra["wake_present"],
                 )
             except Exception:
-                gmx2 = None
-            if gmx2:
-                if gmx2.get("length_m") is not None:
-                    extra["graphic_length_m_hull2"] = gmx2["length_m"]
-                if gmx2.get("width_m") is not None:
-                    extra["graphic_width_m_hull2"] = gmx2["width_m"]
-                if gmx2.get("heading_deg_from_north") is not None:
-                    extra["heading_deg_from_north_hull2"] = gmx2[
-                        "heading_deg_from_north"
-                    ]
-                if gmx2.get("heading_deg_from_north_alt") is not None:
-                    extra["heading_deg_from_north_alt_hull2"] = gmx2[
-                        "heading_deg_from_north_alt"
-                    ]
-                if gmx2.get("heading_source"):
-                    extra["heading_source_hull2"] = gmx2["heading_source"]
-    merge_keel_heading_into_extra(
-        extra,
-        quad_crop=quad_crop_h1,
-        col_off=spot_sc,
-        row_off=spot_sr,
-        raster_path=tci_p,
-        markers=mk_save if isinstance(mk_save, list) else None,
-        hull2=False,
-        hull_index=1,
-    )
-    if st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin" and isinstance(
-        mk_save, list
-    ):
-        mq2 = quad_crop_from_dimension_markers(mk_save, hull_index=2)
-        if mq2 is not None and len(mq2) == 4:
-            merge_keel_heading_into_extra(
-                extra,
-                quad_crop=mq2,
-                col_off=spot_sc,
-                row_off=spot_sr,
-                raster_path=tci_p,
-                markers=mk_save,
-                hull2=True,
-                hull_index=2,
-            )
-    enrich_extra_hull_aspect_ratio(
-        extra,
-        graphic_length_m=gmx.get("length_m") if gmx else None,
-        graphic_width_m=gmx.get("width_m") if gmx else None,
-        footprint_length_m=float(fp[1]) if fp is not None else None,
-        footprint_width_m=float(fp[0]) if fp is not None else None,
-    )
-    if ckey == "vessel" and st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin":
-        extra[TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY] = True
+                gmx = None
+            if gmx:
+                if gmx.get("length_m") is not None:
+                    extra["graphic_length_m"] = gmx["length_m"]
+                if gmx.get("width_m") is not None:
+                    extra["graphic_width_m"] = gmx["width_m"]
+                if gmx.get("heading_deg_from_north") is not None:
+                    extra["heading_deg_from_north"] = gmx["heading_deg_from_north"]
+                if gmx.get("heading_deg_from_north_alt") is not None:
+                    extra["heading_deg_from_north_alt"] = gmx["heading_deg_from_north_alt"]
+                if gmx.get("heading_source"):
+                    extra["heading_source"] = gmx["heading_source"]
+            if st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin":
+                try:
+                    gmx2 = metrics_from_markers(
+                        mk_save,
+                        sc0,
+                        sr0,
+                        raster_path=tci_p,
+                        hull_index=2,
+                        wake_present=extra["wake_present"],
+                    )
+                except Exception:
+                    gmx2 = None
+                if gmx2:
+                    if gmx2.get("length_m") is not None:
+                        extra["graphic_length_m_hull2"] = gmx2["length_m"]
+                    if gmx2.get("width_m") is not None:
+                        extra["graphic_width_m_hull2"] = gmx2["width_m"]
+                    if gmx2.get("heading_deg_from_north") is not None:
+                        extra["heading_deg_from_north_hull2"] = gmx2[
+                            "heading_deg_from_north"
+                        ]
+                    if gmx2.get("heading_deg_from_north_alt") is not None:
+                        extra["heading_deg_from_north_alt_hull2"] = gmx2[
+                            "heading_deg_from_north_alt"
+                        ]
+                    if gmx2.get("heading_source"):
+                        extra["heading_source_hull2"] = gmx2["heading_source"]
+        merge_keel_heading_into_extra(
+            extra,
+            quad_crop=quad_crop_h1,
+            col_off=spot_sc,
+            row_off=spot_sr,
+            raster_path=tci_p,
+            markers=mk_save if isinstance(mk_save, list) else None,
+            hull2=False,
+            hull_index=1,
+        )
+        if st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin" and isinstance(
+            mk_save, list
+        ):
+            mq2 = quad_crop_from_dimension_markers(mk_save, hull_index=2)
+            if mq2 is not None and len(mq2) == 4:
+                merge_keel_heading_into_extra(
+                    extra,
+                    quad_crop=mq2,
+                    col_off=spot_sc,
+                    row_off=spot_sr,
+                    raster_path=tci_p,
+                    markers=mk_save,
+                    hull2=True,
+                    hull_index=2,
+                )
+        enrich_extra_hull_aspect_ratio(
+            extra,
+            graphic_length_m=gmx.get("length_m") if gmx else None,
+            graphic_width_m=gmx.get("width_m") if gmx else None,
+            footprint_length_m=float(fp[1]) if fp is not None else None,
+            footprint_width_m=float(fp[0]) if fp is not None else None,
+        )
+        if ckey == "vessel" and st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin":
+            extra[TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY] = True
     af_spot_save = st.session_state.get(f"vd_aquaforge_spot_{spot_k}", {}) or {}
     _af_conf_save = af_spot_save.get("aquaforge_confidence")
     if _af_conf_save is None:
         _af_conf_save = float(sv_comb)
 
-    # --- Wake polyline from manual markers (supports curved/turning wakes) ---
-    _mk_wake = st.session_state.get(dim_key, [])
-    if isinstance(_mk_wake, list):
-        _wp_list_save = wake_polyline_marker_dicts(_mk_wake, hull_index=1)
-        if _wp_list_save is not None:
-            extra["wake_polyline_crop_xy"] = [
-                [float(m["x"]), float(m["y"])] for m in _wp_list_save
-            ]
-            # Keep legacy 2-point keys for any downstream reader
-            extra["wake_manual_segment_crop"] = [
-                [float(_wp_list_save[0]["x"]), float(_wp_list_save[0]["y"])],
-                [float(_wp_list_save[-1]["x"]), float(_wp_list_save[-1]["y"])],
-            ]
+    if not _is_negative:
+        # --- Wake polyline from manual markers (supports curved/turning wakes) ---
+        _mk_wake_crop = _markers_to_crop(
+            st.session_state.get(dim_key, []), float(sc0), float(sr0)
+        )
+        if _mk_wake_crop:
+            _wp_list_save = wake_polyline_marker_dicts(_mk_wake_crop, hull_index=1)
+            if _wp_list_save is not None:
+                extra["wake_polyline_crop_xy"] = [
+                    [float(m["x"]), float(m["y"])] for m in _wp_list_save
+                ]
+                extra["wake_manual_segment_crop"] = [
+                    [float(_wp_list_save[0]["x"]), float(_wp_list_save[0]["y"])],
+                    [float(_wp_list_save[-1]["x"]), float(_wp_list_save[-1]["y"])],
+                ]
 
-    # --- Hull polygon (full-res) — computed by model, not yet persisted ---
-    _hull_poly_save = af_spot_save.get("aquaforge_hull_polygon_fullres")
-    if _hull_poly_save is not None:
-        extra["aquaforge_hull_polygon_fullres"] = _hull_poly_save
-    _hull_poly_crop = af_spot_save.get("aquaforge_hull_polygon_crop")
-    if _hull_poly_crop is not None:
-        extra["aquaforge_hull_polygon_crop"] = _hull_poly_crop
+        # --- Hull polygon (full-res) — computed by model ---
+        _hull_poly_save = af_spot_save.get("aquaforge_hull_polygon_fullres")
+        if _hull_poly_save is not None:
+            extra["aquaforge_hull_polygon_fullres"] = _hull_poly_save
+        _hull_poly_crop = af_spot_save.get("aquaforge_hull_polygon_crop")
+        if _hull_poly_crop is not None:
+            extra["aquaforge_hull_polygon_crop"] = _hull_poly_crop
+
+        # --- Model overlay geometry (persisted for training review rendering) ---
+        for _ovk in (
+            "aquaforge_keypoints_xy_conf_crop",
+            "aquaforge_keypoints_crop",
+            "aquaforge_landmarks_xy_fullres",
+            "aquaforge_bow_stern_segment_crop",
+            "aquaforge_wake_segment_fullres",
+            "aquaforge_wake_segment_crop",
+        ):
+            _ovv = af_spot_save.get(_ovk)
+            if _ovv is not None:
+                extra[_ovk] = _ovv
 
     # --- Per-chip pixel statistics ---
     try:
@@ -4231,41 +4125,88 @@ def _commit_review_label(
     except Exception:
         pass
 
-    extra = enrich_extra_with_predictions(
-        extra,
-        model_run_id=fpid,
-        aquaforge_confidence=_af_conf_save,
-        aquaforge_length_m=af_spot_save.get("aquaforge_length_m"),
-        aquaforge_width_m=af_spot_save.get("aquaforge_width_m"),
-        aquaforge_aspect_ratio=af_spot_save.get("aquaforge_aspect_ratio"),
-        aquaforge_heading_keypoint_deg=af_spot_save.get("aquaforge_heading_keypoint_deg"),
-        aquaforge_heading_wake_deg=af_spot_save.get("aquaforge_heading_wake_deg"),
-        aquaforge_heading_fused_deg=af_spot_save.get("aquaforge_heading_fused_deg"),
-        aquaforge_heading_fusion_source=af_spot_save.get("aquaforge_heading_fusion_source"),
-        aquaforge_detector_snapshot=af_spot_save.get("detector"),
-        aquaforge_heading_wake_heuristic_deg=af_spot_save.get(
-            "aquaforge_heading_wake_heuristic_deg"
-        ),
-        aquaforge_heading_wake_model_deg=af_spot_save.get("aquaforge_heading_wake_model_deg"),
-        aquaforge_wake_combine_source=af_spot_save.get("aquaforge_wake_combine_source"),
-        aquaforge_landmark_bow_confidence=af_spot_save.get("aquaforge_landmark_bow_confidence"),
-        aquaforge_landmark_stern_confidence=af_spot_save.get(
-            "aquaforge_landmark_stern_confidence"
-        ),
-        aquaforge_landmark_heading_trust=af_spot_save.get("aquaforge_landmark_heading_trust"),
-        aquaforge_chroma_speed_kn=af_spot_save.get("aquaforge_chroma_speed_kn"),
-        aquaforge_chroma_heading_deg=af_spot_save.get("aquaforge_chroma_heading_deg"),
-        aquaforge_chroma_pnr=af_spot_save.get("aquaforge_chroma_pnr"),
-        aquaforge_chroma_agrees_with_model=af_spot_save.get("aquaforge_chroma_agrees_with_model"),
-    )
-    # Persist spectral signature directly into extra (not via enrich_extra_with_predictions
-    # since it's a list, not a scalar).
-    if af_spot_save.get("aquaforge_spectral_measured") is not None:
-        extra["aquaforge_spectral_measured"] = af_spot_save["aquaforge_spectral_measured"]
-    if af_spot_save.get("aquaforge_spectral_pred") is not None:
-        extra["aquaforge_spectral_pred"] = af_spot_save["aquaforge_spectral_pred"]
-    if af_spot_save.get("aquaforge_material_hint") is not None:
-        extra["aquaforge_material_hint"] = af_spot_save["aquaforge_material_hint"]
+    if _is_negative:
+        extra["aquaforge_confidence"] = _af_conf_save
+        extra["model_run_id"] = fpid
+        # Save spectral evidence for water/cloud negatives (material training data).
+        for _neg_k in (
+            "aquaforge_spectral_measured", "aquaforge_spectral_pred",
+            "aquaforge_material_hint", "aquaforge_material_confidence",
+            "aquaforge_spectral_quality", "aquaforge_fp_spectral_flag",
+            "aquaforge_spectral_anomaly_score", "aquaforge_spectral_consistency",
+            "aquaforge_atmospheric_quality", "aquaforge_sun_glint_flag",
+            "aquaforge_vegetation_flag", "aquaforge_mat_cat_label",
+            "aquaforge_mat_cat_confidence",
+            "aquaforge_vessel_material", "aquaforge_vessel_material_confidence",
+        ):
+            _neg_v = af_spot_save.get(_neg_k)
+            if _neg_v is not None:
+                extra[_neg_k] = _neg_v
+    else:
+        extra = enrich_extra_with_predictions(
+            extra,
+            model_run_id=fpid,
+            aquaforge_confidence=_af_conf_save,
+            aquaforge_length_m=af_spot_save.get("aquaforge_length_m"),
+            aquaforge_width_m=af_spot_save.get("aquaforge_width_m"),
+            aquaforge_aspect_ratio=af_spot_save.get("aquaforge_aspect_ratio"),
+            aquaforge_heading_keypoint_deg=af_spot_save.get("aquaforge_heading_keypoint_deg"),
+            aquaforge_hull_heading_a_deg=af_spot_save.get("aquaforge_hull_heading_a_deg"),
+            aquaforge_hull_heading_b_deg=af_spot_save.get("aquaforge_hull_heading_b_deg"),
+            aquaforge_heading_wake_deg=None,
+            aquaforge_heading_fused_deg=af_spot_save.get("aquaforge_heading_fused_deg"),
+            aquaforge_heading_fusion_source=af_spot_save.get("aquaforge_heading_fusion_source"),
+            aquaforge_detector_snapshot=af_spot_save.get("detector"),
+            aquaforge_heading_wake_heuristic_deg=None,
+            aquaforge_heading_wake_model_deg=None,
+            aquaforge_wake_combine_source=None,
+            aquaforge_landmark_bow_confidence=af_spot_save.get("aquaforge_landmark_bow_confidence"),
+            aquaforge_landmark_stern_confidence=af_spot_save.get("aquaforge_landmark_stern_confidence"),
+            aquaforge_landmark_heading_trust=af_spot_save.get("aquaforge_landmark_heading_trust"),
+            aquaforge_chroma_speed_kn=af_spot_save.get("aquaforge_chroma_speed_kn"),
+            aquaforge_chroma_heading_deg=af_spot_save.get("aquaforge_chroma_heading_deg"),
+            aquaforge_chroma_pnr=af_spot_save.get("aquaforge_chroma_pnr"),
+            aquaforge_chroma_agrees_with_model=af_spot_save.get("aquaforge_chroma_agrees_with_model"),
+            aquaforge_chroma_speed_error_kn=af_spot_save.get("aquaforge_chroma_speed_error_kn"),
+            aquaforge_chroma_heading_error_deg=af_spot_save.get("aquaforge_chroma_heading_error_deg"),
+            aquaforge_spectral_quality=af_spot_save.get("aquaforge_spectral_quality"),
+            aquaforge_fp_spectral_flag=af_spot_save.get("aquaforge_fp_spectral_flag"),
+            aquaforge_material_confidence=af_spot_save.get("aquaforge_material_confidence"),
+            aquaforge_spectral_anomaly_score=af_spot_save.get("aquaforge_spectral_anomaly_score"),
+            aquaforge_spectral_consistency=af_spot_save.get("aquaforge_spectral_consistency"),
+            aquaforge_atmospheric_quality=af_spot_save.get("aquaforge_atmospheric_quality"),
+            aquaforge_sun_glint_flag=af_spot_save.get("aquaforge_sun_glint_flag"),
+            aquaforge_vegetation_flag=af_spot_save.get("aquaforge_vegetation_flag"),
+        )
+        _mk_spec = st.session_state.get(f"_vd_marker_spec_{spot_k}")
+        if isinstance(_mk_spec, dict) and _mk_spec.get("spectral_measured") is not None:
+            extra["aquaforge_spectral_measured"] = _mk_spec["spectral_measured"]
+            if _mk_spec.get("material_hint") is not None:
+                extra["aquaforge_material_hint"] = _mk_spec["material_hint"]
+            if af_spot_save.get("aquaforge_spectral_pred") is not None:
+                extra["aquaforge_spectral_pred"] = af_spot_save["aquaforge_spectral_pred"]
+        else:
+            if af_spot_save.get("aquaforge_spectral_measured") is not None:
+                extra["aquaforge_spectral_measured"] = af_spot_save["aquaforge_spectral_measured"]
+            if af_spot_save.get("aquaforge_spectral_pred") is not None:
+                extra["aquaforge_spectral_pred"] = af_spot_save["aquaforge_spectral_pred"]
+            if af_spot_save.get("aquaforge_material_hint") is not None:
+                extra["aquaforge_material_hint"] = af_spot_save["aquaforge_material_hint"]
+            if af_spot_save.get("aquaforge_vessel_material") is not None:
+                extra["aquaforge_vessel_material"] = af_spot_save["aquaforge_vessel_material"]
+            if af_spot_save.get("aquaforge_vessel_material_confidence") is not None:
+                extra["aquaforge_vessel_material_confidence"] = af_spot_save["aquaforge_vessel_material_confidence"]
+        if af_spot_save.get("aquaforge_scl_chip_stats") is not None:
+            extra["aquaforge_scl_chip_stats"] = af_spot_save["aquaforge_scl_chip_stats"]
+    # Material category override from UI selector (applies to all categories).
+    _mat_ov = st.session_state.get(f"_vd_mat_override_{spot_k}", "auto")
+    if _mat_ov and _mat_ov != "auto":
+        extra["human_material_category"] = str(_mat_ov)
+    # Learned mat_cat outputs (saved for both positive and negative reviews).
+    for _mck in ("aquaforge_mat_cat_label", "aquaforge_mat_cat_confidence"):
+        _mcv = af_spot_save.get(_mck)
+        if _mcv is not None and _mck not in extra:
+            extra[_mck] = _mcv
     append_review(
         labels_path,
         tci_path=tci_loaded,
@@ -4275,41 +4216,42 @@ def _commit_review_label(
         scl_path=(meta or {}).get("scl_path"),
         extra=extra,
     )
-    is_twin_fb = st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin"
-    el = float(fp[1]) if fp is not None else 0.0
-    ew = float(fp[0]) if fp is not None else 0.0
-    fsrc = fp[2] if fp is not None else "none"
-    ser_fb = (
-        serialize_markers_for_json(mk_save)
-        if isinstance(mk_save, list) and mk_save
-        else None
-    )
-    gl2 = gmx2.get("length_m") if gmx2 else None
-    gw2 = gmx2.get("width_m") if gmx2 else None
-    notes_fb = ""
-    if is_twin_fb and (gl2 is not None or gw2 is not None):
-        notes_fb = f"hull2 L×W est: {gl2 or '—'} × {gw2 or '—'} m (graphic)"
-    append_vessel_size_feedback(
-        labels_path,
-        tci_path=tci_loaded,
-        cx_full=cx_save,
-        cy_full=cy_save,
-        estimated_length_m=el,
-        estimated_width_m=ew,
-        footprint_source=str(fsrc),
-        scl_path=(meta or {}).get("scl_path"),
-        human_length_m=None,
-        human_width_m=None,
-        notes=notes_fb,
-        dimension_markers=ser_fb if ser_fb else None,
-        graphic_length_m=gmx.get("length_m") if gmx else None,
-        graphic_width_m=gmx.get("width_m") if gmx else None,
-        heading_deg_from_north=extra.get("heading_deg_from_north"),
-        heading_source=str(extra.get("heading_source"))
-        if extra.get("heading_source")
-        else None,
-        transhipment_side_by_side=is_twin_fb,
-    )
+    if not _is_negative:
+        is_twin_fb = st.session_state.get(f"hull_mode_{spot_k}", "single") == "twin"
+        el = float(fp[1]) if fp is not None else 0.0
+        ew = float(fp[0]) if fp is not None else 0.0
+        fsrc = fp[2] if fp is not None else "none"
+        ser_fb = (
+            serialize_markers_for_json(mk_save)
+            if isinstance(mk_save, list) and mk_save
+            else None
+        )
+        gl2 = gmx2.get("length_m") if gmx2 else None
+        gw2 = gmx2.get("width_m") if gmx2 else None
+        notes_fb = ""
+        if is_twin_fb and (gl2 is not None or gw2 is not None):
+            notes_fb = f"hull2 L×W est: {gl2 or '—'} × {gw2 or '—'} m (graphic)"
+        append_vessel_size_feedback(
+            labels_path,
+            tci_path=tci_loaded,
+            cx_full=cx_save,
+            cy_full=cy_save,
+            estimated_length_m=el,
+            estimated_width_m=ew,
+            footprint_source=str(fsrc),
+            scl_path=(meta or {}).get("scl_path"),
+            human_length_m=None,
+            human_width_m=None,
+            notes=notes_fb,
+            dimension_markers=ser_fb if ser_fb else None,
+            graphic_length_m=gmx.get("length_m") if gmx else None,
+            graphic_width_m=gmx.get("width_m") if gmx else None,
+            heading_deg_from_north=extra.get("heading_deg_from_north"),
+            heading_source=str(extra.get("heading_source"))
+            if extra.get("heading_source")
+            else None,
+            transhipment_side_by_side=is_twin_fb,
+        )
     st.session_state.pending_locator_candidates = remove_pending_near(
         st.session_state.pending_locator_candidates, cx, cy
     )

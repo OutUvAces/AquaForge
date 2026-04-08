@@ -15,7 +15,8 @@ import numpy as np
 from aquaforge.geodesy_bearing import geodesic_bearing_deg
 from aquaforge.pixels import distance_meters
 
-# Point roles in the review UI (wake is an image-level checkbox in the UI, not a dropped point).
+# Point roles in the review UI.  Wake markers form a polyline (≥2 points) tracing
+# the visible wake curve; the first point is placed nearest the stern.
 # ``end``: two hull endpoints when bow vs stern is unknown (keel length + ambiguous heading ±180°).
 MARKER_ROLES: tuple[str, ...] = ("bow", "stern", "end", "side", "bridge", "wake")
 
@@ -27,7 +28,7 @@ MARKER_ROLES_EXTENDED_STORAGE: frozenset[str] = frozenset(
 # Roles treated as “beam” samples: at most two kept (newest) per hull for ``side``; port+starboard pair.
 SIDE_LIKE_ROLES: frozenset[str] = frozenset({"side", "port", "starboard"})
 
-# Wake point markers — not for hull extent; image-level wake uses ``wake_present`` in review extra.
+# Wake point markers — excluded from hull extent computation.
 MARKER_ROLES_EXCLUDED_FROM_HULL_EXTENT: frozenset[str] = frozenset({"wake"})
 
 
@@ -116,7 +117,7 @@ MARKER_ROLE_LABELS: dict[str, str] = {
     "bow": "Bow/Fore",
     "stern": "Stern/Aft",
     "end": "Ends",
-    "side": "Side",
+    "side": "Sides",
     "bridge": "Bridge/Aft",
     "wake": "Wake tip",
 }
@@ -126,7 +127,7 @@ MARKER_ROLE_BUTTON_LABELS: dict[str, str] = {
     "bow": "Bow",
     "stern": "Stern",
     "end": "Ends",
-    "side": "Side",
+    "side": "Sides",
     "bridge": "Bridge",
     "wake": "Wake",
 }
@@ -417,6 +418,49 @@ def draw_markers_on_rgb(
             fill=color,
         )
     return np.asarray(im)
+
+
+def draw_markers_on_display(
+    display_img: np.ndarray,
+    markers: list[dict[str, Any]],
+    col_off: float,
+    row_off: float,
+    lb_meta: Any,
+) -> np.ndarray:
+    """Draw circle+cross markers on a letterboxed display image (matches overview-map style).
+
+    Parameters
+    ----------
+    display_img : H×W×3 uint8 letterboxed square image.
+    markers : list of marker dicts with ``x``, ``y``, ``role``, optional ``hull``.
+    col_off, row_off : crop origin in the coordinate system of the markers.
+        Pass 0, 0 if markers are already in crop-pixel coordinates.
+    lb_meta : ``LetterboxSquareMeta`` from ``letterbox_rgb_to_square``.
+    """
+    import cv2
+
+    if not markers:
+        return display_img
+    out = display_img.copy()
+    for m in markers:
+        role = m.get("role")
+        if role not in MARKER_COLORS_RGB:
+            continue
+        try:
+            x_fr, y_fr = float(m["x"]), float(m["y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        x_crop = x_fr - col_off
+        y_crop = y_fr - row_off
+        x_disp = x_crop * (lb_meta.nw / max(lb_meta.orig_w, 1)) + lb_meta.ox
+        y_disp = y_crop * (lb_meta.nh / max(lb_meta.orig_h, 1)) + lb_meta.oy
+        px, py = int(round(x_disp)), int(round(y_disp))
+        color = MARKER_COLORS_RGB[role]
+        hi = marker_hull_index(m)
+        outline = (255, 255, 255) if hi == 1 else (255, 60, 255)
+        cv2.circle(out, (px, py), 8, outline, 2)
+        cv2.drawMarker(out, (px, py), color, cv2.MARKER_CROSS, 14, 2)
+    return out
 
 
 def metrics_from_markers(

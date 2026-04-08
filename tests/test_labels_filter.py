@@ -58,7 +58,7 @@ class TestFilterUnlabeled(unittest.TestCase):
                 tci_path=tci_s,
                 cx_full=100.0,
                 cy_full=200.0,
-                review_category="not_vessel",
+                review_category="water",
             )
             cands = [(100.5, 200.5, 1.0)]
             out = filter_unlabeled_candidates(cands, lab, tci_s, tolerance_px=2.0)

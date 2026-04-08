@@ -1209,6 +1209,25 @@ def aquaforge_joint_loss(
                 )
     logs["loss_spec_recon"] = float(spec_loss.detach())
 
+    # Material category classification: CE on mat_cat_head with class weights.
+    # Class 0=vessel, 1=water, 2=cloud.  Masked samples (land/ambiguous, idx=-1) excluded.
+    w_mat_cat = float(sw.get("mat_cat", 0.3))
+    mat_cat_loss = torch.zeros((), device=dev, dtype=dt)
+    mat_cat_logit_t = out.get("mat_cat_logit")
+    if w_mat_cat > 0 and mat_cat_logit_t is not None:
+        mc_tgt = batch.get("mat_cat_idx")
+        mc_mask = batch.get("mat_cat_mask")
+        if mc_tgt is not None and mc_mask is not None:
+            valid_mc = mc_mask > 0
+            if valid_mc.any():
+                mc_weights = torch.tensor([1.0, 3.0, 3.0], device=dev, dtype=dt)
+                mat_cat_loss = F.cross_entropy(
+                    mat_cat_logit_t[valid_mc],
+                    mc_tgt[valid_mc],
+                    weight=mc_weights,
+                )
+    logs["loss_mat_cat"] = float(mat_cat_loss.detach())
+
     # Normalized weights (sum=1) already embed curriculum via base_stage; multiply losses only.
     total = total + float(weights["seg"]) * seg_loss
     total = total + float(weights["kp"]) * kp_loss
@@ -1219,6 +1238,7 @@ def aquaforge_joint_loss(
     total = total + w_type * type_loss
     total = total + w_chroma * chroma_loss
     total = total + w_spec * spec_loss
+    total = total + w_mat_cat * mat_cat_loss
 
     w = sw.get("kp", 1.0)
     if w > 0:

@@ -17,11 +17,14 @@ SOURCE_OVERVIEW_GRID_FEEDBACK = "overview_grid_feedback"
 # Stored in JSONL as ``review_category``. ``ambiguous`` is kept for analysis but skipped by training.
 REVIEW_CATEGORIES: tuple[tuple[str, str], ...] = (
     ("vessel", "Vessel"),
-    ("not_vessel", "Not a vessel (generic)"),
+    ("water", "Water"),
     ("cloud", "Cloud / cloud shadow"),
     ("land", "Land / coastline / mask edge"),
     ("ambiguous", "Unclear — saved but not used for training"),
 )
+
+# Legacy JSONL records may use "not_vessel"; treat as equivalent to "water" when reading.
+_LEGACY_CATEGORY_ALIASES: dict[str, str] = {"not_vessel": "water", "not_a_ship": "water"}
 
 # Stored in ``extra`` (review rows) or top-level on ``vessel_size_feedback`` rows when True.
 TRANSHIPMENT_SIDE_BY_SIDE_EXTRA_KEY = "transhipment_side_by_side"
@@ -240,7 +243,41 @@ def iter_reviews(path: Path) -> Iterator[dict[str, Any]]:
         for line in f:
             line = line.strip()
             if line:
-                yield json.loads(line)
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cat = rec.get("review_category", "")
+                if cat in _LEGACY_CATEGORY_ALIASES:
+                    rec["review_category"] = _LEGACY_CATEGORY_ALIASES[cat]
+                yield rec
+
+
+def load_land_exclusion_points(
+    labels_path: Path,
+    tci_path: str,
+) -> list[tuple[float, float]]:
+    """Return ``(cx_full, cy_full)`` for every ``review_category="land"`` record matching *tci_path*.
+
+    Used at detection time to suppress candidates near previously-reviewed land
+    false positives.  Matches on the filename stem so that absolute-path
+    differences between runs do not break deduplication.
+    """
+    from pathlib import PurePosixPath
+
+    stem = PurePosixPath(tci_path.replace("\\", "/")).name
+    points: list[tuple[float, float]] = []
+    for rec in iter_reviews(labels_path):
+        if rec.get("review_category") != "land":
+            continue
+        rec_tci = rec.get("tci_path", "")
+        if PurePosixPath(rec_tci.replace("\\", "/")).name != stem:
+            continue
+        try:
+            points.append((float(rec["cx_full"]), float(rec["cy_full"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return points
 
 
 def append_vessel_size_feedback(
@@ -394,7 +431,14 @@ def labeled_xy_points_for_tci(
     *,
     project_root: Path | None = None,
 ) -> list[tuple[float, float]]:
-    """All (cx_full, cy_full) already saved for this image in the JSONL."""
+    """All saved positions for this image in the JSONL.
+
+    Returns both the refined ``cx_full``/``cy_full`` **and** the original
+    candidate coordinates (``extra.cx_candidate``/``extra.cy_candidate``)
+    when present, so that ``filter_unlabeled_candidates`` can match against
+    whichever representation the detection queue uses.
+    """
+    seen: set[tuple[float, float]] = set()
     out: list[tuple[float, float]] = []
     for rec in iter_reviews(labels_path):
         if rec.get("record_type") == "vessel_size_feedback":
@@ -405,9 +449,21 @@ def labeled_xy_points_for_tci(
         if not p or not paths_same_underlying_file(str(p), tci_path, project_root=project_root):
             continue
         try:
-            out.append((float(rec["cx_full"]), float(rec["cy_full"])))
+            pt = (float(rec["cx_full"]), float(rec["cy_full"]))
+            if pt not in seen:
+                seen.add(pt)
+                out.append(pt)
         except (KeyError, TypeError, ValueError):
-            continue
+            pass
+        ex = rec.get("extra")
+        if isinstance(ex, dict):
+            try:
+                cpt = (float(ex["cx_candidate"]), float(ex["cy_candidate"]))
+                if cpt not in seen:
+                    seen.add(cpt)
+                    out.append(cpt)
+            except (KeyError, TypeError, ValueError):
+                pass
     return out
 
 

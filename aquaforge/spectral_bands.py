@@ -236,6 +236,9 @@ def bgr_and_extra_to_tensor(
 ) -> np.ndarray:
     """Stack BGR chip + extra bands into a single CHW float32 tensor.
 
+    Always returns a 12-channel tensor.  If *extra* is ``None``, channels 3-11
+    are zero-filled so the model always sees the same tensor layout.
+
     Parameters
     ----------
     bgr:
@@ -248,8 +251,7 @@ def bgr_and_extra_to_tensor(
     Returns
     -------
     np.ndarray
-        Float32 (C, out_size, out_size) where C = 3 if extra is None,
-        else C = 3 + N_EXTRA_BANDS = 12.
+        Float32 (N_TOTAL_CHANNELS, out_size, out_size) — always 12 channels.
     """
     import cv2
 
@@ -258,10 +260,8 @@ def bgr_and_extra_to_tensor(
     tci_chw = np.transpose(rgb, (2, 0, 1))  # (3, H, W)
 
     if extra is None:
-        return tci_chw
-
-    # Resize extra bands to out_size if needed (they should already be out_size from load_extra_bands_chip)
-    if extra.shape[1] != out_size or extra.shape[2] != out_size:
+        extra_r = np.zeros((N_EXTRA_BANDS, out_size, out_size), dtype=np.float32)
+    elif extra.shape[1] != out_size or extra.shape[2] != out_size:
         extra_r = np.stack([
             cv2.resize(extra[i], (out_size, out_size), interpolation=cv2.INTER_LINEAR)
             for i in range(extra.shape[0])

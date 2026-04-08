@@ -52,7 +52,7 @@ class AquaForgeSection:
     onnx_quantize: bool = False
     imgsz: int = 512
     chip_half: int = 320
-    in_channels: int = 3   # 3 = TCI only; 12 = TCI + all S2 extra bands (B08,B05-B07,B8A,B11,B12,B01,B10)
+    in_channels: int = 12  # 12-ch multispectral: TCI RGB + S2 extra bands (B08,B05-B07,B8A,B11,B12,B01,B09)
     conf_threshold: float = 0.05
     chip_batch_size: int = 6
     min_direct_heading_confidence: float = 0.35
