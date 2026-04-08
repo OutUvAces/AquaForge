@@ -1,115 +1,89 @@
 # AquaForge
 
-**Sentinel-2 vessel detection** with a **human-in-the-loop** Streamlit review UI. **AquaForge is the only end-to-end detector:** each scene uses **tiled sliding-window inference** (overlap, batched forward, NMS) for the review queue; each spot uses **full AquaForge decode** (mask, landmarks, heading, wake). There is no alternate candidate pipeline, bright-spot finder, or pre-detector routing outside [`unified/inference.py`](aquaforge/unified/inference.py).
+**Sentinel-2 vessel detection** with a **human-in-the-loop** Streamlit review UI. AquaForge uses tiled sliding-window inference (overlap, batched forward, NMS) for scene-wide detection, and per-spot decode for hull mask, landmarks, heading, wake, and spectral analysis — all 12 Sentinel-2 bands.
 
 - **Weights:** `data/models/aquaforge/aquaforge.pt` (and optional ONNX via YAML).
 - **Config (optional):** `data/config/detection.yaml` — copy from [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml). Override with `AF_DETECTION_CONFIG` or `VD_DETECTION_CONFIG`.
 - **Dependencies:** `pip install -r requirements.txt`. For training and on-GPU inference: `pip install -r requirements-ml.txt`.
 
-Core package: [`aquaforge/`](aquaforge/) — **`unified/inference.py`** holds the full tiled + spot-decode stack; **only** **`run_aquaforge_tiled_scene_triples`** and **`run_aquaforge_spot_decode`** are exported (`__all__`). **`unified/settings.py`** loads `data/config/detection.yaml`. Supporting modules: `evaluation.py`, `model_manager.py`, `web_ui.py`, `spot_panel.py`, `review_overlay.py`, `review_schema.py`, `spectral_extractor.py`, `vessel_markers.py`, `unified/spot_landmarks.py`, and packaged YAML under `aquaforge/config/`. Saved review **`extra`** detector audit keys use the **`aquaforge_*`** prefix (e.g. `aquaforge_confidence`, `aquaforge_detector_snapshot`).
-
 ---
 
-## Run the web UI
+## Quick start
 
-1. **Python 3.10+**, then `pip install -r requirements.txt` (and `requirements-ml.txt` for AquaForge).
+1. **Python 3.10+**, then `pip install -r requirements.txt` (and `requirements-ml.txt` for training).
 2. **`py -3 -m streamlit run app.py`** (or `run_web.bat`).
-3. Open the URL shown (often [http://localhost:8501](http://localhost:8501)).
+3. Open the URL shown (usually [http://localhost:8501](http://localhost:8501)).
 
 Entry point: [`app.py`](app.py) → `aquaforge.web_ui.main`.
 
 ---
 
-## Branding
+## Daily workflow
 
-JPEG logos live in [`aquaforge/static/images/`](aquaforge/static/images/) and are wired in [`aquaforge/web_ui.py`](aquaforge/web_ui.py):
-
-| Asset | Use in the UI |
-|--------|----------------|
-| [`AquaForge_small.jpg`](aquaforge/static/images/AquaForge_small.jpg) | Browser favicon (`st.set_page_config`); sidebar header |
-| [`AquaForge_text.jpg`](aquaforge/static/images/AquaForge_text.jpg) | Header mark beside the **AquaForge** title |
-| [`AquaForge_large.jpg`](aquaforge/static/images/AquaForge_large.jpg) | Centered hero under the title row (responsive, max-width 400px) |
-
-![AquaForge small wordmark](aquaforge/static/images/AquaForge_small.jpg)
-
-![AquaForge text logo](aquaforge/static/images/AquaForge_text.jpg)
-
-![AquaForge large hero](aquaforge/static/images/AquaForge_large.jpg)
-
-**If logos or the tab icon do not show:** confirm the three JPEGs exist under `aquaforge/static/images/` in the same tree you run Streamlit from, then **restart** the app (`Ctrl+C` and `py -3 -m streamlit run app.py`). For the **favicon**, browsers cache aggressively — try a hard refresh, another browser, or a private window. The UI uses **`st.logo`** (Streamlit 1.39+) for the small mark in the **upper-left** so it is visible even when the sidebar is collapsed; favicons are passed as **PIL images** so Windows paths are read reliably.
-
-### Daily review
-
-1. Open the **left panel** — choose a **scene** and **Refresh detection list** (full-scene AquaForge pass).
-2. Use **← Back** / **Next →** and **Vessel** / **Not a Vessel** / **Unsure**; labels append to `data/labels/ship_reviews.jsonl` (or your configured path).
+1. Choose a **scene** in the sidebar and press **Refresh detection list**.
+2. Review detections with **← Back** / **Next →**; classify as **Vessel** / **Not a Vessel** / **Unsure**.
 3. Place manual hull markers (bow, stern, sides) for accurate dimensions and heading.
-4. **Train AquaForge** (sidebar) runs `scripts/train_aquaforge.py` on that JSONL; **Training Results** shows the last run summary.
-5. **Fix saved labels** opens the review/edit page to correct markers on previously saved detections.
+4. Press **Train AquaForge** in the sidebar to retrain on your labels; **Training Results** shows the last run.
+5. Use **Fix saved labels** to revisit and correct markers on previously saved detections.
 
-### Shared UI (spot_panel)
+Labels are appended to `data/labels/ship_reviews.jsonl`.
 
-The classification page and the review/edit page share a single rendering component ([`aquaforge/spot_panel.py`](aquaforge/spot_panel.py)). UI changes (overlays, markers, measurements, spectral charts) automatically appear on both pages. Markers are stored in full-resolution raster coordinates and correctly transform across zoom levels.
+### First model
 
-### Image display
-
-Review chips and locator images use **global-max RGB normalization** (same as the overview map) so vessel colors appear natural — red hulls stay red. All 12 Sentinel-2 bands are used for spectral analysis and material prediction; the 3-band stretch is display-only.
-
-### Heading arrow
-
-A heading chevron (⇧) is drawn 50 m ahead of the bow when heading is known. The bow anchor follows a priority chain: manual bow marker → end markers → model landmarks → hull polygon edge. Heading is suppressed when the hull axis is 180°-ambiguous unless the spectral heading (PNR ≥ 2.0, within 45° of one axis candidate) can break the tie.
-
-### Improve the model
-
-1. Review regularly — priority / uncertainty metadata feeds the trainer.
-2. If weights are missing: save **two** vessel reviews, then **Advanced → Train first AquaForge model**, or run `py -3 scripts/train_aquaforge.py`. Training can auto-export ONNX unless `--no-export-onnx`.
+If no weights exist yet: save at least **two** vessel reviews, then use **Advanced → Train first AquaForge model** in the sidebar (or run `py -3 scripts/train_aquaforge.py` directly). Training auto-exports ONNX unless `--no-export-onnx`.
 
 ---
 
-## `detection.yaml` (AquaForge)
+## Architecture
 
-Tuning knobs live under **`aquaforge:`**: `chip_half`, `conf_threshold`, `chip_batch_size`, **`tiled_overlap_fraction`**, **`tiled_nms_iou`**, **`tiled_min_proposal_confidence`**, **`tiled_max_detections`**, ONNX paths, etc. See [`aquaforge/config/detection.example.yaml`](aquaforge/config/detection.example.yaml).
+| Module | Role |
+|--------|------|
+| [`unified/inference.py`](aquaforge/unified/inference.py) | Tiled scene scan + per-spot decode (the only detection path) |
+| [`unified/settings.py`](aquaforge/unified/settings.py) | Loads `detection.yaml` |
+| [`spot_panel.py`](aquaforge/spot_panel.py) | Shared UI renderer for both classification and review pages |
+| [`review_overlay.py`](aquaforge/review_overlay.py) | Chip/locator image reading, overlays, heading arrow |
+| [`spectral_extractor.py`](aquaforge/spectral_extractor.py) | 12-band spectral analysis and material prediction |
+| [`vessel_markers.py`](aquaforge/vessel_markers.py) | Manual marker placement, hull geometry, and derived metrics |
+| [`web_ui.py`](aquaforge/web_ui.py) | Main Streamlit application and sidebar |
+| [`training_review_spot_ui.py`](aquaforge/training_review_spot_ui.py) | Review/edit page for saved labels |
 
-Optional **`onnx_runtime`** and UI flags **`ui_require_checkbox_for_aquaforge_overlays`** / **`ui_lazy_aquaforge_overlays`** adjust ORT threads and lazy overlay behavior.
+The classification page and review/edit page share `spot_panel.py`, so UI changes (overlays, markers, measurements, spectral charts) appear on both automatically.
+
+### Image display
+
+Review chips use **global-max RGB normalization** (matching the overview map) so vessel colors look natural. The 3-band stretch is display-only — all 12 Sentinel-2 bands are used for spectral analysis and material prediction.
+
+### Heading arrow
+
+A chevron (⇧) is drawn 50 m ahead of the bow when heading is determined. Bow anchor priority: manual bow marker → end markers → model landmarks → hull polygon edge. The arrow is suppressed when the hull axis is 180°-ambiguous, unless the spectral heading (PNR ≥ 2.0, within 45°) can disambiguate.
+
+---
+
+## `detection.yaml`
+
+Tuning knobs live under **`aquaforge:`**: `chip_half`, `conf_threshold`, `chip_batch_size`, `tiled_overlap_fraction`, `tiled_nms_iou`, `tiled_min_proposal_confidence`, `tiled_max_detections`, ONNX paths, etc. See [`detection.example.yaml`](aquaforge/config/detection.example.yaml).
 
 ---
 
 ## Training
 
-- **AquaForge:** `py -3 scripts/train_aquaforge.py` — in-repo CNN only; checkpoints store **`meta["model_arch"]`: `cnn`**. Older checkpoints with any other `model_arch` value will not load — retrain with this script. Export with `scripts/export_aquaforge_onnx.py`. Detection is only `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
+```bash
+py -3 scripts/train_aquaforge.py
+```
 
-Optional **third-party pose ONNX** for keypoint hints is configured only via **`detection.yaml`** (`keypoints.*`); see [`scripts/export_shipstructure_to_onnx.py`](scripts/export_shipstructure_to_onnx.py) for export notes.
+Checkpoints store `meta["model_arch"]: "cnn"`. Export to ONNX with `scripts/export_aquaforge_onnx.py`.
 
 ---
 
 ## Benchmarking
 
-[`aquaforge/evaluation.py`](aquaforge/evaluation.py) scores **AquaForge** vessel probability and geometry against labeled JSONL (Pearson **r**, heading MAE, mask IoU where ground truth exists).
-
 ```bash
-py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl -o eval_report.txt
-py -3 scripts/run_detection_eval.py --summary-markdown -o eval_github.md
-py -3 scripts/run_detection_eval.py --demo --max-spots 8
-py -3 scripts/run_detection_eval.py --tiled-recall --tiled-recall-radius 96
 py -3 scripts/run_detection_eval.py --performance-md
-py -3 scripts/run_detection_eval.py --performance-md --jsonl data/labels/ship_reviews.jsonl
+py -3 scripts/run_detection_eval.py --project-root . --jsonl data/labels/ship_reviews.jsonl -o eval_report.txt
+py -3 scripts/run_detection_eval.py --tiled-recall --tiled-recall-radius 96
 ```
 
-Use `--detection-config` or set `AF_DETECTION_CONFIG` / `VD_DETECTION_CONFIG`. **`--profile`** prints cProfile roll-ups. **`--performance-md`** runs `evaluate_aquaforge_performance` only: writes [`eval_aquaforge.md`](eval_aquaforge.md) under `--project-root`, prints `Wrote …` and a one-line summary. Large JSONLs: optional **`--performance-max-binary-points N`** (caps F1 scoring for speed; noted in `eval_aquaforge.md`).
-
-### Current performance
-
-Copied from [`eval_aquaforge.md`](eval_aquaforge.md) after the last `--performance-md` run. Refresh with `py -3 scripts/run_detection_eval.py --performance-md` (same table shape).
-
-| Metric | Value |
-| :--- | ---: |
-| Small-vessel detection rate (L < 45 m) | N/A |
-| Heading MAE (deg) | 74.41 |
-| Mean L/W relative error | N/A |
-| Binary F1 (labeled points) | 0.3405 |
-| mAP | N/A (point supervision; use binary F1) |
-| Pearson r (P(vessel) vs label) | 0.2903 |
-
-*Snapshot metadata (see `eval_aquaforge.md` header): 187 geometry spots; small-vessel rate and mean L/W error need matching length/quad GT on your dataset.*
+Results are written to [`eval_aquaforge.md`](eval_aquaforge.md). Use `--detection-config` or set `AF_DETECTION_CONFIG` / `VD_DETECTION_CONFIG`.
 
 ---
 
@@ -120,44 +94,33 @@ docker build -f docker/training/Dockerfile -t aquaforge-train .
 docker run --rm -v "%cd%/data:/app/data" aquaforge-train
 ```
 
-Default image command runs a short [`scripts/train_aquaforge.py`](scripts/train_aquaforge.py) pass (`--epochs 4 --batch-size 2`). Override `CMD` for longer training. Run the Streamlit UI on the host.
+Default command runs a short training pass (`--epochs 4 --batch-size 2`). Override `CMD` for longer runs. Run the Streamlit UI on the host.
 
 ---
 
-## Automated Tests
-
-End-to-end tiled detection on a fixed Sentinel-2 TCI JP2 (many vessels, MGRS 48NUG) lives in
-[`tests/test_aquaforge.py`](tests/test_aquaforge.py). The heavy pass runs in
-[`tests/aquaforge_known_scene_worker.py`](tests/aquaforge_known_scene_worker.py) (subprocess + Torch warmup)
-for stable CPU inference. Requires `data/models/aquaforge` weights (or ONNX per `detection.yaml`). The scene file is
-[`tests/test_data/S2A_MSIL2A_20240613T031531_N0510_R118_T48NUG_20240613T080559_T48NUG_20240613T031531_TCI_10m.jp2`](tests/test_data/S2A_MSIL2A_20240613T031531_N0510_R118_T48NUG_20240613T080559_T48NUG_20240613T031531_TCI_10m.jp2).
+## Tests
 
 ```bash
-py -3 -m pytest tests/test_aquaforge.py::test_aquaforge_detects_vessels_on_known_scene -q
+py -3 -m pytest tests/test_aquaforge.py -q
+py -3 -m py_compile aquaforge/web_ui.py
 ```
 
-Project-local [`pytest.ini`](pytest.ini) disables autoloaded plugins that interfere with raster/Torch tests (`-p no:seleniumbase -p no:anyio`). Override `addopts` only if you intentionally need those plugins in this tree.
+End-to-end tiled detection test uses a fixed Sentinel-2 scene (MGRS 48NUG). Requires weights in `data/models/aquaforge/`.
 
 ---
 
-## Contributing & tests
+## Branding
 
-- Prefer changes that keep **one** detector path: `run_aquaforge_tiled_scene_triples` / `run_aquaforge_spot_decode` in `unified/inference.py`.
-- **`py -3 -m pytest`** and `py -3 -m py_compile` on touched modules.
+Logos live in [`aquaforge/static/images/`](aquaforge/static/images/):
+
+| Asset | Use |
+|-------|-----|
+| `AquaForge_small.jpg` | Favicon and sidebar header |
+| `AquaForge_text.jpg` | Header wordmark |
+| `AquaForge_large.jpg` | Hero image |
 
 ---
 
-## License / upstream
+## License
 
 This application code is provided as-is for research and operational labeling.
-
----
-
-## Migrating from the old remote
-
-```bash
-git remote set-url origin https://github.com/OutUvAces/AquaForge.git
-git remote -v
-git fetch origin
-git pull
-```
