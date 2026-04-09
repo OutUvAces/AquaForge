@@ -216,12 +216,17 @@ def paint_detection_marks(
     h_full: int,
     detections_fullres: list[tuple[float, float, float]],
     pending_fullres: list[tuple[float, float, float]] | None,
+    reviewed_fullres: list[tuple[float, float]] | None = None,
     detection_rgb: tuple[int, int, int] = (255, 95, 0),
     pending_rgb: tuple[int, int, int] = (40, 255, 140),
+    reviewed_rgb: tuple[int, int, int] = (153, 68, 255),
     detection_halo_rgb: tuple[int, int, int] = (255, 255, 255),
     mark_radius: int = 9,
 ) -> None:
-    """Detector picks: white halo + orange ring; queued: green ring (overview pixels)."""
+    """Paint marks on the overview mosaic.
+
+    Orange = model detected, green = manually queued, purple = already classified.
+    """
     from PIL import Image, ImageDraw
 
     h_m, w_m = rgb.shape[0], rgb.shape[1]
@@ -229,6 +234,24 @@ def paint_detection_marks(
     sy = h_m / float(max(h_full, 1))
     im = Image.fromarray(rgb)
     draw = ImageDraw.Draw(im)
+
+    reviewed_set: set[tuple[int, int]] = set()
+    if reviewed_fullres:
+        for rx, ry in reviewed_fullres:
+            ox = int(round(float(rx) * sx))
+            oy = int(round(float(ry) * sy))
+            reviewed_set.add((ox, oy))
+            r = mark_radius
+            draw.ellipse(
+                [ox - r - 2, oy - r - 2, ox + r + 2, oy + r + 2],
+                outline=(80, 30, 130),
+                width=2,
+            )
+            draw.ellipse(
+                [ox - r, oy - r, ox + r, oy + r],
+                outline=reviewed_rgb,
+                width=3,
+            )
 
     pending_set: set[tuple[int, int]] = set()
     if pending_fullres:
@@ -251,7 +274,7 @@ def paint_detection_marks(
     for cx, cy, _ in detections_fullres:
         ox = int(round(float(cx) * sx))
         oy = int(round(float(cy) * sy))
-        if (ox, oy) in pending_set:
+        if (ox, oy) in pending_set or (ox, oy) in reviewed_set:
             continue
         r = mark_radius
         draw.ellipse(
@@ -352,6 +375,7 @@ def build_overview_composite(
     file_mtime_ns: int,
     scl_path: str | Path | None,
     pending_fullres: list[tuple[float, float, float]] | None,
+    reviewed_fullres: list[tuple[float, float]] | None = None,
     max_overview_dim: int = DEFAULT_OVERVIEW_MAX_DIM,
     max_candidates: int = DEFAULT_OVERVIEW_MAX_CANDIDATES,
     min_water_fraction: float = 0.01,
@@ -359,7 +383,7 @@ def build_overview_composite(
     ds_factor: int = 4,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
-    Land-dimmed RGB + thick grid + AquaForge tiled detections / pending marks.
+    Land-dimmed RGB + thick grid + AquaForge tiled detections / pending / reviewed marks.
 
     ``ds_factor`` and ``min_water_fraction`` are unused (signature kept for callers); listing uses
     tiled AquaForge only. Returns ``(rgb_uint8, meta)``.
@@ -396,6 +420,7 @@ def build_overview_composite(
         h_full=h_full,
         detections_fullres=detections,
         pending_fullres=pending_fullres,
+        reviewed_fullres=reviewed_fullres,
     )
     frac_water = float(np.mean(water)) if water.size else 0.0
     grid_wf, grid_nc = grid_water_fraction_and_detection_counts(

@@ -744,8 +744,6 @@ class AquaForgePredictor:
             for det in part:
                 if det is None:
                     continue
-                if det.polygon_fullres is None or len(det.polygon_fullres) < 3:
-                    continue
                 raw_dets.append(det)
 
         merged = nms_aquaforge_spot_results(raw_dets, iou_threshold=nms_iou)

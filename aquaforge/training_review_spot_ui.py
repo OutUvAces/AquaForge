@@ -500,11 +500,4 @@ def merge_spot_session_into_record(
             ex, tci_s, float(rec["cx_full"]), float(rec["cy_full"])
         )
 
-    # Material category override from training review editor.
-    _mat_ov = st.session_state.get(f"_vd_mat_override_{ctx.record_id[:24]}", "auto")
-    if _mat_ov and _mat_ov != "auto":
-        ex["human_material_category"] = str(_mat_ov)
-    elif "human_material_category" in ex and _mat_ov == "auto":
-        ex.pop("human_material_category", None)
-
     rec["extra"] = ex

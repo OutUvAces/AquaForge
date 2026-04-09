@@ -506,7 +506,7 @@ def _render_catalog_panel() -> None:
                             )
                             if outcome.tci_path:
                                 download_extra_bands_for_tci(outcome.tci_path, token=token)
-                                download_chroma_bands_for_tci(outcome.tci_path, ["B02", "B04"], token=token)
+                                download_chroma_bands_for_tci(outcome.tci_path, ["B02", "B03", "B04"], token=token)
                             st.success(
                                 f"{format_item_label(picked)}\n\n"
                                 f"{tci_scl_download_summary(outcome)}"
@@ -561,7 +561,7 @@ def _render_catalog_panel() -> None:
                         )
                         if outcome.tci_path:
                             download_extra_bands_for_tci(outcome.tci_path, token=token)
-                            download_chroma_bands_for_tci(outcome.tci_path, ["B02", "B04"], token=token)
+                            download_chroma_bands_for_tci(outcome.tci_path, ["B02", "B03", "B04"], token=token)
                         st.success(
                             f"{format_item_label(one)}\n\n{tci_scl_download_summary(outcome)}"
                         )
@@ -2478,6 +2478,9 @@ def _render_hundred_cell_overview(
         try:
             mtime_ns = tci_p.stat().st_mtime_ns
             det_ov = load_aquaforge_settings(ROOT)
+            _reviewed_pts = labeled_xy_points_for_tci(
+                labels_path, str(tci_jp2), project_root=ROOT,
+            )
             ov_rgb, ov_meta = build_overview_composite(
                 tci_p,
                 project_root=ROOT,
@@ -2485,6 +2488,7 @@ def _render_hundred_cell_overview(
                 ds_factor=ds_factor,
                 scl_path=scl_opt,
                 pending_fullres=st.session_state.pending_locator_candidates,
+                reviewed_fullres=_reviewed_pts if _reviewed_pts else None,
                 max_overview_dim=DEFAULT_OVERVIEW_MAX_DIM,
                 max_candidates=DEFAULT_OVERVIEW_MAX_CANDIDATES,
                 min_water_fraction=MIN_OPEN_WATER_FRACTION,
@@ -2582,8 +2586,8 @@ def _render_hundred_cell_overview(
         ov_key_pin = hashlib.sha256(f"{tci_loaded}|ovpin".encode()).hexdigest()[:18]
         st.caption(
             "**Click any cell** to zoom in and queue vessel spots at full resolution · "
-            "**Orange** = detector centers · **violet tint** = tile has saved QA feedback · "
-            "select a **tile mode** above to record QA feedback instead of zooming."
+            "**Orange** = detected · **Purple** = already classified · "
+            "**Green** = manually queued · **violet tint** = tile QA feedback."
         )
         click_tile = streamlit_image_coordinates(
             ov_rgb,
@@ -2797,6 +2801,18 @@ def _render_tile_zoom_panel(
         st.warning(f"Could not read tile crop: {e}")
         return
 
+    _reviewed_pts = labeled_xy_points_for_tci(
+        labels_path, tci_loaded, project_root=ROOT,
+    )
+    reviewed_in_cell: set[tuple[int, int]] = set()
+    for rx, ry in _reviewed_pts:
+        if col0 <= float(rx) < col1 and row0 <= float(ry) < row1:
+            px = int(round(float(rx) - col0))
+            py = int(round(float(ry) - row0))
+            reviewed_in_cell.add((px, py))
+            cv2.circle(tile_rgb, (px, py), 9, (153, 68, 255), 2)
+            cv2.circle(tile_rgb, (px, py), 3, (153, 68, 255), -1)
+
     tile_dets_in_cell = [
         (float(d[0]), float(d[1]), float(d[2]))
         for d in dets_fullres
@@ -2805,6 +2821,8 @@ def _render_tile_zoom_panel(
     for dx, dy, _ds in tile_dets_in_cell:
         px = int(round(dx - col0))
         py = int(round(dy - row0))
+        if (px, py) in reviewed_in_cell:
+            continue
         cv2.circle(tile_rgb, (px, py), 7, (0, 165, 255), 2)
         cv2.circle(tile_rgb, (px, py), 2, (0, 165, 255), -1)
 
@@ -2816,11 +2834,12 @@ def _render_tile_zoom_panel(
             cv2.circle(tile_rgb, (px, py), 9, (0, 255, 0), 2)
             cv2.drawMarker(tile_rgb, (px, py), (0, 255, 0), cv2.MARKER_CROSS, 12, 2)
 
+    _n_reviewed_tile = len(reviewed_in_cell)
     st.caption(
         f"**{crop_w}×{crop_h}** px at full resolution · "
-        f"**{len(tile_dets_in_cell)}** detection(s) (orange) · "
-        "**Click** to queue a vessel spot (green cross) · "
-        "click the overview grid above to switch tiles."
+        f"**{len(tile_dets_in_cell) - _n_reviewed_tile}** unreviewed (orange) · "
+        f"**{_n_reviewed_tile}** classified (purple) · "
+        "**Click** to queue a vessel spot (green cross)."
     )
 
     zoom_pin_key = hashlib.sha256(
@@ -2853,7 +2872,7 @@ def _render_tile_zoom_panel(
                 if "pending_locator_candidates" not in st.session_state:
                     st.session_state.pending_locator_candidates = []
                 st.session_state.pending_locator_candidates.append(
-                    (cx_full, cy_full, 0.0)
+                    (cx_full, cy_full, LOCATOR_MANUAL_SCORE)
                 )
                 st.success(
                     f"Queued vessel spot at full-res ({cx_full:.0f}, {cy_full:.0f}). "
@@ -4198,10 +4217,6 @@ def _commit_review_label(
                 extra["aquaforge_vessel_material_confidence"] = af_spot_save["aquaforge_vessel_material_confidence"]
         if af_spot_save.get("aquaforge_scl_chip_stats") is not None:
             extra["aquaforge_scl_chip_stats"] = af_spot_save["aquaforge_scl_chip_stats"]
-    # Material category override from UI selector (applies to all categories).
-    _mat_ov = st.session_state.get(f"_vd_mat_override_{spot_k}", "auto")
-    if _mat_ov and _mat_ov != "auto":
-        extra["human_material_category"] = str(_mat_ov)
     # Learned mat_cat outputs (saved for both positive and negative reviews).
     for _mck in ("aquaforge_mat_cat_label", "aquaforge_mat_cat_confidence"):
         _mcv = af_spot_save.get(_mck)

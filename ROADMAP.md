@@ -55,6 +55,25 @@ roughly ordered by expected effort within each section.
   ± degrees. Display alongside the point estimate in the review UI and
   export cards.
 
+## Multi-Vessel / Dense Scenes
+
+- [ ] **Multi-contour extraction** — Change `_mask_to_polygon_fullres` to
+  return all valid contours instead of only the largest, and have
+  `_decode_batch_index` emit multiple `AquaForgeSpotResult` objects per chip.
+  Handles the common case where two nearby (but not touching) vessels produce
+  separate mask blobs in the same tile. ~30 lines in `inference.py`.
+
+- [ ] **Dense-scene tile mode** — Add a configurable smaller tile size
+  (e.g. `chip_half=160`) for harbor/anchorage scenes where vessels cluster
+  within a few hundred metres. Trades compute for better single-vessel-per-tile
+  isolation. Config-level change in `detection.yaml`.
+
+- [ ] **Multi-instance segmentation head** — Replace the 1-channel seg mask
+  with a K-channel instance mask (e.g. K=3) so the model can predict up to K
+  independent hull outlines per chip. Requires Hungarian-matching loss,
+  multi-vessel labeled training data, and per-instance attribute heads.
+  Significant architectural change.
+
 ## Spectral / Detection
 
 - [ ] **Shipping lane context** — Incorporate AIS-derived shipping lane density

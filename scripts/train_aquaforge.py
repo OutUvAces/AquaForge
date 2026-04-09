@@ -41,6 +41,8 @@ import os
 import random
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -86,6 +88,38 @@ class _AquaForgeDS(_Dataset):
 def _collate_list(batch: list) -> list:
     """Module-level collate: keep each item as-is in a list (picklable for spawn)."""
     return list(batch)
+
+
+def _safe_torch_save(obj: object, path: Path, retries: int = 4) -> None:
+    """Write checkpoint via temp file + rename to avoid locking conflicts with
+    OneDrive / the Streamlit app holding the file open."""
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(retries):
+        fd, tmp = tempfile.mkstemp(
+            dir=str(path.parent), suffix=".tmp", prefix=path.stem + "_"
+        )
+        try:
+            with os.fdopen(fd, "wb") as fp:
+                torch.save(obj, fp)
+            os.replace(tmp, str(path))
+            return
+        except PermissionError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            if attempt < retries - 1:
+                wait = 2.0 * (attempt + 1)
+                print(
+                    f"  [save] {path.name} locked, retrying in {wait:.0f}s "
+                    f"({attempt + 1}/{retries})…",
+                    flush=True,
+                )
+                time.sleep(wait)
+            else:
+                raise
 
 
 def main() -> None:
@@ -170,6 +204,17 @@ def main() -> None:
         "--no-export-onnx",
         action="store_true",
         help="Skip automatic export_aquaforge_onnx.py after training (default: export when script exists).",
+    )
+    ap.add_argument(
+        "--no-scheduler",
+        action="store_true",
+        help="Disable cosine LR decay; use fixed learning rate for all epochs.",
+    )
+    ap.add_argument(
+        "--reset-curriculum",
+        action="store_true",
+        help="Ignore epochs_trained from checkpoint for curriculum scheduling "
+             "(treat this run as epoch 0..N instead of continuing from prior total).",
     )
     ap.add_argument(
         "--backfill",
@@ -394,6 +439,10 @@ def main() -> None:
     else:
         print("  no existing checkpoint — starting from random weights", flush=True)
 
+    if getattr(args, "reset_curriculum", False):
+        _epochs_previously_trained = 0
+        print("  --reset-curriculum: curriculum starts from epoch 0", flush=True)
+
     # ── torch.compile (PyTorch 2.0+) ──────────────────────────────────────
     # Compiles the model graph with Triton kernels when available; gives
     # 10–30% throughput improvement with no code changes at call sites.
@@ -429,11 +478,21 @@ def main() -> None:
         except Exception as _oe:
             print(f"  optimizer state restore skipped ({_oe})", flush=True)
 
+    _use_scheduler = not bool(args.no_scheduler)
+    _scheduler = None
+    if _use_scheduler:
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        _scheduler = CosineAnnealingLR(opt, T_max=int(args.epochs), eta_min=1e-5)
+        print(f"  scheduler=CosineAnnealingLR  lr={lr_head} -> 1e-5 over {args.epochs} epochs", flush=True)
+
     teacher_budget = int(args.teacher_per_epoch)
     distill_w = float(args.teacher_distill_weight)
     use_balance = not bool(args.no_dynamic_balance)
     pseudo_n = int(args.pseudo_per_epoch)
     pseudo_w = float(args.pseudo_mix_weight)
+
+    best_score = -1.0
+    best_ckpt_path = ckpt_path.parent / "aquaforge_best.pt"
 
     _total_curriculum_epochs = _epochs_previously_trained + int(args.epochs)
     for epoch in range(int(args.epochs)):
@@ -486,17 +545,19 @@ def main() -> None:
                     "mat_cat_logit": mc_l,
                 }
                 loss, logs = aquaforge_joint_loss(pred, batch_dict, sw_eff)
+            _LOSS_CLAMP = 10.0
+            if float(loss.detach().item()) > _LOSS_CLAMP:
+                loss = loss * (_LOSS_CLAMP / float(loss.detach().item()))
             opt.zero_grad()
             if _scaler is not None:
                 _scaler.scale(loss).backward()
-                # Unscale before clip so the clip threshold is in the original scale
                 _scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 _scaler.step(opt)
                 _scaler.update()
             else:
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
             total_loss += float(logs.get("loss_total", 0.0))
             n_batches += 1
@@ -563,6 +624,7 @@ def main() -> None:
                 )
                 opt.zero_grad()
                 (pseudo_w * loss_st).backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 opt.step()
                 tm = float(trust.mean().item())
                 print(
@@ -622,16 +684,37 @@ def main() -> None:
             "state_dict": _base.state_dict(),
             "optimizer_state": opt.state_dict(),
         }
-        with open(ckpt_path, "wb") as _fp:
-            torch.save(_ckpt_mid, _fp)
+        _safe_torch_save(_ckpt_mid, ckpt_path)
         print(f"  checkpoint saved (epoch {epoch + 1})", flush=True)
+
+        if t_score > best_score:
+            best_score = t_score
+            _safe_torch_save(_ckpt_mid, best_ckpt_path)
+            print(f"  ** new best score={best_score:.1f} (epoch {epoch + 1})", flush=True)
+
+        if _scheduler is not None:
+            _scheduler.step()
+
+    # ── Restore best checkpoint ─────────────────────────────────────────────
+    _base_model = getattr(model, "_orig_mod", model)
+    if best_ckpt_path.is_file() and best_score > 0:
+        try:
+            _best_data = torch.load(str(best_ckpt_path), map_location=device, weights_only=False)
+            _base_model.load_state_dict(_best_data["state_dict"])
+            _best_ep = _best_data.get("meta", {}).get("epoch", "?")
+            print(
+                f"  restored best checkpoint (epoch {_best_ep}, score={best_score:.1f}) for final export",
+                flush=True,
+            )
+            del _best_data
+        except Exception as _be:
+            print(f"  best checkpoint restore failed ({_be}); using final epoch weights", flush=True)
 
     # ── BatchNorm calibration ──────────────────────────────────────────────
     # torch.compile (especially reduce-overhead mode) may run fused BN ops
     # that don't write running_mean/running_var back to the original module.
     # Re-calibrate by doing one full forward pass over the training data with
     # the underlying (non-compiled) model in train mode + no grad.
-    _base_model = getattr(model, "_orig_mod", model)
     _any_bn_bad = any(
         isinstance(m, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d))
         and m.running_mean is not None
@@ -683,8 +766,7 @@ def main() -> None:
         "state_dict": _save_sd,
         "optimizer_state": opt.state_dict(),
     }
-    with open(ckpt_path, "wb") as _fp:
-        torch.save(_ckpt, _fp)
+    _safe_torch_save(_ckpt, ckpt_path)
     print(f"Wrote {ckpt_path}", flush=True)
 
     if not bool(args.no_export_onnx):

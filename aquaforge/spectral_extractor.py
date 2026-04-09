@@ -206,27 +206,36 @@ def extract_spectral_signature_from_disk(
         # Build 12-channel chip: [R, G, B, B08, B05, B06, B07, B8A, B11, B12, B01, B09]
         chip = np.zeros((N_BANDS, out_size, out_size), dtype=np.float32)
 
-        # Channels 0-2: TCI (already uint8 BGR → convert to float RGB)
         col_off = max(0, int(round(cx - chip_half)))
         row_off = max(0, int(round(cy - chip_half)))
         w_px = 2 * chip_half
         h_px = 2 * chip_half
 
-        with rasterio.open(tci_path) as ds:
-            col_off = max(0, min(col_off, ds.width - 1))
-            row_off = max(0, min(row_off, ds.height - 1))
-            w_px = min(w_px, ds.width - col_off)
-            h_px = min(h_px, ds.height - row_off)
-            if w_px < 4 or h_px < 4:
+        # Channels 0-2: L2A reflectance bands B04 (Red), B03 (Green), B02 (Blue).
+        # These are always downloaded alongside TCI by the scene acquisition pipeline.
+        _VIS_BANDS = [("B04_10m", 0), ("B03_10m", 1), ("B02_10m", 2)]
+        for _vis_suffix, _vis_ch in _VIS_BANDS:
+            _vis_path = derive_band_path(tci_path, _vis_suffix)
+            if not _vis_path.is_file():
                 return None
-            win = Window(col_off, row_off, w_px, h_px)
-            rgb = ds.read([1, 2, 3], window=win,
-                          out_shape=(3, out_size, out_size),
-                          resampling=Resampling.bilinear)
-        # TCI is stored as R, G, B (bands 1,2,3); convert uint8 → [0,1]
-        chip[0] = np.clip(rgb[0].astype(np.float32) / 255.0, 0.0, 1.0)  # R (B04 proxy)
-        chip[1] = np.clip(rgb[1].astype(np.float32) / 255.0, 0.0, 1.0)  # G (B03 proxy)
-        chip[2] = np.clip(rgb[2].astype(np.float32) / 255.0, 0.0, 1.0)  # B (B02 proxy)
+            try:
+                with rasterio.open(_vis_path) as vds:
+                    vc0 = max(0, min(int(round(cx - chip_half)), vds.width - 1))
+                    vr0 = max(0, min(int(round(cy - chip_half)), vds.height - 1))
+                    vw = min(w_px, vds.width - vc0)
+                    vh = min(h_px, vds.height - vr0)
+                    if vw < 4 or vh < 4:
+                        return None
+                    varr = vds.read(
+                        1, window=Window(vc0, vr0, vw, vh),
+                        out_shape=(out_size, out_size),
+                        resampling=Resampling.bilinear,
+                    )
+                    chip[_vis_ch] = np.clip(
+                        varr.astype(np.float32) / S2_L2A_SCALE, 0.0, 1.0
+                    )
+            except Exception:
+                return None
 
         # Channels 3-11: extra spectral bands
         for ch_idx, bd in enumerate(EXTRA_BANDS):

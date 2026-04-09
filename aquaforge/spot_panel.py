@@ -1132,29 +1132,6 @@ def render_spot_panel(
                 dir_active=bool(geo.bow_stern_segment_crop),
             )
 
-        # ── Material override selector ─────────────────────────────────
-        _mat_hint = source_dict.get("aquaforge_material_hint") if source_dict else None
-        _mc_detected = source_dict.get("aquaforge_mat_cat_label") if source_dict else None
-        if _mat_hint or _mc_detected:
-            _mat_override_key = f"_vd_mat_override_{spot_key}"
-            if _mat_override_key not in st.session_state:
-                st.session_state[_mat_override_key] = "auto"
-            _mat_options = ["auto", "vessel", "water", "cloud"]
-            _mat_labels = {
-                "auto": "Auto (use model)",
-                "vessel": "Vessel material",
-                "water": "Water",
-                "cloud": "Cloud",
-            }
-            st.selectbox(
-                "Correct material category",
-                options=_mat_options,
-                format_func=lambda x: _mat_labels.get(x, x),
-                key=_mat_override_key,
-                help="Override the model's material category if incorrect. "
-                     "Saved with your review to improve future predictions.",
-            )
-
     # ==================================================================
     #  Marker controls
     # ==================================================================
@@ -1234,11 +1211,6 @@ def render_spot_panel(
         ):
             st.session_state[dim_key] = []
             st.rerun()
-    if is_twin:
-        st.caption(
-            f"Placing on **hull {int(st.session_state.get(active_hull_key, 1))}**."
-        )
-
     # ── Nav row (aligned under marker buttons) ────────────────────────
     _n_marker_cols = len(MARKER_ROLES) + 1
     _nav_cols = st.columns(_n_marker_cols)
